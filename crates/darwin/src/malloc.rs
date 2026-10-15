@@ -17,10 +17,12 @@
 //! This process's `malloc` is mimalloc (the runtime links it with `override`),
 //! and the zones this module creates are mimalloc heaps:
 //!
-//! * the default zone, `DefaultMallocZone`, is mimalloc's main heap - the one
-//!   the host's own `malloc` allocates from. A block this runtime's frameworks
-//!   allocate with the host's `malloc` and hand to the guest is therefore one the
-//!   default zone owns, and the guest's `free` finds it.
+//! * the default zone, `DefaultMallocZone`, allocates from a heap of its own,
+//!   and also answers for mimalloc's main heap - the one the host's own `malloc`
+//!   allocates from. A block this runtime's frameworks allocate with the host's
+//!   `malloc` and hand to the guest is therefore one the default zone owns, and
+//!   the guest's `free` finds it. Its own heap is what lets its statistics count
+//!   the guest's blocks and not the host's.
 //! * `malloc_default_purgeable_zone` and every `malloc_create_zone` get a heap of
 //!   their own, so that `malloc_zone_from_ptr` can tell their blocks apart and
 //!   `malloc_destroy_zone` can release everything a zone holds at once.
@@ -42,6 +44,11 @@
 //!   path, which is what libmalloc does for a zone older than 16.
 //! * `enumerator` reports `KERN_FAILURE`: mimalloc cannot be walked from outside
 //!   while other threads allocate.
+//! * Statistics count live blocks and their usable sizes, as libmalloc's do,
+//!   but `size_allocated` repeats `size_in_use`, since mimalloc does not say how
+//!   much memory each heap holds. The default zone keeps no high-water mark, and
+//!   reports `max_size_in_use` as zero, as libmalloc's nano and xzone allocators
+//!   do.
 //!
 //! ## Guest zones
 //!
@@ -53,7 +60,9 @@
 
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use std::sync::Once;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicIsize, AtomicPtr, AtomicU32, AtomicUsize, Ordering,
+};
 
 use libmimalloc_sys as mi;
 
@@ -390,25 +399,30 @@ fn main_heap() -> *mut mi::mi_heap_t {
     MAIN_HEAP.load(Ordering::Relaxed)
 }
 
+/// The default zone's heap and the purgeable zone's, once each has one: the
+/// two zones that live for the rest of the process, which any zone may be
+/// handed a block of. Kept apart from the zones' own `heap` fields, which are
+/// written once while nothing else can reach the zone and read freely after.
+static DEFAULT_HEAP: AtomicPtr<mi::mi_heap_t> = AtomicPtr::new(std::ptr::null_mut());
+static PURGEABLE_HEAP: AtomicPtr<mi::mi_heap_t> = AtomicPtr::new(std::ptr::null_mut());
+
 /// A request too small to be a Darwin block, raised to one.
 fn quantum(size: usize) -> usize {
     size.max(QUANTUM)
 }
 
-/// Whether `heap` (null for the main heap) made the block at `ptr`.
-fn heap_owns(heap: *mut mi::mi_heap_t, ptr: *const c_void) -> bool {
+/// The heap that made the block at `ptr`, or null if no mimalloc heap did.
+fn heap_of(ptr: *const c_void) -> *mut mi::mi_heap_t {
     if ptr.is_null() {
-        return false;
+        return std::ptr::null_mut();
     }
     // SAFETY: a page-map lookup, defined for any address.
-    let of = unsafe { mi_heap_of(ptr) };
-    !of.is_null() && of == if heap.is_null() { main_heap() } else { heap }
+    unsafe { mi_heap_of(ptr) }
 }
 
 /// Whether any mimalloc heap made the block at `ptr`.
 fn mimalloc_owns(ptr: *const c_void) -> bool {
-    // SAFETY: as [`heap_owns`].
-    !ptr.is_null() && !unsafe { mi_heap_of(ptr) }.is_null()
+    !heap_of(ptr).is_null()
 }
 
 // ---------------------------------------------------------------------------
@@ -420,19 +434,30 @@ fn mimalloc_owns(ptr: *const c_void) -> bool {
 #[repr(C)]
 struct HostZone {
     zone: MallocZone,
-    /// The heap, or null for mimalloc's main heap.
+    /// The heap, or null for mimalloc's main heap - which only the default
+    /// zone allocates from, and only until [`init`] gives it its own.
     heap: *mut mi::mi_heap_t,
-    /// Whether the counters below are kept. Not for the default zone, where an
-    /// atomic on every `malloc` and `free` of every thread costs more than the
-    /// numbers are worth; its statistics come from mimalloc's own.
-    counted: bool,
+    count: Count,
+    /// The live totals, for [`Count::Shared`].
     blocks: AtomicUsize,
     bytes: AtomicUsize,
     peak: AtomicUsize,
 }
 
+/// Where a zone keeps the live totals its `statistics` reports.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Count {
+    /// In the zone's own atomics, with a high-water mark: a created zone, or
+    /// the purgeable one.
+    Shared,
+    /// In per-thread [`Tally`]s, of which there is one set: the default zone,
+    /// which every thread's `malloc` and `free` reach, and where one shared
+    /// counter would be a cache line every thread writes on every call.
+    PerThread,
+}
+
 impl HostZone {
-    const fn new(name: *const c_char, counted: bool) -> HostZone {
+    const fn new(name: *const c_char, count: Count) -> HostZone {
         HostZone {
             zone: MallocZone {
                 reserved1: std::ptr::null_mut(),
@@ -462,7 +487,7 @@ impl HostZone {
                 malloc_type_malloc_with_options: None,
             },
             heap: std::ptr::null_mut(),
-            counted,
+            count,
             blocks: AtomicUsize::new(0),
             bytes: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
@@ -477,25 +502,214 @@ impl HostZone {
         unsafe { &*zone.cast::<HostZone>() }
     }
 
+    /// Whether this zone answers for the block at `ptr`: one its heap made,
+    /// and for the default zone also one of mimalloc's main heap.
+    fn claims(&self, ptr: *const c_void) -> bool {
+        let heap = heap_of(ptr);
+        if heap.is_null() {
+            return false;
+        }
+        let own = if self.heap.is_null() {
+            main_heap()
+        } else {
+            self.heap
+        };
+        heap == own || (std::ptr::eq(self, &raw const DEFAULT_ZONE) && heap == main_heap())
+    }
+
+    /// The zone whose totals hold `block`: the one whose heap made it, if that
+    /// is this zone, the default zone or the purgeable one. A block of the main
+    /// heap is the host's and is counted nowhere. One of another created zone,
+    /// handed to the wrong zone, is not looked for and stays in its own zone's
+    /// totals; libmalloc's scalable zone would not survive that call.
+    fn counter_of(&self, block: *const c_void) -> Option<&HostZone> {
+        let heap = heap_of(block);
+        if heap.is_null() {
+            return None;
+        }
+        if heap == self.heap {
+            return Some(self);
+        }
+        // SAFETY: zones that live for the rest of the process.
+        unsafe {
+            if heap == DEFAULT_HEAP.load(Ordering::Acquire) {
+                return Some(HostZone::of(default_host_zone()));
+            }
+            if heap == PURGEABLE_HEAP.load(Ordering::Acquire) {
+                return Some(HostZone::of((&raw mut PURGEABLE_ZONE).cast()));
+            }
+        }
+        None
+    }
+
+    /// Count `block`, which mimalloc just returned, in the zone whose heap it
+    /// is in.
     fn allocated(&self, block: *mut c_void) -> *mut c_void {
-        if self.counted && !block.is_null() {
+        if let Some(zone) = self.counter_of(block) {
             // SAFETY: a live block mimalloc just returned.
-            let size = unsafe { mi::mi_usable_size(block) };
-            self.blocks.fetch_add(1, Ordering::Relaxed);
-            let now = self.bytes.fetch_add(size, Ordering::Relaxed) + size;
-            self.peak.fetch_max(now, Ordering::Relaxed);
+            zone.count_in(unsafe { mi::mi_usable_size(block) });
         }
         block
     }
 
-    /// Account for `block` leaving the zone, if it is this zone's.
+    /// Take `block`, which is about to be freed or moved, out of its zone's
+    /// totals.
     fn releasing(&self, block: *const c_void) {
-        if self.counted && heap_owns(self.heap, block) {
-            // SAFETY: a live mimalloc block, about to be freed.
-            let size = unsafe { mi::mi_usable_size(block) };
-            self.blocks.fetch_sub(1, Ordering::Relaxed);
-            self.bytes.fetch_sub(size, Ordering::Relaxed);
+        if let Some(zone) = self.counter_of(block) {
+            // SAFETY: a live mimalloc block.
+            zone.count_out(unsafe { mi::mi_usable_size(block) });
         }
+    }
+
+    fn count_in(&self, size: usize) {
+        match self.count {
+            Count::Shared => {
+                self.blocks.fetch_add(1, Ordering::Relaxed);
+                let now = self.bytes.fetch_add(size, Ordering::Relaxed) + size;
+                self.peak.fetch_max(now, Ordering::Relaxed);
+            }
+            Count::PerThread => Tally::add(1, size as isize),
+        }
+    }
+
+    fn count_out(&self, size: usize) {
+        match self.count {
+            Count::Shared => {
+                self.blocks.fetch_sub(1, Ordering::Relaxed);
+                self.bytes.fetch_sub(size, Ordering::Relaxed);
+            }
+            Count::PerThread => Tally::add(-1, -(size as isize)),
+        }
+    }
+
+    /// Live blocks, live bytes, and the most live bytes there have been - zero
+    /// where that is not kept, as libmalloc's nano and xzone allocators report
+    /// it too.
+    fn totals(&self) -> (usize, usize, usize) {
+        match self.count {
+            Count::Shared => (
+                self.blocks.load(Ordering::Relaxed),
+                self.bytes.load(Ordering::Relaxed),
+                self.peak.load(Ordering::Relaxed),
+            ),
+            Count::PerThread => {
+                let (blocks, bytes) = Tally::totals();
+                (blocks, bytes, 0)
+            }
+        }
+    }
+}
+
+/// One thread's share of the default zone's live totals.
+///
+/// Only the thread holding a tally writes it, with a plain load and store
+/// rather than a locked add. A block freed on another thread than the one that
+/// made it comes off the freeing thread's tally, so one tally alone may be
+/// negative, and only their sum means anything. A thread that exits leaves its
+/// tally, numbers and all, to the next thread that needs one: the blocks it
+/// counted are still live. So there are only ever as many tallies as there
+/// were threads running at once.
+#[repr(align(64))]
+struct Tally {
+    blocks: AtomicIsize,
+    bytes: AtomicIsize,
+    /// Whether a live thread holds this tally.
+    held: AtomicBool,
+    next: AtomicPtr<Tally>,
+}
+
+/// Every tally made, newest first. Tallies are never freed.
+static TALLIES: AtomicPtr<Tally> = AtomicPtr::new(std::ptr::null_mut());
+
+/// The tally of a thread already past its thread-local destructors, which may
+/// still `free`: shared, so it takes locked adds.
+static SPARE_TALLY: Tally = Tally::new();
+
+/// A thread's claim on a tally, given back when the thread exits.
+struct Held(&'static Tally);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.held.store(false, Ordering::Release);
+    }
+}
+
+thread_local! {
+    static HELD: Held = Held(Tally::claim());
+}
+
+impl Tally {
+    const fn new() -> Tally {
+        Tally {
+            blocks: AtomicIsize::new(0),
+            bytes: AtomicIsize::new(0),
+            held: AtomicBool::new(false),
+            next: AtomicPtr::new(std::ptr::null_mut()),
+        }
+    }
+
+    /// A tally no live thread holds, or a new one.
+    fn claim() -> &'static Tally {
+        let mut at = TALLIES.load(Ordering::Acquire);
+        // SAFETY: tallies are never freed, so every pointer in the list is live.
+        while let Some(tally) = unsafe { at.as_ref() } {
+            if tally
+                .held
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return tally;
+            }
+            at = tally.next.load(Ordering::Relaxed);
+        }
+        // Rust's allocator, not this module's `malloc`, so this does not come
+        // back here.
+        let tally: &'static Tally = Box::leak(Box::new(Tally::new()));
+        tally.held.store(true, Ordering::Relaxed);
+        let mut head = TALLIES.load(Ordering::Acquire);
+        loop {
+            tally.next.store(head, Ordering::Relaxed);
+            match TALLIES.compare_exchange_weak(
+                head,
+                std::ptr::from_ref(tally).cast_mut(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return tally,
+                Err(now) => head = now,
+            }
+        }
+    }
+
+    /// Add to the calling thread's tally.
+    fn add(blocks: isize, bytes: isize) {
+        let mine = HELD.try_with(|held| {
+            let tally = held.0;
+            let now = tally.blocks.load(Ordering::Relaxed) + blocks;
+            tally.blocks.store(now, Ordering::Relaxed);
+            let now = tally.bytes.load(Ordering::Relaxed) + bytes;
+            tally.bytes.store(now, Ordering::Relaxed);
+        });
+        if mine.is_err() {
+            SPARE_TALLY.blocks.fetch_add(blocks, Ordering::Relaxed);
+            SPARE_TALLY.bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
+
+    /// Live blocks and bytes: the sum of every tally. Taken while other
+    /// threads count, it is a moment's snapshot, and one that saw a `free`
+    /// before the `malloc` it undoes is held at zero.
+    fn totals() -> (usize, usize) {
+        let mut blocks = SPARE_TALLY.blocks.load(Ordering::Relaxed);
+        let mut bytes = SPARE_TALLY.bytes.load(Ordering::Relaxed);
+        let mut at = TALLIES.load(Ordering::Acquire);
+        // SAFETY: as in [`Tally::claim`].
+        while let Some(tally) = unsafe { at.as_ref() } {
+            blocks += tally.blocks.load(Ordering::Relaxed);
+            bytes += tally.bytes.load(Ordering::Relaxed);
+            at = tally.next.load(Ordering::Relaxed);
+        }
+        (blocks.max(0) as usize, bytes.max(0) as usize)
     }
 }
 
@@ -519,12 +733,13 @@ static HOST_INTROSPECT: Introspection = Introspection {
     zone_type: 0,
 };
 
-/// `DefaultMallocZone`: mimalloc's main heap. Writable, as a guest may patch
-/// it (Chromium's allocator shim replaces function pointers in place).
-static mut DEFAULT_ZONE: HostZone = HostZone::new(DEFAULT_ZONE_NAME.as_ptr(), false);
+/// `DefaultMallocZone`: a heap of its own from [`init`] on, and mimalloc's main
+/// heap's blocks besides. Writable, as a guest may patch it (Chromium's
+/// allocator shim replaces function pointers in place).
+static mut DEFAULT_ZONE: HostZone = HostZone::new(DEFAULT_ZONE_NAME.as_ptr(), Count::PerThread);
 
 /// `DefaultPurgeableMallocZone`, made on first use.
-static mut PURGEABLE_ZONE: HostZone = HostZone::new(PURGEABLE_ZONE_NAME.as_ptr(), true);
+static mut PURGEABLE_ZONE: HostZone = HostZone::new(PURGEABLE_ZONE_NAME.as_ptr(), Count::Shared);
 
 fn default_host_zone() -> *mut MallocZone {
     (&raw mut DEFAULT_ZONE).cast()
@@ -536,9 +751,9 @@ unsafe fn host_heap(zone: *mut MallocZone) -> *mut mi::mi_heap_t {
 
 /// `size`: the block's usable size if this zone made it, else zero.
 unsafe extern "C" fn host_size(zone: *mut MallocZone, ptr: *const c_void) -> usize {
-    // SAFETY: the zone is one of ours; the lookup is defined for any address.
+    // SAFETY: the zone is one of ours; a block it claims is a live one.
     unsafe {
-        if heap_owns(host_heap(zone), ptr) {
+        if HostZone::of(zone).claims(ptr) {
             mi::mi_usable_size(ptr)
         } else {
             0
@@ -638,7 +853,7 @@ unsafe extern "C" fn host_try_free_default(zone: *mut MallocZone, ptr: *mut c_vo
     // SAFETY: our zone; a live block if the heap claims it.
     unsafe {
         let host = HostZone::of(zone);
-        if heap_owns(host.heap, ptr) {
+        if host.claims(ptr) {
             host.releasing(ptr);
             mi::mi_free(ptr);
         } else {
@@ -667,8 +882,8 @@ unsafe extern "C" fn host_realloc(
             }
         };
         if grown.is_null() {
-            // The old block is still live and still this zone's.
-            host.allocated_again(ptr);
+            // The old block is still live, and counted back where it was.
+            host.allocated(ptr);
             return grown;
         }
         return host.allocated(grown);
@@ -688,15 +903,6 @@ unsafe extern "C" fn host_realloc(
             zone_free(owner, ptr);
         }
         fresh
-    }
-}
-
-impl HostZone {
-    /// [`HostZone::allocated`] for a block that never left.
-    fn allocated_again(&self, block: *mut c_void) {
-        if heap_owns(self.heap, block) {
-            self.allocated(block);
-        }
     }
 }
 
@@ -744,20 +950,22 @@ unsafe extern "C" fn host_batch_free(
 }
 
 unsafe extern "C" fn host_pressure_relief(zone: *mut MallocZone, _goal: usize) -> usize {
-    // SAFETY: our zone's heap, collected; mimalloc does not say how much.
+    // SAFETY: our zone's heap, collected; mimalloc does not say how much. The
+    // default zone answers for the main heap too, so collects that as well.
     unsafe {
         let heap = host_heap(zone);
-        if heap.is_null() {
-            mi::mi_collect(true);
-        } else {
+        if !heap.is_null() {
             mi::mi_heap_collect(heap, true);
+        }
+        if heap.is_null() || zone == default_host_zone() {
+            mi::mi_collect(true);
         }
     }
     0
 }
 
 unsafe extern "C" fn host_claimed_address(zone: *mut MallocZone, ptr: *mut c_void) -> Boolean {
-    heap_owns(unsafe { host_heap(zone) }, ptr) as Boolean
+    unsafe { HostZone::of(zone) }.claims(ptr) as Boolean
 }
 
 unsafe extern "C" fn host_enumerator(
@@ -809,50 +1017,28 @@ unsafe extern "C" fn host_enable_discharge_checking(_zone: *mut MallocZone) -> B
     0
 }
 
-/// `statistics`. A counted zone reports what passed through it. The default
-/// zone reports mimalloc's committed memory for both the in-use and the
-/// allocated figure - an upper bound on what is in use, since mimalloc keeps
-/// no live total in a release build - and no block count.
+/// `statistics`: the blocks this zone's callers hold and their usable sizes,
+/// which is what libmalloc's zones count too. Blocks of the main heap that the
+/// default zone answers for are the host's, and are in no zone's figures, so
+/// the sum over every zone counts each block once.
+///
+/// `size_allocated` is the in-use figure again: mimalloc does not say how much
+/// of its memory each heap holds.
 unsafe extern "C" fn host_statistics(zone: *mut MallocZone, stats: *mut Statistics) {
     if stats.is_null() {
         return;
     }
-    let host = unsafe { HostZone::of(zone) };
-    let out = if host.counted {
-        let bytes = host.bytes.load(Ordering::Relaxed);
-        Statistics {
-            blocks_in_use: host.blocks.load(Ordering::Relaxed) as u32,
+    let (blocks, bytes, peak) = unsafe { HostZone::of(zone) }.totals();
+    // SAFETY: the caller's writable structure.
+    unsafe {
+        *stats = Statistics {
+            blocks_in_use: u32::try_from(blocks).unwrap_or(u32::MAX),
             _pad: 0,
             size_in_use: bytes,
-            max_size_in_use: host.peak.load(Ordering::Relaxed),
+            max_size_in_use: peak,
             size_allocated: bytes,
         }
-    } else {
-        let (mut commit, mut peak_commit, mut unused) = (0usize, 0usize, 0usize);
-        let (mut a, mut b, mut c, mut d) = (0usize, 0usize, 0usize, 0usize);
-        // SAFETY: eight writable `size_t`s.
-        unsafe {
-            mi::mi_process_info(
-                &mut a,
-                &mut b,
-                &mut c,
-                &mut d,
-                &mut unused,
-                &mut commit,
-                &mut peak_commit,
-                &mut unused,
-            )
-        };
-        Statistics {
-            blocks_in_use: 0,
-            _pad: 0,
-            size_in_use: commit,
-            max_size_in_use: peak_commit,
-            size_allocated: commit,
-        }
     };
-    // SAFETY: the caller's writable structure.
-    unsafe { *stats = out };
 }
 
 unsafe extern "C" fn host_print_task(
@@ -1252,6 +1438,17 @@ pub fn init() {
     INIT.call_once(|| {
         // SAFETY: mimalloc's own heap, which exists from its first use.
         MAIN_HEAP.store(unsafe { mi_heap_main() }, Ordering::Relaxed);
+        // The default zone's own heap, so that its blocks can be told from the
+        // host's. Without one it stays on the main heap and counts nothing.
+        // SAFETY: a heap that lives for the rest of the process, written into
+        // the zone before the zone is registered.
+        unsafe {
+            let heap = mi::mi_heap_new();
+            if !heap.is_null() {
+                (*default_host_zone().cast::<HostZone>()).heap = heap;
+                DEFAULT_HEAP.store(heap, Ordering::Release);
+            }
+        }
         {
             let _held = LOCK.lock();
             // SAFETY: the lock is held and the default zone lives forever.
@@ -1749,7 +1946,11 @@ pub extern "C" fn malloc_default_purgeable_zone() -> *mut MallocZone {
     let zone: *mut MallocZone = (&raw mut PURGEABLE_ZONE).cast();
     ONCE.call_once(|| {
         // SAFETY: written once, before the zone is published.
-        unsafe { (*zone.cast::<HostZone>()).heap = mi::mi_heap_new() };
+        unsafe {
+            let heap = mi::mi_heap_new();
+            (*zone.cast::<HostZone>()).heap = heap;
+            PURGEABLE_HEAP.store(heap, Ordering::Release);
+        }
         // SAFETY: a zone that lives for the rest of the process.
         unsafe { malloc_zone_register(zone) };
     });
@@ -1767,7 +1968,7 @@ pub unsafe extern "C" fn malloc_create_zone(start_size: usize, _flags: c_uint) -
     if heap.is_null() {
         return std::ptr::null_mut();
     }
-    let mut host = Box::new(HostZone::new(std::ptr::null(), true));
+    let mut host = Box::new(HostZone::new(std::ptr::null(), Count::Shared));
     host.heap = heap;
     let zone = Box::into_raw(host).cast::<MallocZone>();
     unsafe { malloc_zone_register(zone) };
@@ -2704,9 +2905,9 @@ mod tests {
         assert_eq!(name(zones[0]), "DefaultMallocZone");
     }
 
-    /// The default zone is mimalloc's main heap, so a block another thread made
-    /// - with the host's own allocator, as this runtime's frameworks do - is one
-    /// the guest's `free` can find.
+    /// The default zone answers for mimalloc's main heap as well as its own, so
+    /// a block another thread made with the host's own allocator - as this
+    /// runtime's frameworks do - is one the guest's `free` can find.
     #[test]
     fn a_block_from_another_thread_belongs_to_the_default_zone() {
         // SAFETY: mimalloc's own allocation, made on another thread.
@@ -2775,26 +2976,234 @@ mod tests {
         }
     }
 
+    fn stats_of(zone: *mut MallocZone) -> Statistics {
+        let mut stats = Statistics::default();
+        // SAFETY: a writable structure of the declared layout.
+        unsafe { malloc_zone_statistics(zone, &mut stats) };
+        stats
+    }
+
+    /// How many tallies the default zone has made.
+    fn tallies() -> usize {
+        let mut count = 0;
+        let mut at = TALLIES.load(Ordering::Acquire);
+        // SAFETY: tallies are never freed.
+        while let Some(tally) = unsafe { at.as_ref() } {
+            count += 1;
+            at = tally.next.load(Ordering::Relaxed);
+        }
+        count
+    }
+
+    // The statistics tests run in a child process: every test here allocates
+    // from the default zone, and exact figures need nothing else to.
+
+    /// The default zone counts the blocks its callers hold, on whichever thread
+    /// they are freed, and not the host's own allocations on the main heap.
     #[test]
-    fn statistics_cover_what_the_default_zone_holds() {
-        // SAFETY: a block allocated, measured and freed here.
+    fn the_default_zone_counts_what_its_callers_hold() {
+        in_child("default_zone_counting_child");
+    }
+
+    #[test]
+    fn default_zone_counting_child() {
+        if !is_child("default_zone_counting_child") {
+            return;
+        }
+        let default = registered()[0];
+        assert_eq!(name(default), "DefaultMallocZone");
+        let before = stats_of(default);
+        // SAFETY: blocks allocated, measured and freed here.
         unsafe {
-            let block = malloc(4 << 20);
-            std::ptr::write_bytes(block.cast::<u8>(), 1, 4 << 20);
-            let mut stats = Statistics::default();
-            malloc_zone_statistics(std::ptr::null_mut(), &mut stats);
-            assert!(stats.size_in_use >= 4 << 20, "{stats:?}");
-            assert!(stats.size_allocated >= stats.size_in_use);
-            let summary = mstats();
-            assert_eq!(summary.bytes_used, stats.size_in_use);
-            free(block);
+            let blocks: Vec<usize> = (1..=10).map(|i| malloc(i * 100) as usize).collect();
+            let held: usize = blocks
+                .iter()
+                .map(|&b| malloc_size(b as *const c_void))
+                .sum();
+            let during = stats_of(default);
+            assert_eq!(during.blocks_in_use, before.blocks_in_use + 10);
+            assert_eq!(during.size_in_use, before.size_in_use + held);
+            assert_eq!(during.size_allocated, during.size_in_use);
+
+            // A shrink that stays in place changes nothing.
+            let kept = realloc(blocks[9] as *mut c_void, 900);
+            assert_eq!(kept as usize, blocks[9]);
+            assert_eq!(stats_of(default).size_in_use, during.size_in_use);
+
+            // The host's own block is the default zone's to free, not to count.
+            let host = mi::mi_malloc(1 << 20);
+            assert_eq!(malloc_zone_from_ptr(host), malloc_default_zone());
+            assert_eq!(stats_of(default).size_in_use, during.size_in_use);
+            free(host);
+            assert_eq!(stats_of(default).size_in_use, during.size_in_use);
+            // Until `realloc` moves it into the default zone's heap.
+            let host = mi::mi_malloc(64);
+            let moved = realloc(host, 100);
+            assert_eq!(stats_of(default).blocks_in_use, during.blocks_in_use + 1);
+            free(moved);
+            assert_eq!(stats_of(default).blocks_in_use, during.blocks_in_use);
+
+            // Freed on another thread, the blocks come off all the same.
+            std::thread::spawn(move || {
+                for block in blocks {
+                    free(block as *mut c_void);
+                }
+            })
+            .join()
+            .unwrap();
+            let after = stats_of(default);
+            assert_eq!(after.blocks_in_use, before.blocks_in_use);
+            assert_eq!(after.size_in_use, before.size_in_use);
+
+            // Made on a thread that has since exited, they stay counted.
+            let made: Vec<usize> =
+                std::thread::spawn(|| (0..5).map(|_| malloc(64) as usize).collect())
+                    .join()
+                    .unwrap();
+            assert_eq!(stats_of(default).blocks_in_use, before.blocks_in_use + 5);
+            for block in made {
+                free(block as *mut c_void);
+            }
+            let after = stats_of(default);
+            assert_eq!(after.blocks_in_use, before.blocks_in_use);
+            assert_eq!(after.size_in_use, before.size_in_use);
+        }
+    }
+
+    /// A thread's tally passes to the next thread when it exits, so threads
+    /// that come and go do not lengthen the list.
+    #[test]
+    fn tallies_are_reused_after_their_thread_exits() {
+        in_child("tally_reuse_child");
+    }
+
+    #[test]
+    fn tally_reuse_child() {
+        if !is_child("tally_reuse_child") {
+            return;
+        }
+        // SAFETY: a block allocated and freed on a thread of its own.
+        let churn = || {
+            std::thread::spawn(|| unsafe { free(malloc(32)) })
+                .join()
+                .unwrap()
+        };
+        churn();
+        let count = tallies();
+        for _ in 0..20 {
+            churn();
+        }
+        assert_eq!(tallies(), count);
+    }
+
+    /// A block counts in the zone whose heap holds it, whichever zone it was
+    /// freed or resized through.
+    #[test]
+    fn a_block_counts_in_the_zone_that_holds_it() {
+        in_child("counts_where_it_lives_child");
+    }
+
+    #[test]
+    fn counts_where_it_lives_child() {
+        if !is_child("counts_where_it_lives_child") {
+            return;
+        }
+        let default = registered()[0];
+        // SAFETY: a zone and blocks made, moved and freed here.
+        unsafe {
+            let zone = malloc_create_zone(0, 0);
+            let (d0, z0) = (stats_of(default), stats_of(zone));
+
+            // Freed through the wrong zone, it leaves its own zone's totals.
+            let block = malloc(100);
+            assert_eq!(stats_of(default).blocks_in_use, d0.blocks_in_use + 1);
+            malloc_zone_free(zone, block);
+            assert_eq!(stats_of(default).blocks_in_use, d0.blocks_in_use);
+            assert_eq!(stats_of(zone).blocks_in_use, z0.blocks_in_use);
+
+            // Resized through another zone, it moves there, and so does its count.
+            let block = malloc(32);
+            let moved = malloc_zone_realloc(zone, block, 1 << 16);
+            assert_eq!(malloc_zone_from_ptr(moved), zone);
+            assert_eq!(stats_of(default).blocks_in_use, d0.blocks_in_use);
+            assert_eq!(stats_of(default).size_in_use, d0.size_in_use);
+            assert_eq!(stats_of(zone).blocks_in_use, z0.blocks_in_use + 1);
+            assert_eq!(
+                stats_of(zone).size_in_use,
+                z0.size_in_use + malloc_size(moved)
+            );
+
+            free(moved);
+            assert_eq!(stats_of(zone).blocks_in_use, z0.blocks_in_use);
+            assert_eq!(stats_of(zone).size_in_use, z0.size_in_use);
+            malloc_destroy_zone(zone);
+        }
+    }
+
+    /// The figures for every zone together count each block once: a created
+    /// zone's are not also the default zone's, and the host's own allocations
+    /// are no zone's.
+    #[test]
+    fn the_total_counts_each_block_once() {
+        in_child("total_child");
+    }
+
+    #[test]
+    fn total_child() {
+        if !is_child("total_child") {
+            return;
+        }
+        // SAFETY: zones and blocks made, measured and freed here.
+        unsafe {
+            let zone = malloc_create_zone(0, 0);
+            let big = malloc_zone_malloc(zone, 1 << 20);
+            let purgeable = malloc_default_purgeable_zone();
+            let page = malloc_zone_malloc(purgeable, 4096);
+            let small = malloc(1000);
+
+            let total = stats_of(std::ptr::null_mut());
+            let parts = [
+                stats_of(registered()[0]),
+                stats_of(zone),
+                stats_of(purgeable),
+            ];
+            assert_eq!(registered().len(), parts.len());
+            assert_eq!(
+                total.size_in_use,
+                parts.iter().map(|p| p.size_in_use).sum::<usize>()
+            );
+            assert_eq!(
+                total.blocks_in_use,
+                parts.iter().map(|p| p.blocks_in_use).sum::<u32>()
+            );
+            assert!(parts[1].size_in_use >= 1 << 20);
+            assert!(
+                parts[0].size_in_use < 1 << 20,
+                "the created zone's block is in the default zone's figures: {:?}",
+                parts[0]
+            );
+
+            let host = mi::mi_malloc(64 << 20);
+            std::ptr::write_bytes(host.cast::<u8>(), 1, 64 << 20);
+            assert_eq!(
+                stats_of(std::ptr::null_mut()).size_in_use,
+                total.size_in_use,
+                "the host's allocation is no zone's"
+            );
+            mi::mi_free(host);
+            assert_eq!(mstats().bytes_used, total.size_in_use);
+
+            free(small);
+            free(page);
+            free(big);
+            malloc_destroy_zone(zone);
         }
     }
 
     #[test]
     fn unregistering_a_zone_that_is_not_registered_changes_nothing() {
         let before = registered();
-        let mut stray = HostZone::new(c"Stray".as_ptr(), true);
+        let mut stray = HostZone::new(c"Stray".as_ptr(), Count::Shared);
         // SAFETY: a zone that is not in the array, which is only compared against.
         unsafe { malloc_zone_unregister((&raw mut stray).cast()) };
         assert_eq!(registered(), before);
