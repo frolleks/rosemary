@@ -309,6 +309,8 @@ impl MallocZone {
             Self::introspect(zone).and_then(field)
         }
     }
+    // SAFETY: the caller's writable structure.
+    unsafe { *stats = total };
 }
 
 /// Call a zone function the way a guest would, entering the Darwin thread
