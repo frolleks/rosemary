@@ -249,9 +249,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioQueueAllocateBuffer", I32, P, U32, P),
     sig!("AudioQueueDispose", I32, P, BOOL),
     sig!("AudioQueueEnqueueBuffer", I32, P, P, U32, P),
+    sig!("AudioQueueFlush", I32, P),
     sig!("AudioQueueFreeBuffer", I32, P, P),
     cbsig!([1], "AudioQueueNewInput", I32, P, P, P, P, P, U32, P),
     cbsig!([1], "AudioQueueNewOutput", I32, P, P, P, P, P, U32, P),
+    sig!("AudioQueuePause", I32, P),
     sig!("AudioQueueSetProperty", I32, P, U32, P, U32),
     sig!("AudioQueueStart", I32, P, P),
     sig!("AudioQueueStop", I32, P, BOOL),
@@ -667,6 +669,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFStringGetSystemEncoding", U32),
     sig!("CFStringGetTypeID", U64),
     sig!("CFStringHasPrefix", BOOL, P, P),
+    sig!("CFStringHasSuffix", BOOL, P, P),
     sig!(
         "CFURLCreateStringByAddingPercentEscapes",
         P,
@@ -1986,6 +1989,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("getentropy", I32, P, U64),
     sig!("getattrlist", I32, P, P, P, U64, U64),
     sig!("fgetattrlist", I32, I32, P, P, U64, U64),
+    // `int getattrlistbulk(int, struct attrlist *, void *, size_t, uint64_t)`
+    sig!("getattrlistbulk", I32, I32, P, P, U64, U64),
     sig!("csops", I32, I32, U32, P, U64),
     //
     // `GLenum`, `GLuint` and `GLbitfield` are `unsigned int`, `GLint` and `GLsizei`
@@ -3162,6 +3167,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("strncpy", P, P, P, U64),
     sig!("strndup", P, P, U64),
     sig!("strnlen", U64, P, U64),
+    sig!("strnstr", P, P, P, U64),
     sig!("strpbrk", P, P, P),
     // `strptime` writes into a guest `struct tm`, which is twelve `int`s and
     // two pointers on both architectures.

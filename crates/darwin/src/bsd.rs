@@ -1,6 +1,7 @@
-#![cfg(not(target_os = "macos"))]
+//! BSD libc entry points. The dyld hooks are all macOS needs: the rest is
+//! provided by the host's own libSystem there.
 
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{CStr, c_char, c_int};
 
 extern "C" fn errc(_: c_int, _: c_int, _: *const c_char) {
     todo!()
@@ -378,6 +379,10 @@ static CTHREAD_INIT_ROUTINE: usize = 0;
 /// Another `crt1` hook read as data and called when non-null. The task's Mach
 /// ports are made when the runtime starts, so it stays null.
 static MACH_INIT_ROUTINE: usize = 0;
+#[cfg(not(target_os = "macos"))]
+mod posix;
+#[cfg(not(target_os = "macos"))]
+pub use posix::*;
 
 /// `bool _dyld_func_lookup(const char *name, void **address)`
 ///

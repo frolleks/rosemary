@@ -164,8 +164,8 @@ fn unbound(binding: &metal_translate::ResourceBinding, what: &str, represented: 
     } else {
         "its descriptor keeps whatever the set last held"
     };
-    gpu::trace_once(format!("a shader resource {what}; {result}"));
-    gpu::trace(format!(
+    gpu::trace_once(format_args!("a shader resource {what}; {result}"));
+    gpu::trace(format_args!(
         "{:?} at Metal index {} of set {} {what}",
         binding.kind, binding.metal_index, binding.descriptor_set
     ));
@@ -287,10 +287,8 @@ impl Encoder {
         resources: &[metal_translate::ResourceBinding],
         layouts: &Layouts,
     ) -> [bool; SETS] {
-        let (null_descriptors, null_sampler) = {
-            let gpu = self.command().gpu;
-            (gpu.null_descriptors, gpu.null_sampler)
-        };
+        let gpu = self.command().gpu;
+        let (null_descriptors, null_sampler) = (gpu.null_descriptors, gpu.null_sampler);
         let mut used = [false; SETS];
         for wanted in &mut self.wanted {
             wanted.clear();
@@ -362,6 +360,27 @@ impl Encoder {
                         let texture = unsafe { object::body::<Texture>(bound) };
                         use vk::Handle;
                         (texture.image.view.as_raw(), 0, 0)
+                    }
+                }
+                ResourceKind::Sampler if binding.inline_sampler.is_some() => {
+                    let made = binding
+                        .inline_sampler
+                        .as_ref()
+                        .map(|sampler| crate::resource::sampler::inline(gpu, sampler))
+                        .unwrap_or_default();
+                    use vk::Handle;
+                    if made == vk::Sampler::null() {
+                        unbound(
+                            binding,
+                            "is a constexpr sampler the device cannot make",
+                            null_descriptors,
+                        );
+                        if !null_descriptors {
+                            continue;
+                        }
+                        (null_sampler.as_raw(), 0, 0)
+                    } else {
+                        (made.as_raw(), 0, 0)
                     }
                 }
                 ResourceKind::Sampler => {

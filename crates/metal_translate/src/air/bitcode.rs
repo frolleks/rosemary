@@ -182,6 +182,7 @@ pub(super) fn parse_minimal_store_bitcode(bitcode: &Bitcode) -> Result<Module, T
                 access,
                 ty: pointer,
                 name: Some(parameter_name),
+                inline_sampler: None,
             }],
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -298,9 +299,18 @@ fn parse_packed_air(
                 access: resource.access,
                 ty: parameter.ty.clone(),
                 name: resource.name.clone(),
+                inline_sampler: None,
             })
         })
         .collect::<Result<Vec<_>, TranslateError>>()?;
+    // The metadata numbers outputs by position whatever the function returns;
+    // an entry returning one unwrapped value has no field to name.
+    let mut outputs = interface.outputs;
+    if !matches!(function.result, crate::ir::Type::Struct(_)) {
+        for output in &mut outputs {
+            output.field = None;
+        }
+    }
     let module = Module {
         static_initializers,
         functions: vec![function],
@@ -310,7 +320,7 @@ fn parse_packed_air(
             stage,
             resources,
             inputs: interface.inputs,
-            outputs: interface.outputs,
+            outputs,
         }],
     };
     module.verify()?;
