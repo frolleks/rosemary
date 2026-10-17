@@ -144,17 +144,7 @@ pub fn all_faces() -> Vec<FaceInfo> {
 
 /// Read the faces in a font file and make them available by family.
 pub fn register_file(path: &str) -> Vec<FaceInfo> {
-    let Ok(bytes) = std::fs::read(path) else {
-        return Vec::new();
-    };
-    let count = owned_ttf_parser::fonts_in_collection(&bytes).unwrap_or(1);
-    let faces: Vec<FaceInfo> = (0..count)
-        .filter_map(|index| describe(&bytes, index, path))
-        .flat_map(|face| {
-            let instances = named_instances(&bytes, &face);
-            std::iter::once(face).chain(instances)
-        })
-        .collect();
+    let faces = describe_file(path);
     let mut registered = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
     for face in &faces {
         if !registered.contains(face) {
@@ -162,6 +152,50 @@ pub fn register_file(path: &str) -> Vec<FaceInfo> {
         }
     }
     faces
+}
+
+/// The faces in a font file, named instances included, without making any
+/// of them available by family.
+pub fn describe_file(path: &str) -> Vec<FaceInfo> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let count = owned_ttf_parser::fonts_in_collection(&bytes).unwrap_or(1);
+    (0..count)
+        .filter_map(|index| describe(&bytes, index, path))
+        .flat_map(|face| {
+            let instances = named_instances(&bytes, &face);
+            std::iter::once(face).chain(instances)
+        })
+        .collect()
+}
+
+/// Make one face available by family, unless a face of the same PostScript
+/// name already is - which is how CoreText tells one font from another when
+/// a program registers it. Whether it was added.
+pub fn register(face: &FaceInfo) -> bool {
+    let mut registered = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
+    if registered.iter().any(|f| same_font(f, face)) {
+        return false;
+    }
+    registered.push(face.clone());
+    true
+}
+
+/// Withdraw a face [`register`] added. Whether one was there to withdraw.
+pub fn unregister(face: &FaceInfo) -> bool {
+    let mut registered = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());
+    let before = registered.len();
+    registered.retain(|f| !same_font(f, face));
+    registered.len() != before
+}
+
+/// By PostScript name where both have one, and by file and index otherwise.
+fn same_font(a: &FaceInfo, b: &FaceInfo) -> bool {
+    match a.postscript.is_empty() || b.postscript.is_empty() {
+        true => a.path == b.path && a.index == b.index,
+        false => a.postscript == b.postscript,
+    }
 }
 
 fn describe(bytes: &[u8], index: u32, path: &str) -> Option<FaceInfo> {
