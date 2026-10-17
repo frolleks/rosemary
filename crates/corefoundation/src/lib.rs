@@ -26,6 +26,7 @@ mod send;
 mod socket;
 pub mod string;
 pub mod sysconfig;
+mod sysconfig_schema;
 pub mod timezone;
 pub mod tzif;
 pub mod url;
