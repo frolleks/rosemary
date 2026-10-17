@@ -2906,6 +2906,18 @@ pub unsafe extern "C" fn CFRunLoopTimerGetInterval(timer: CFTypeRef) -> f64 {
     unsafe { borrow::<Timer>(timer) }.map_or(0.0, |t| t.interval_seconds())
 }
 
+/// `CFTimeInterval CFRunLoopTimerGetTolerance(CFRunLoopTimerRef)`
+pub unsafe extern "C" fn CFRunLoopTimerGetTolerance(timer: CFTypeRef) -> f64 {
+    unsafe { borrow::<Timer>(timer) }.map_or(0.0, |t| t.tolerance())
+}
+
+/// `void CFRunLoopTimerSetTolerance(CFRunLoopTimerRef, CFTimeInterval)`
+pub unsafe extern "C" fn CFRunLoopTimerSetTolerance(timer: CFTypeRef, tolerance: f64) {
+    if let Some(t) = unsafe { borrow::<Timer>(timer) } {
+        t.set_tolerance(tolerance);
+    }
+}
+
 /// `void CFRunLoopTimerSetNextFireDate(CFRunLoopTimerRef, CFAbsoluteTime)`
 ///
 /// How a caller reschedules a timer it already owns, which is what an event
