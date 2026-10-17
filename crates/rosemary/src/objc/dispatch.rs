@@ -130,6 +130,16 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // the way back: a property handle is opaque, and the guest only ever hands
     // it to `property_getName` and its neighbours.
     rtc!([0], "class_addProperty", U8, P, P, P, I32),
+    Runtime {
+        name: "class_addProtocol",
+        types: &[U8, P, P],
+        classes: &[0],
+        class_return: false,
+        callbacks: &[],
+        blocks: &[],
+        protocols: &[1],
+        struct_return: None,
+    },
     // Spelled out rather than built by a macro, as every entry taking a
     // protocol is.
     Runtime {
@@ -142,8 +152,10 @@ pub(super) static RUNTIME: &[Runtime] = &[
         protocols: &[1],
         struct_return: None,
     },
+    rtc!([0], "class_copyMethodList", P, P, P),
     rtc!([0], "class_copyPropertyList", P, P, P),
     rtc!([0] -> true, "class_createInstance", P, P, U64),
+    rtc!([0], "class_getClassMethod", P, P, P),
     rtc!([0], "class_getInstanceMethod", P, P, P),
     rtc!([0], "class_getInstanceSize", U64, P),
     rtc!([0], "class_getInstanceVariable", P, P, P),
@@ -167,6 +179,10 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // makes that answer usable from guest code, and it returns a `ptrdiff_t`.
     rt!("ivar_getName", P, P),
     rt!("ivar_getOffset", I64, P),
+    rt!("method_exchangeImplementations", V, P, P),
+    rt!("method_getImplementation", P, P),
+    rt!("method_getName", P, P),
+    rt!("method_getTypeEncoding", P, P),
     rtb!([1], "method_setImplementation", P, P, P),
     // ARC and the `objc_msgSend` optimisations clang emits at `-O` whether or
     // not the file uses ARC.
@@ -288,6 +304,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rtc!([0], "object_getClassName", P, P),
     rt!("object_getIndexedIvars", P, P),
     rtc!([0] -> true, "object_getIvar", P, P, P),
+    rtc!([0, 1] -> true, "object_setClass", P, P, P),
     rtc!([0, 2], "object_setIvar", V, P, P, P),
     rt!("property_copyAttributeList", P, P, P),
     rt!("property_getAttributes", P, P),
