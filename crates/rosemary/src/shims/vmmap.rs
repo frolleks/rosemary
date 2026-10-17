@@ -157,6 +157,7 @@ pub fn shim_for(
     match name {
         "mmap" => Some(mmap),
         "mprotect" => Some(mprotect),
+        "vm_protect" | "mach_vm_protect" => Some(vm_protect),
         _ => None,
     }
 }
@@ -248,6 +249,87 @@ fn mprotect(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory
         );
     }
     set_int_return(ctx, rc);
+    Ok(())
+}
+
+/// `KERN_*` codes `vm_protect` answers with.
+const KERN_SUCCESS: i32 = 0;
+const KERN_INVALID_ADDRESS: i32 = 1;
+const KERN_PROTECTION_FAILURE: i32 = 2;
+const KERN_INVALID_ARGUMENT: i32 = 4;
+
+/// `VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE`, which are `PROT_*`'s values.
+/// `VM_PROT_COPY` and the other high bits ask for things this host's `mprotect`
+/// has no word for, and are not passed on.
+const VM_PROT_ALL: i32 = 0x7;
+
+/// `kern_return_t vm_protect(vm_map_t target_task, vm_address_t address,
+/// vm_size_t size, boolean_t set_maximum, vm_prot_t new_protection)`, and
+/// `mach_vm_protect`, whose arguments are the same five registers.
+///
+/// `vm_map_protect` in `osfmk/vm/vm_map.c`: the range is widened to whole
+/// pages and given `new_protection`. Setting the maximum is the other half:
+/// nothing here records a maximum, so all it can change is a current protection
+/// that the new maximum no longer allows, which XNU lowers to fit.
+fn vm_protect(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
+    let task = ctx.rdi as u32;
+    let (address, size) = (ctx.rsi, ctx.rdx);
+    let set_maximum = ctx.rcx as i32 != 0;
+    let protection = ctx.r8 as i32 & VM_PROT_ALL;
+    if task != darwin::mach::space::TASK_SELF {
+        set_int_return(ctx, KERN_INVALID_ARGUMENT);
+        return Ok(());
+    }
+    const PAGE: u64 = 4096;
+    let start = address & !(PAGE - 1);
+    let Some(end) = address.checked_add(size).and_then(|e| e.checked_add(PAGE - 1)) else {
+        set_int_return(ctx, KERN_INVALID_ADDRESS);
+        return Ok(());
+    };
+    let end = end & !(PAGE - 1);
+    if start == end {
+        set_int_return(ctx, KERN_SUCCESS);
+        return Ok(());
+    }
+    let pieces: Vec<(u64, u64, i32)> = match set_maximum {
+        false => vec![(start, end, protection)],
+        true => darwin::mach::vm::protections_in(start, end)
+            .into_iter()
+            .filter_map(|(from, to, current)| {
+                let lowered = current & protection;
+                (lowered != current).then_some((from, to, lowered))
+            })
+            .collect(),
+    };
+    let mut status = KERN_SUCCESS;
+    for (from, to, prot) in pieces {
+        let want_prot = host_prot(prot);
+        // SAFETY: the guest's own request on its own pages, with executable
+        // permission removed as for `mprotect`.
+        let rc = unsafe { libc::mprotect(from as *mut libc::c_void, (to - from) as usize, want_prot) };
+        if rc != 0 {
+            status = match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::EACCES) => KERN_PROTECTION_FAILURE,
+                _ => KERN_INVALID_ADDRESS,
+            };
+            break;
+        }
+        if prot & libc::PROT_EXEC != 0 {
+            arenas::push(from, to - from);
+        }
+        if contains(from) {
+            crate::smc::track(from, to - from, prot);
+        }
+        if tracing() {
+            eprintln!(
+                "rosemary: vm_protect({from:#x}, {:#x}, max={set_maximum}, {}) as {}",
+                to - from,
+                prot_name(prot),
+                prot_name(want_prot)
+            );
+        }
+    }
+    set_int_return(ctx, status);
     Ok(())
 }
 
