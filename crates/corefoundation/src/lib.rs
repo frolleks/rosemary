@@ -217,6 +217,8 @@ exports::exports! {
         "CFSocketInvalidate" => socket::invalidate,
         "CFRunLoopIsWaiting" => api::CFRunLoopIsWaiting,
         "CFRunLoopTimerGetInterval" => api::CFRunLoopTimerGetInterval,
+        "CFRunLoopTimerGetTolerance" => api::CFRunLoopTimerGetTolerance,
+        "CFRunLoopTimerSetTolerance" => api::CFRunLoopTimerSetTolerance,
         "CFRunLoopTimerSetNextFireDate" => api::CFRunLoopTimerSetNextFireDate,
         "CFDataCreateMutable" => api::CFDataCreateMutable,
         "CFDataGetBytes" => api::CFDataGetBytes,

@@ -1,7 +1,7 @@
 use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -67,6 +67,8 @@ pub struct Timer {
     callback: Option<TimerCallback>,
     info: usize,
     valid: AtomicBool,
+    /// The `f64` bits of the tolerance `CFRunLoopTimerSetTolerance` set.
+    tolerance: AtomicU64,
 }
 
 // SAFETY: as [`Source`].
@@ -91,6 +93,18 @@ impl Timer {
     /// Apple's reports one, and what a caller testing "does this repeat" reads.
     pub fn interval_seconds(&self) -> f64 {
         self.interval.map_or(0.0, |i| i.as_secs_f64())
+    }
+
+    /// How late the timer may fire, in seconds. Firing on time is within any
+    /// tolerance, which is all this loop does.
+    pub fn tolerance(&self) -> f64 {
+        f64::from_bits(self.tolerance.load(Ordering::Acquire))
+    }
+
+    /// `CFRunLoopTimerSetTolerance`.
+    pub fn set_tolerance(&self, tolerance: f64) {
+        let tolerance = clamped_tolerance(tolerance, self.interval_seconds());
+        self.tolerance.store(tolerance.to_bits(), Ordering::Release);
     }
 
     /// Move the next fire date, as `CFRunLoopTimerSetNextFireDate` does.
@@ -655,6 +669,18 @@ pub fn is_noted<T: 'static>(handle: usize) -> bool {
         == Some(&TypeId::of::<T>())
 }
 
+/// The tolerance `CFRunLoopTimerSetTolerance` keeps, for a timer repeating
+/// every `interval` seconds (zero for a one-shot).
+///
+/// `CFRunLoop.c`'s rule, after dispatch's: a repeating timer's is at most half
+/// its interval, and a one-shot's is at least zero.
+pub fn clamped_tolerance(tolerance: f64, interval: f64) -> f64 {
+    match interval > 0.0 {
+        true => tolerance.min(interval / 2.0),
+        false => tolerance.max(0.0),
+    }
+}
+
 /// Build a timer, first due `after` from now and repeating every `interval`.
 pub fn new_timer(
     after: Duration,
@@ -668,6 +694,7 @@ pub fn new_timer(
         callback,
         info,
         valid: AtomicBool::new(true),
+        tolerance: AtomicU64::new(0),
     });
     note(Arc::as_ptr(&timer));
     timer

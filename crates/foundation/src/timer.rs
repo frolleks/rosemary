@@ -31,6 +31,9 @@ pub struct Timer {
     interval: f64,
     repeats: usize,
     passes_timer: usize,
+    /// `-tolerance`, kept on the object because an unscheduled timer has no
+    /// run loop timer to keep it on.
+    tolerance: f64,
 }
 
 pub const DATE_INSTANCE_SIZE: usize = size_of::<Date>();
@@ -252,6 +255,7 @@ fn make(
         (*object).interval = interval;
         (*object).repeats = repeats as usize;
         (*object).passes_timer = passes_timer as usize;
+        (*object).tolerance = 0.0;
         (*object).timer = std::ptr::null();
     }
     let object = object as Id;
@@ -434,6 +438,22 @@ unsafe extern "C" fn time_interval(receiver: Id, _sel: Sel) -> f64 {
     timer_of(receiver).interval
 }
 
+unsafe extern "C" fn tolerance(receiver: Id, _sel: Sel) -> f64 {
+    timer_of(receiver).tolerance
+}
+
+/// `-setTolerance:`, by `CFRunLoopTimerSetTolerance`'s rule over the interval
+/// `CFRunLoopTimerGetInterval` reports - none, for a one-shot.
+unsafe extern "C" fn set_tolerance(receiver: Id, _sel: Sel, tolerance: f64) {
+    let timer = timer_of(receiver);
+    let interval = if timer.repeats != 0 {
+        timer.interval
+    } else {
+        0.0
+    };
+    timer.tolerance = corefoundation::runloop::clamped_tolerance(tolerance, interval);
+}
+
 unsafe extern "C" fn fire_date(receiver: Id, _sel: Sel) -> Id {
     date(now() + timer_of(receiver).interval)
 }
@@ -530,6 +550,8 @@ pub(crate) fn install() {
         "userInfo" => user_info, c"@16@0:8";
         "timeInterval" => time_interval, c"d16@0:8";
         "fireDate" => fire_date, c"@16@0:8";
+        "tolerance" => tolerance, c"d16@0:8";
+        "setTolerance:" => set_tolerance, c"v24@0:8d16";
     });
 
     let run_loop =
