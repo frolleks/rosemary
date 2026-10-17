@@ -555,6 +555,28 @@ pub fn allocate_pair(
     if lookup(name).is_some() {
         return None;
     }
+    Some(build_pair(superclass, name, extra))
+}
+
+/// Allocate a class pair for a class an image defines, whose name another
+/// class may already have.
+///
+/// Apple's `readClass` realizes a second class of a name an earlier image
+/// took instead of dropping it: the defining image's own references go on
+/// naming its own class, and only lookup by name keeps answering the first
+/// (`addNamedClass` in objc4's `objc-runtime-new.mm`). [`register_pair`] is
+/// what keeps that first one.
+pub fn allocate_image_pair(
+    superclass: Option<&'static Class>,
+    name: &CStr,
+    extra: usize,
+) -> &'static Class {
+    let _guard = ALLOCATION.lock().unwrap_or_else(|e| e.into_inner());
+    build_pair(superclass, name, extra)
+}
+
+/// A new, unregistered class and its metaclass, without regard to the name.
+fn build_pair(superclass: Option<&'static Class>, name: &CStr, extra: usize) -> &'static Class {
     let name = CString::from(name);
 
     // An instance starts where the superclass's ended - at `isa` for a root.
@@ -583,7 +605,7 @@ pub fn allocate_pair(
     };
     meta.isa.store(ptr(root_meta), Ordering::Release);
     class.isa.store(ptr(meta), Ordering::Release);
-    Some(class)
+    class
 }
 
 /// The metaclass at the top of `class`'s chain.
@@ -595,7 +617,8 @@ fn root_metaclass(class: &'static Class) -> &'static Class {
     root.metaclass()
 }
 
-/// Make `class` findable by name and instantiable.
+/// Make `class` instantiable, and findable by name unless an earlier class
+/// already answers to it - as `addNamedClass` keeps the class it found first.
 pub fn register_pair(class: &'static Class) {
     if crate::debug::enabled() && class.is_registered() {
         crate::fail!(
@@ -608,7 +631,7 @@ pub fn register_pair(class: &'static Class) {
     }
     class.metaclass().registered.store(1, Ordering::Release);
     with_classes(|classes| {
-        classes.insert(class.name_str().to_string(), class);
+        classes.entry(class.name_str().to_string()).or_insert(class);
     });
 }
 
@@ -622,7 +645,14 @@ pub fn dispose_pair(class: &'static Class) {
     }
     if class.is_registered() {
         with_classes(|classes| {
-            classes.remove(class.name_str());
+            // Only if it is the one the name answers: a second class of a
+            // taken name was never in the table.
+            if classes
+                .get(class.name_str())
+                .is_some_and(|named| std::ptr::eq(*named, class))
+            {
+                classes.remove(class.name_str());
+            }
         });
     }
     // The `Class` itself stays leaked: a pointer to it may have escaped, and a

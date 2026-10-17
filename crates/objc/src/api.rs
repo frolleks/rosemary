@@ -259,6 +259,21 @@ pub unsafe extern "C" fn method_setImplementation(m: *const c_void, imp: Imp) ->
     unsafe { method(m) }.map_or(std::ptr::null(), |m| m.set_implementation(imp))
 }
 
+/// `void method_exchangeImplementations(Method m1, Method m2)`: the two swap
+/// `IMP`s, as one step - two exchanges racing each other cannot interleave
+/// and leave both methods with the same one. Nothing happens if either is
+/// null.
+pub unsafe extern "C" fn method_exchangeImplementations(m1: *const c_void, m2: *const c_void) {
+    static EXCHANGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let (Some(m1), Some(m2)) = (unsafe { method(m1) }, unsafe { method(m2) }) else {
+        return;
+    };
+    let _held = EXCHANGE.lock().unwrap_or_else(|e| e.into_inner());
+    let first = m1.implementation();
+    let second = m2.set_implementation(first);
+    m1.set_implementation(second);
+}
+
 pub unsafe extern "C" fn ivar_getOffset(ivar: *const c_void) -> isize {
     crate::debug::validate_handle(ivar, "ivar", "ivar_getOffset");
     // SAFETY: an `Ivar` this runtime produced, or null.
@@ -391,6 +406,24 @@ unsafe fn copied_list<T>(values: Vec<T>, out_count: *mut u32) -> *mut T {
         unsafe { block.add(i).write(value) };
     }
     block
+}
+
+/// `Method *class_copyMethodList(Class cls, unsigned int *outCount)`: the
+/// methods `cls` itself has, not those it inherits, in a block the caller
+/// frees. Null, with a count of zero, for a class with none.
+pub unsafe extern "C" fn class_copyMethodList(
+    cls: *const c_void,
+    out_count: *mut u32,
+) -> *mut *const c_void {
+    let methods = unsafe { class(cls) }
+        .map(|c| c.own_methods())
+        .unwrap_or_default();
+    let values: Vec<*const c_void> = methods
+        .into_iter()
+        .map(|m| m as *const crate::class::Method as *const c_void)
+        .collect();
+    // SAFETY: `out_count` is null or writable, as the C prototype requires.
+    unsafe { copied_list(values, out_count) }
 }
 
 pub unsafe extern "C" fn class_copyPropertyList(
