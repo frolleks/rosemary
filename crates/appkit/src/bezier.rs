@@ -103,6 +103,22 @@ unsafe extern "C" fn restore_graphics_state(_receiver: Id, _sel: Sel) {
     });
 }
 
+/// `+[NSGraphicsContext saveGraphicsState]`: the current context's state
+/// saved, and the context itself kept for `+restoreGraphicsState`.
+unsafe extern "C" fn class_save_graphics_state(receiver: Id, sel: Sel) {
+    // SAFETY: the instance method's own contract, which ignores the receiver.
+    unsafe { save_graphics_state(receiver, sel) };
+    crate::backing::save_current_context();
+}
+
+/// `+[NSGraphicsContext restoreGraphicsState]`: the saved context made current
+/// again, and then sent `-restoreGraphicsState`.
+unsafe extern "C" fn class_restore_graphics_state(receiver: Id, sel: Sel) {
+    crate::backing::restore_saved_context();
+    // SAFETY: as above.
+    unsafe { restore_graphics_state(receiver, sel) };
+}
+
 /// Vertical samples per pixel row. Horizontal coverage is exact.
 const SUBSAMPLES: usize = 4;
 
@@ -801,8 +817,8 @@ pub(crate) fn install() {
 
     let context = objc::class::lookup(c"NSGraphicsContext").expect("declared");
     class_methods!(context, {
-        "saveGraphicsState" => save_graphics_state, c"v16@0:8";
-        "restoreGraphicsState" => restore_graphics_state, c"v16@0:8";
+        "saveGraphicsState" => class_save_graphics_state, c"v16@0:8";
+        "restoreGraphicsState" => class_restore_graphics_state, c"v16@0:8";
     });
     methods!(context, {
         "saveGraphicsState" => save_graphics_state, c"v16@0:8";
