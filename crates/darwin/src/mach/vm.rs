@@ -36,8 +36,11 @@ const VM_INHERIT_SHARE: u32 = 0;
 const VM_BEHAVIOR_DEFAULT: i32 = 0;
 
 /// `struct vm_region_basic_info_64`, whose layout is ABI: the guest declared
-/// one on its stack and reads the fields back by name.
-#[repr(C)]
+/// one on its stack and reads the fields back by name. `<mach/vm_region.h>`
+/// declares it inside `#pragma pack(push, 4)`, so `offset` is at byte 20, not
+/// 24, and the whole is thirty-six bytes - `VM_REGION_BASIC_INFO_COUNT_64` is
+/// nine.
+#[repr(C, packed(4))]
 #[derive(Clone, Copy, Default)]
 struct BasicInfo64 {
     protection: i32,
@@ -53,7 +56,9 @@ struct BasicInfo64 {
 const _: () = {
     // `VM_REGION_BASIC_INFO_COUNT_64` is this size in 32-bit words, and a
     // caller passes it in as the capacity of its buffer.
-    assert!(size_of::<BasicInfo64>() == 40);
+    assert!(size_of::<BasicInfo64>() == 36);
+    assert!(std::mem::offset_of!(BasicInfo64, offset) == 20);
+    assert!(std::mem::offset_of!(BasicInfo64, user_wired_count) == 32);
 };
 
 /// `struct vm_region_top_info`. Resident page counts are not tracked and read
@@ -102,6 +107,17 @@ fn region_at_or_after(address: u64) -> Option<Region> {
         .ok()?
         .into_iter()
         .find(|region| region.end > address)
+}
+
+/// The mappings overlapping `[start, end)`, clipped to it, with their
+/// `VM_PROT_*` bits.
+pub fn protections_in(start: u64, end: u64) -> Vec<(u64, u64, i32)> {
+    starnix::process::regions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.end > start && r.start < end)
+        .map(|r| (r.start.max(start), r.end.min(end), protection(&r)))
+        .collect()
 }
 
 /// A region's `VM_PROT_*` bits.
