@@ -29,6 +29,7 @@ const _: () = {
 
 const EVFILT_READ: i16 = -1;
 const EVFILT_WRITE: i16 = -2;
+const EVFILT_PROC: i16 = -5;
 const EVFILT_SIGNAL: i16 = -6;
 const EVFILT_MACHPORT: i16 = -8;
 const EVFILT_USER: i16 = -10;
@@ -47,6 +48,12 @@ const EV_EOF: u16 = 0x8000;
 /// `NOTE_TRIGGER`, the one `fflags` bit `EVFILT_USER` acts on.
 const NOTE_TRIGGER: u32 = 0x0100_0000;
 
+/// `EVFILT_PROC`'s notes. Only the exit is observable from outside a process
+/// on this host - a pidfd says when it ends - so a registration for its forks,
+/// execs or signals is accepted, as XNU accepts it, and those never fire.
+const NOTE_EXIT: u32 = 0x8000_0000;
+const NOTE_EXITSTATUS: u32 = 0x0400_0000;
+
 /// `MACH_RCV_MSG` in an `EVFILT_MACHPORT` registration's `fflags`: receive the
 /// message into the event. Only `kevent64`/`kevent_qos` have room for it.
 const MACH_RCV_MSG: u32 = 0x0000_0002;
@@ -63,6 +70,10 @@ struct Registration {
     /// `EVFILT_SIGNAL`: how many deliveries of the signal were already
     /// reported, or happened before the registration.
     seen: u64,
+    /// `kevent64_s::ext`, handed back with every event as XNU's
+    /// `knote_fill_kevent` does. For an `EVFILT_MACHPORT` registration with
+    /// `MACH_RCV_MSG`, the buffer a message is received into and its size.
+    ext: [u64; 2],
 }
 
 impl Registration {
@@ -95,6 +106,9 @@ struct Queue<B> {
     /// delivered is one event, not two.
     triggered: VecDeque<usize>,
     triggered_set: HashSet<usize>,
+    /// A pidfd for each `EVFILT_PROC` registration, by pid: readable once the
+    /// process has exited.
+    processes: HashMap<usize, std::os::fd::OwnedFd>,
     backend: Arc<B>,
 }
 
@@ -115,6 +129,7 @@ impl<B> Queue<B> {
             port_watch: HashMap::new(),
             triggered: VecDeque::new(),
             triggered_set: HashSet::new(),
+            processes: HashMap::new(),
             backend: Arc::new(backend),
         }
     }
@@ -956,10 +971,15 @@ fn drain_fd(queue: c_int) {
 /// The number is **Darwin's**: it reaches the guest as an `EV_ERROR` event's
 /// `data`, which is a value rather than the `errno` slot, so nothing later
 /// translates it.
-fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(), c_int> {
+fn apply<B: ReadinessBackend>(
+    state: &mut Queue<B>,
+    change: &Kevent,
+    ext: [u64; 2],
+    wide: bool,
+) -> Result<(), c_int> {
     if !matches!(
         change.filter,
-        EVFILT_READ | EVFILT_WRITE | EVFILT_USER | EVFILT_SIGNAL | EVFILT_MACHPORT
+        EVFILT_READ | EVFILT_WRITE | EVFILT_USER | EVFILT_SIGNAL | EVFILT_MACHPORT | EVFILT_PROC
     ) {
         return Err(crate::errno::from_host(libc::EINVAL));
     }
@@ -981,6 +1001,9 @@ fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(
         state.triggered_set = triggered_set;
         if change.filter == EVFILT_SIGNAL {
             let _ = crate::signal::observe(change.ident as i32, false);
+        }
+        if change.filter == EVFILT_PROC {
+            state.processes.remove(&change.ident);
         }
         return Ok(());
     }
@@ -1013,13 +1036,19 @@ fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(
         } else if change.filter == EVFILT_MACHPORT {
             // Receiving into the event needs the `ext` words only `kevent64`
             // has; without them there is nowhere to put the message.
-            if change.fflags & MACH_RCV_MSG != 0 {
+            if change.fflags & MACH_RCV_MSG != 0 && !wide {
                 return Err(crate::errno::from_host(libc::EINVAL));
             }
             let name =
                 Name::try_from(change.ident).map_err(|_| crate::errno::from_host(libc::EINVAL))?;
             if space::receiver(name).is_none() && space::members(name).is_none() {
                 return Err(crate::errno::from_host(libc::EINVAL));
+            }
+        } else if change.filter == EVFILT_PROC {
+            // XNU's `filt_procattach`: a pid with no process is `ESRCH`.
+            if !state.processes.contains_key(&change.ident) {
+                let pidfd = open_pidfd(change.ident).map_err(crate::errno::from_host)?;
+                state.processes.insert(change.ident, pidfd);
             }
         } else if change.filter != EVFILT_USER {
             let fd =
@@ -1038,6 +1067,7 @@ fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(
                 udata: change.udata,
                 enabled: change.flags & EV_DISABLE == 0,
                 seen,
+                ext,
             },
         );
     } else {
@@ -1141,7 +1171,10 @@ fn sync_interest<B: ReadinessBackend>(
     filter: i16,
     ident: usize,
 ) -> Result<(), c_int> {
-    if matches!(filter, EVFILT_USER | EVFILT_SIGNAL | EVFILT_MACHPORT) {
+    if matches!(
+        filter,
+        EVFILT_USER | EVFILT_SIGNAL | EVFILT_MACHPORT | EVFILT_PROC
+    ) {
         return Ok(());
     }
     let fd = c_int::try_from(ident).map_err(|_| crate::errno::from_host(libc::EBADF))?;
@@ -1187,7 +1220,7 @@ fn poll_set(
         if !registration.enabled
             || matches!(
                 registration.filter,
-                EVFILT_USER | EVFILT_SIGNAL | EVFILT_MACHPORT
+                EVFILT_USER | EVFILT_SIGNAL | EVFILT_MACHPORT | EVFILT_PROC
             )
         {
             continue;
@@ -1243,49 +1276,107 @@ pub unsafe extern "C" fn kevent(
         crate::errno::set(libc::EINVAL);
         return -1;
     }
-    let Some(state) = queue_of(queue) else {
-        crate::errno::set(libc::EBADF);
-        return -1;
-    };
-    let capacity = nevents as usize;
-    let mut out: Vec<Kevent> = Vec::with_capacity(capacity);
-
-    let changes = match nchanges {
-        0 => &[][..],
+    let changes: Vec<(Kevent, [u64; 2])> = match nchanges {
+        0 => Vec::new(),
         // SAFETY: the caller states there are `nchanges` of them.
-        n => unsafe { std::slice::from_raw_parts(changes, n as usize) },
+        n => unsafe { std::slice::from_raw_parts(changes, n as usize) }
+            .iter()
+            .map(|change| (*change, [0; 2]))
+            .collect(),
     };
+    // SAFETY: the caller's timeout, null or a `timespec`.
+    let wait = match unsafe { Wait::from(timeout) } {
+        Ok(wait) => wait,
+        Err(errno) => {
+            crate::errno::set(crate::errno::to_host(errno));
+            return -1;
+        }
+    };
+    match collect(queue, &changes, nevents as usize, wait, false) {
+        Ok(out) => {
+            let narrow: Vec<Kevent> = out.into_iter().map(|(event, _)| event).collect();
+            // SAFETY: the caller states there is room for `nevents`, and
+            // `collect` never returns more.
+            unsafe { std::ptr::copy_nonoverlapping(narrow.as_ptr(), events, narrow.len()) };
+            narrow.len() as c_int
+        }
+        Err(errno) => {
+            crate::errno::set(errno);
+            -1
+        }
+    }
+}
+
+/// How long a `kevent` call may wait: a `timespec`, or none at all.
+#[derive(Clone, Copy)]
+enum Wait {
+    Forever,
+    Milliseconds(c_int),
+}
+
+impl Wait {
+    /// # Safety
+    ///
+    /// `timeout` is null or a readable `timespec`.
+    unsafe fn from(timeout: *const libc::timespec) -> Result<Wait, c_int> {
+        if timeout.is_null() {
+            return Ok(Wait::Forever);
+        }
+        timeout_ms(timeout).map(Wait::Milliseconds)
+    }
+
+    fn ms(self) -> c_int {
+        match self {
+            Wait::Forever => -1,
+            Wait::Milliseconds(ms) => ms,
+        }
+    }
+}
+
+/// `kevent` and `kevent64`'s shared body: apply `changes`, then wait for and
+/// gather up to `capacity` events, each with its `ext` words. `wide` is
+/// `kevent64`, whose events have room to receive a Mach message into.
+///
+/// The error is a host `errno`.
+fn collect(
+    queue: c_int,
+    changes: &[(Kevent, [u64; 2])],
+    capacity: usize,
+    wait: Wait,
+    wide: bool,
+) -> Result<Vec<(Kevent, [u64; 2])>, c_int> {
+    let Some(state) = queue_of(queue) else {
+        return Err(libc::EBADF);
+    };
+    let mut out: Vec<(Kevent, [u64; 2])> = Vec::with_capacity(capacity);
     {
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-        for change in changes {
-            let failure = apply(&mut state, change).err();
+        for (change, ext) in changes {
+            let failure = apply(&mut state, change, *ext, wide).err();
             // `EV_RECEIPT` asks for the *outcome of every change* rather than
             // for readiness, and it asks for it whether or not the change
             // failed - which is how a caller applies a batch and finds out
             // which one of them the kernel rejected.
             if change.flags & EV_RECEIPT != 0 {
                 if out.len() < capacity {
-                    out.push(Kevent {
-                        flags: EV_ERROR,
-                        data: failure.unwrap_or(0) as isize,
-                        ..*change
-                    });
+                    out.push((
+                        Kevent {
+                            flags: EV_ERROR,
+                            data: failure.unwrap_or(0) as isize,
+                            ..*change
+                        },
+                        *ext,
+                    ));
                 }
                 continue;
             }
             if let Some(errno) = failure {
-                crate::errno::set(crate::errno::to_host(errno));
-                return -1;
+                return Err(crate::errno::to_host(errno));
             }
         }
     }
-    if capacity == 0 {
-        return 0;
-    }
-    if !out.is_empty() {
-        // SAFETY: the caller states there is room for `nevents`.
-        unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), events, out.len()) };
-        return out.len() as c_int;
+    if capacity == 0 || !out.is_empty() {
+        return Ok(out);
     }
 
     // Held for the whole wait so no socket closes, and its number is reused,
@@ -1295,41 +1386,46 @@ pub unsafe extern "C" fn kevent(
         let state = &mut *state;
         if let Err(errno) = sync_ports(&mut state.port_watch, &*state.backend, &state.registrations)
         {
-            crate::errno::set(crate::errno::to_host(errno));
-            return -1;
+            return Err(crate::errno::to_host(errno));
         }
         watched_ports(&state.registrations)
+    };
+    // The pidfds of the enabled process registrations, duplicated so a
+    // registration deleted on another thread mid-wait does not close the
+    // descriptor `poll` is watching.
+    let processes: Vec<std::os::fd::OwnedFd> = {
+        let state = state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .registrations
+            .values()
+            .filter(|r| r.filter == EVFILT_PROC && r.enabled)
+            .filter_map(|r| state.processes.get(&r.ident))
+            .filter_map(|pidfd| pidfd.try_clone().ok())
+            .collect()
     };
     let triggered = {
         let state = state.lock().unwrap_or_else(|e| e.into_inner());
         !state.triggered.is_empty()
             || signals_pending(&state.registrations)
             || ports.iter().any(|port| port.ready())
+            || processes.iter().any(|pidfd| exited(pidfd))
     };
     // Something is already waiting, so this is a collection rather than a wait.
     let wait = match triggered {
         true => 0,
-        false => match timeout_ms(timeout) {
-            Ok(ms) => ms,
-            Err(errno) => {
-                crate::errno::set(crate::errno::to_host(errno));
-                return -1;
-            }
-        },
+        false => wait.ms(),
     };
     let ready = {
         let state = state.lock().unwrap_or_else(|e| e.into_inner());
         let backend = Arc::clone(&state.backend);
         let registrations = state.registrations.clone();
         drop(state);
-        let port_fds: Vec<c_int> = ports.iter().map(|port| port.fd()).collect();
-        match backend.wait(queue, &registrations, &port_fds, capacity, wait) {
-            Ok(ready) => ready,
-            Err(errno) => {
-                crate::errno::set(errno);
-                return -1;
-            }
-        }
+        let port_fds: Vec<c_int> = ports
+            .iter()
+            .map(|port| port.fd())
+            .chain(processes.iter().map(std::os::fd::AsRawFd::as_raw_fd))
+            .collect();
+        backend.wait(queue, &registrations, &port_fds, capacity, wait)?
     };
 
     let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1347,7 +1443,7 @@ pub unsafe extern "C" fn kevent(
         if let Some(registration) = state.registrations.get(&(ident, EVFILT_USER))
             && registration.enabled
         {
-            out.push(registration.fired());
+            out.push((registration.fired(), registration.ext));
         }
     }
 
@@ -1372,7 +1468,7 @@ pub unsafe extern "C" fn kevent(
         let mut event = registration.fired();
         event.data = (count - registration.seen) as isize;
         registration.seen = count;
-        out.push(event);
+        out.push((event, registration.ext));
         let (ident, flags) = (registration.ident, registration.flags);
         if flags & EV_ONESHOT != 0 {
             state.registrations.remove(&key);
@@ -1380,6 +1476,43 @@ pub unsafe extern "C" fn kevent(
         } else if flags & EV_DISPATCH != 0 {
             registration.enabled = false;
         }
+    }
+
+    // XNU's `filt_procprocess` for an exit: the notes that were asked for and
+    // happened, the wait status under `NOTE_EXITSTATUS`, and `EV_EOF |
+    // EV_ONESHOT`, so the registration goes with its event.
+    let mut exits: Vec<(usize, i16)> = state
+        .registrations
+        .keys()
+        .filter(|key| key.1 == EVFILT_PROC)
+        .copied()
+        .collect();
+    exits.sort_unstable();
+    for key in exits {
+        if out.len() == capacity {
+            break;
+        }
+        let Some(registration) = state.registrations.get(&key).copied() else {
+            continue;
+        };
+        if !registration.enabled || registration.fflags & NOTE_EXIT == 0 {
+            continue;
+        }
+        let Some(pidfd) = state.processes.get(&key.0) else {
+            continue;
+        };
+        if !exited(pidfd) {
+            continue;
+        }
+        let mut event = registration.fired();
+        event.fflags = registration.fflags & (NOTE_EXIT | NOTE_EXITSTATUS);
+        event.flags |= EV_EOF | EV_ONESHOT;
+        if registration.fflags & NOTE_EXITSTATUS != 0 {
+            event.data = exit_status(pidfd) as isize;
+        }
+        out.push((event, registration.ext));
+        state.registrations.remove(&key);
+        state.processes.remove(&key.0);
     }
 
     let mut machports: Vec<(usize, i16)> = state
@@ -1410,7 +1543,7 @@ pub unsafe extern "C" fn kevent(
         };
         let mut event = registration.fired();
         event.data = member as isize;
-        out.push(event);
+        out.push((event, registration.ext));
         if registration.flags & EV_DISPATCH != 0 {
             registration.enabled = false;
         }
@@ -1447,7 +1580,7 @@ pub unsafe extern "C" fn kevent(
             };
             let mut event = registration.fired();
             event.data = member as isize;
-            out.push(event);
+            out.push((event, registration.ext));
             if registration.flags & EV_ONESHOT != 0 {
                 state.registrations.remove(&key);
                 ports_changed = true;
@@ -1511,7 +1644,7 @@ pub unsafe extern "C" fn kevent(
                     event.data = readable_bytes(entry.fd);
                 }
             }
-            out.push(event);
+            out.push((event, registration.ext));
             // `EV_ONESHOT` deletes the registration once it has fired and
             // `EV_DISPATCH` disables it until it is enabled again. Both are how
             // a caller avoids being handed the same readiness on every turn.
@@ -1530,10 +1663,186 @@ pub unsafe extern "C" fn kevent(
             }
         }
     }
-    // SAFETY: the caller states there is room for `nevents`, and `out` never
-    // grew past that.
-    unsafe { std::ptr::copy_nonoverlapping(out.as_ptr(), events, out.len()) };
-    out.len() as c_int
+    drop(state);
+    if wide {
+        out.retain_mut(|(event, ext)| receive_into(event, ext));
+    }
+    Ok(out)
+}
+
+/// `MACH_RCV_LARGE` and `MACH_RCV_TIMEOUT`, and the two receive results an
+/// event reports in `fflags`.
+const MACH_RCV_LARGE: u32 = 0x0000_0004;
+const MACH_RCV_TIMEOUT: i32 = 0x0000_0100;
+const MACH_RCV_TIMED_OUT: i32 = 0x1000_4003;
+const MACH_RCV_TOO_LARGE: i32 = 0x1000_4004;
+/// `mach_msg_trailer_t`, which a received message is followed by.
+const TRAILER: u64 = 8;
+
+/// An `EVFILT_MACHPORT` event registered with `MACH_RCV_MSG`, received into
+/// its `ext[0]` buffer of `ext[1]` bytes as `filt_machportprocess` does: the
+/// receive result in `fflags`, the size received with its trailer in `ext[1]`,
+/// and `data` the port's name only for a message too large for the buffer.
+/// A message another thread took first is no event at all.
+///
+/// Every other event passes through untouched.
+fn receive_into(event: &mut Kevent, ext: &mut [u64; 2]) -> bool {
+    if event.filter != EVFILT_MACHPORT || event.fflags & MACH_RCV_MSG == 0 {
+        return true;
+    }
+    let (buffer, size) = (ext[0], ext[1] as u32);
+    let name = event.data as Name;
+    let large = (event.fflags & MACH_RCV_LARGE) as i32;
+    let result = match buffer == 0 || size == 0 {
+        // No buffer: XNU would carve one from `kevent_qos`'s data area, which
+        // `kevent64` has none of, so the message is too large for it and
+        // stays queued.
+        true => MACH_RCV_TOO_LARGE,
+        // SAFETY: the buffer and size the caller registered.
+        false => unsafe {
+            crate::mach::msg::mach_msg(
+                buffer as *mut c_void,
+                0x2 | MACH_RCV_TIMEOUT | large,
+                0,
+                size,
+                name,
+                0,
+                0,
+            )
+        },
+    };
+    if result == MACH_RCV_TIMED_OUT {
+        return false;
+    }
+    event.fflags = result as u32;
+    event.data = match result {
+        MACH_RCV_TOO_LARGE => name as isize,
+        _ => 0,
+    };
+    ext[1] = match result {
+        0 => {
+            // SAFETY: the header the receive just wrote.
+            let header_size = unsafe { ((buffer + 4) as *const u32).read_unaligned() };
+            u64::from(header_size) + TRAILER
+        }
+        _ => 0,
+    };
+    true
+}
+
+/// `struct kevent64_s`: `kevent`'s fields at full width, and two more.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Kevent64 {
+    pub ident: u64,
+    pub filter: i16,
+    pub flags: u16,
+    pub fflags: u32,
+    pub data: i64,
+    pub udata: u64,
+    pub ext: [u64; 2],
+}
+
+const _: () = {
+    assert!(size_of::<Kevent64>() == 48);
+    assert!(std::mem::offset_of!(Kevent64, ext) == 32);
+};
+
+/// `KEVENT_FLAG_IMMEDIATE` and `KEVENT_FLAG_ERROR_EVENTS`, from `<sys/event.h>`.
+const KEVENT_FLAG_IMMEDIATE: u32 = 0x1;
+const KEVENT_FLAG_ERROR_EVENTS: u32 = 0x2;
+
+/// `int kevent64(int kq, const struct kevent64_s *changelist, int nchanges,
+/// struct kevent64_s *eventlist, int nevents, unsigned int flags,
+/// const struct timespec *timeout)`
+///
+/// `kevent` with room for `ext`. `KEVENT_FLAG_IMMEDIATE` is a zero timeout;
+/// `KEVENT_FLAG_ERROR_EVENTS` reports only the changes that failed, as
+/// `EV_ERROR` events, and waits for nothing.
+///
+/// # Safety
+///
+/// `changes` holds `nchanges` events and `events` has room for `nevents`.
+pub unsafe extern "C" fn kevent64(
+    queue: c_int,
+    changes: *const Kevent64,
+    nchanges: c_int,
+    events: *mut Kevent64,
+    nevents: c_int,
+    flags: u32,
+    timeout: *const libc::timespec,
+) -> c_int {
+    if nchanges < 0
+        || nevents < 0
+        || (nchanges != 0 && changes.is_null())
+        || (nevents != 0 && events.is_null())
+    {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    let changes: Vec<(Kevent, [u64; 2])> = match nchanges {
+        0 => Vec::new(),
+        // SAFETY: the caller states there are `nchanges` of them.
+        n => unsafe { std::slice::from_raw_parts(changes, n as usize) }
+            .iter()
+            .map(|change| {
+                let mut narrow = Kevent {
+                    ident: change.ident as usize,
+                    filter: change.filter,
+                    flags: change.flags,
+                    fflags: change.fflags,
+                    data: change.data as isize,
+                    udata: change.udata as usize,
+                };
+                if flags & KEVENT_FLAG_ERROR_EVENTS != 0 {
+                    narrow.flags |= EV_RECEIPT;
+                }
+                (narrow, change.ext)
+            })
+            .collect(),
+    };
+    let wait = match flags & (KEVENT_FLAG_IMMEDIATE | KEVENT_FLAG_ERROR_EVENTS) != 0 {
+        true => Wait::Milliseconds(0),
+        // SAFETY: the caller's timeout, null or a `timespec`.
+        false => match unsafe { Wait::from(timeout) } {
+            Ok(wait) => wait,
+            Err(errno) => {
+                crate::errno::set(crate::errno::to_host(errno));
+                return -1;
+            }
+        },
+    };
+    let out = match collect(queue, &changes, nevents as usize, wait, true) {
+        Ok(out) => out,
+        Err(errno) => {
+            crate::errno::set(errno);
+            return -1;
+        }
+    };
+    let wide: Vec<Kevent64> = out
+        .into_iter()
+        // With `KEVENT_FLAG_ERROR_EVENTS`, a receipt for a change that worked
+        // is not an error to report.
+        .filter(|(event, _)| {
+            flags & KEVENT_FLAG_ERROR_EVENTS == 0 || event.flags & EV_ERROR == 0 || event.data != 0
+        })
+        .map(|(event, ext)| Kevent64 {
+            ident: event.ident as u64,
+            filter: event.filter,
+            flags: match flags & KEVENT_FLAG_ERROR_EVENTS {
+                0 => event.flags,
+                _ => event.flags & !EV_RECEIPT,
+            },
+            fflags: event.fflags,
+            data: event.data as i64,
+            udata: event.udata as u64,
+            ext,
+        })
+        .collect();
+    // SAFETY: the caller states there is room for `nevents`, and `collect`
+    // never returns more.
+    unsafe { std::ptr::copy_nonoverlapping(wide.as_ptr(), events, wide.len()) };
+    wide.len() as c_int
 }
 
 /// The receive rights an `EVFILT_MACHPORT` registration on `name` watches:
@@ -1563,6 +1872,77 @@ fn watched_ports(registrations: &HashMap<(usize, i16), Registration>) -> Vec<Arc
         .collect()
 }
 
+/// A pidfd for `pid`, as the host errno it could not be opened with. Only
+/// Linux has them; elsewhere `EVFILT_PROC` stays the `EINVAL` it was.
+#[cfg(not(target_os = "linux"))]
+fn open_pidfd(_pid: usize) -> Result<std::os::fd::OwnedFd, c_int> {
+    Err(libc::EINVAL)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exit_status(_pidfd: &std::os::fd::OwnedFd) -> i32 {
+    0
+}
+
+#[cfg(target_os = "linux")]
+fn open_pidfd(pid: usize) -> Result<std::os::fd::OwnedFd, c_int> {
+    let pid = libc::pid_t::try_from(pid).map_err(|_| libc::ESRCH)?;
+    if pid <= 0 {
+        return Err(libc::ESRCH);
+    }
+    // SAFETY: `pidfd_open` takes a pid and flags, and returns a descriptor.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    match fd {
+        -1 => Err(crate::errno::get()),
+        // SAFETY: a descriptor the call above opened, owned from here.
+        fd => Ok(unsafe { std::os::fd::FromRawFd::from_raw_fd(fd as c_int) }),
+    }
+}
+
+/// Whether the process a pidfd names has exited: the descriptor is readable.
+fn exited(pidfd: &std::os::fd::OwnedFd) -> bool {
+    let mut entry = libc::pollfd {
+        fd: std::os::fd::AsRawFd::as_raw_fd(pidfd),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one entry, and no wait.
+    let ready = unsafe { libc::poll(&mut entry, 1, 0) };
+    ready == 1 && entry.revents & libc::POLLIN != 0
+}
+
+/// An exited process's status in `wait`'s encoding, with Darwin's signal
+/// numbers, read without reaping it: the `waitpid` the program makes next is
+/// still the one that collects it. Zero for a process this one cannot wait
+/// on, which is any but its children.
+#[cfg(target_os = "linux")]
+fn exit_status(pidfd: &std::os::fd::OwnedFd) -> i32 {
+    // SAFETY: zeroed is a valid `siginfo_t`, which `waitid` fills.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    const P_PIDFD: libc::idtype_t = 3;
+    // SAFETY: a pidfd this module opened, and the structure above.
+    let rc = unsafe {
+        libc::waitid(
+            P_PIDFD,
+            std::os::fd::AsRawFd::as_raw_fd(pidfd) as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+        )
+    };
+    if rc != 0 {
+        return 0;
+    }
+    // SAFETY: filled by a successful `waitid` for an exit.
+    let status = unsafe { info.si_status() };
+    let signal = || crate::signal::signal_from_host(status).unwrap_or(status) & 0x7f;
+    match info.si_code {
+        libc::CLD_EXITED => (status & 0xff) << 8,
+        libc::CLD_KILLED => signal(),
+        libc::CLD_DUMPED => signal() | 0x80,
+        _ => 0,
+    }
+}
+
 /// Whether an enabled signal registration has deliveries it has not reported.
 fn signals_pending(registrations: &HashMap<(usize, i16), Registration>) -> bool {
     registrations.values().any(|r| {
@@ -1570,13 +1950,14 @@ fn signals_pending(registrations: &HashMap<(usize, i16), Registration>) -> bool 
     })
 }
 
-/// `kevent64` and the filters `poll` cannot answer; see the module note.
-pub const REFUSED: &[&str] = &["kevent64", "kevent_qos"];
+/// `kevent_qos`, whose `kevent_qos_s` and data area nothing here answers.
+pub const REFUSED: &[&str] = &["kevent_qos"];
 
 exports::exports! {
     functions {
         "kqueue" => kqueue,
         "kevent" => kevent,
+        "kevent64" => kevent64,
     }
 }
 
@@ -2304,6 +2685,226 @@ mod tests {
         assert_eq!(collect(queue, None).0, 1);
         space::destroy(set);
         space::destroy(port);
+        // SAFETY: this test's own descriptor.
+        unsafe { libc::close(queue) };
+    }
+
+    fn change64(queue: c_int, change: &Kevent64) -> c_int {
+        // SAFETY: one change and no room for events.
+        unsafe {
+            kevent64(
+                queue,
+                change,
+                1,
+                std::ptr::null_mut(),
+                0,
+                0,
+                std::ptr::null(),
+            )
+        }
+    }
+
+    /// Chromium's message pump: a port registered to have its message received
+    /// straight into the event's buffer, as `filt_machportprocess` does.
+    #[test]
+    fn kevent64_receives_a_message_into_the_events_buffer() {
+        let queue = kqueue();
+        let mut port = space::MACH_PORT_NULL;
+        // SAFETY: a live local for the out-parameter.
+        unsafe { space::mach_port_allocate(space::TASK_SELF, space::RIGHT_RECEIVE, &mut port) };
+        let mut buffer = [0u32; 16];
+        let add = Kevent64 {
+            ident: port as u64,
+            filter: EVFILT_MACHPORT,
+            flags: EV_ADD,
+            fflags: MACH_RCV_MSG,
+            udata: 7,
+            ext: [buffer.as_mut_ptr() as u64, size_of_val(&buffer) as u64],
+            ..Kevent64::default()
+        };
+        assert_eq!(change64(queue, &add), 0);
+
+        let mut got = [Kevent64::default(); 2];
+        // SAFETY: room for two events.
+        let n = unsafe {
+            kevent64(
+                queue,
+                std::ptr::null(),
+                0,
+                got.as_mut_ptr(),
+                2,
+                KEVENT_FLAG_IMMEDIATE,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(n, 0, "nothing waiting, and no wait");
+
+        post(port, 0x55);
+        let n = unsafe {
+            kevent64(
+                queue,
+                std::ptr::null(),
+                0,
+                got.as_mut_ptr(),
+                2,
+                0,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(n, 1);
+        let event = got[0];
+        assert_eq!((event.ident, event.udata), (port as u64, 7));
+        assert_eq!(event.fflags, 0, "MACH_MSG_SUCCESS");
+        assert_eq!(event.data, 0);
+        assert_eq!(event.ext[0], buffer.as_ptr() as u64);
+        assert_eq!(event.ext[1], 24 + 8, "a bare header and its trailer");
+        assert_eq!(buffer[5], 0x55, "the message is in the buffer");
+        assert!(
+            !space::receiver(port).unwrap().ready(),
+            "and no longer queued"
+        );
+
+        // A buffer too small keeps the message and names the port.
+        let small = Kevent64 {
+            ext: [buffer.as_mut_ptr() as u64, 8],
+            fflags: MACH_RCV_MSG | MACH_RCV_LARGE,
+            ..add
+        };
+        assert_eq!(change64(queue, &small), 0);
+        post(port, 0x66);
+        let n = unsafe {
+            kevent64(
+                queue,
+                std::ptr::null(),
+                0,
+                got.as_mut_ptr(),
+                2,
+                0,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(n, 1);
+        assert_eq!(got[0].fflags, MACH_RCV_TOO_LARGE as u32);
+        assert_eq!(got[0].data, port as i64);
+        assert!(space::receiver(port).unwrap().ready(), "still queued");
+
+        space::destroy(port);
+        // SAFETY: this test's own descriptor.
+        unsafe { libc::close(queue) };
+    }
+
+    /// `KEVENT_FLAG_ERROR_EVENTS` answers only the changes that failed.
+    /// XNU's `EVFILT_PROC`: a pid with no process is refused with `ESRCH`, and
+    /// a child's exit arrives once, with its status under `NOTE_EXITSTATUS`,
+    /// as `EV_EOF | EV_ONESHOT` - and leaves the child for `waitpid` to reap.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_registration_reports_the_exit_and_its_status() {
+        let kq = kqueue();
+        assert!(kq >= 0);
+        let watch = |pid: usize| Kevent {
+            ident: pid,
+            filter: EVFILT_PROC,
+            flags: EV_ADD,
+            fflags: NOTE_EXIT | NOTE_EXITSTATUS,
+            data: 0,
+            udata: 7,
+        };
+        // SAFETY: one change and no events.
+        let rc = unsafe {
+            kevent(
+                kq,
+                &watch(0x3fff_fff0),
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!((rc, crate::errno::get()), (-1, libc::ESRCH));
+
+        // SAFETY: the child only exits.
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            unsafe { libc::_exit(3) };
+        }
+        // SAFETY: as above.
+        let rc = unsafe {
+            kevent(
+                kq,
+                &watch(pid as usize),
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(rc, 0);
+        let mut event = Kevent::default();
+        let forever = std::ptr::null();
+        // SAFETY: room for one event.
+        let n = unsafe { kevent(kq, std::ptr::null(), 0, &mut event, 1, forever) };
+        assert_eq!(n, 1);
+        assert_eq!(
+            (event.ident, event.filter, event.udata),
+            (pid as usize, EVFILT_PROC, 7)
+        );
+        assert_eq!(event.fflags, NOTE_EXIT | NOTE_EXITSTATUS);
+        assert_eq!(event.flags & (EV_EOF | EV_ONESHOT), EV_EOF | EV_ONESHOT);
+        assert_eq!(event.data, 3 << 8, "the wait status of exit(3)");
+
+        // Gone with its event: nothing more arrives.
+        let zero = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { kevent(kq, std::ptr::null(), 0, &mut event, 1, &zero) },
+            0
+        );
+        // And the child is still there to reap.
+        let mut status = 0;
+        // SAFETY: the child above.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert_eq!(libc::WEXITSTATUS(status), 3);
+        unsafe { libc::close(kq) };
+    }
+
+    #[test]
+    fn kevent64_error_events_reports_only_failures() {
+        let queue = kqueue();
+        let changes = [
+            Kevent64 {
+                ident: 1,
+                filter: EVFILT_USER,
+                flags: EV_ADD,
+                ..Kevent64::default()
+            },
+            Kevent64 {
+                ident: 2,
+                filter: EVFILT_USER,
+                flags: EV_DELETE,
+                ..Kevent64::default()
+            },
+        ];
+        let mut got = [Kevent64::default(); 4];
+        // SAFETY: two changes and room for four events.
+        let n = unsafe {
+            kevent64(
+                queue,
+                changes.as_ptr(),
+                2,
+                got.as_mut_ptr(),
+                4,
+                KEVENT_FLAG_ERROR_EVENTS,
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(n, 1);
+        assert_eq!(got[0].ident, 2);
+        assert_ne!(got[0].flags & EV_ERROR, 0);
+        assert_eq!(got[0].data, crate::errno::from_host(libc::ENOENT) as i64);
         // SAFETY: this test's own descriptor.
         unsafe { libc::close(queue) };
     }
