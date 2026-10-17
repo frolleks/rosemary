@@ -107,7 +107,8 @@ unsafe fn fail(error: *mut CFTypeRef, errno: i32) {
     let reason = std::io::Error::from_raw_os_error(errno).to_string();
     let darwin = darwin::errno::from_host(errno);
     let description = format!("The operation couldn\u{2019}t be completed. {reason}");
-    let made = foundation::error::create("NSPOSIXErrorDomain", i64::from(darwin), &description, &[]);
+    let made =
+        foundation::error::create("NSPOSIXErrorDomain", i64::from(darwin), &description, &[]);
     // SAFETY: the caller's obligation.
     unsafe { *error = made as CFTypeRef };
 }
@@ -123,7 +124,12 @@ unsafe fn fail(error: *mut CFTypeRef, errno: i32) {
 /// `error` as [`fail`].
 unsafe fn load_entitlements(task: &mut Body, error: *mut CFTypeRef) -> bool {
     let mut header = [0u8; 8];
-    let errno = csops(task, cs_ops::DER_ENTITLEMENTS_BLOB, header.as_mut_ptr().cast(), 8);
+    let errno = csops(
+        task,
+        cs_ops::DER_ENTITLEMENTS_BLOB,
+        header.as_mut_ptr().cast(),
+        8,
+    );
     let failure = match errno {
         libc::EINVAL => {
             task.loaded = true;
@@ -315,7 +321,12 @@ pub unsafe extern "C" fn SecTaskGetCodeSignStatus(task: CFTypeRef) -> u32 {
         return 0;
     };
     let mut flags = 0u32;
-    match csops(task, cs_ops::STATUS, (&raw mut flags).cast(), size_of::<u32>()) {
+    match csops(
+        task,
+        cs_ops::STATUS,
+        (&raw mut flags).cast(),
+        size_of::<u32>(),
+    ) {
         0 => flags,
         _ => 0,
     }
@@ -338,7 +349,13 @@ pub unsafe extern "C" fn SecTaskEntitlementsValidated(task: CFTypeRef) -> u8 {
         return 0;
     };
     let mut flags = 0u32;
-    if csops(task, cs_ops::STATUS, (&raw mut flags).cast(), size_of::<u32>()) != 0 {
+    if csops(
+        task,
+        cs_ops::STATUS,
+        (&raw mut flags).cast(),
+        size_of::<u32>(),
+    ) != 0
+    {
         return 0;
     }
     let mask = CS_VALID | CS_KILL | CS_ENTITLEMENTS_VALIDATED;
@@ -410,7 +427,8 @@ mod tests {
         let task = SecTaskCreateWithAuditToken(std::ptr::null(), token);
         // SAFETY: a task this test made, a string, and a writable error slot.
         unsafe {
-            let name = corefoundation::string::from_bytes(b"com.apple.security.cs.allow-jit", false);
+            let name =
+                corefoundation::string::from_bytes(b"com.apple.security.cs.allow-jit", false);
             let mut error = std::ptr::null();
             assert!(SecTaskCopyValueForEntitlement(task, name, &mut error).is_null());
             assert!(!error.is_null(), "ESRCH comes back as an error");
