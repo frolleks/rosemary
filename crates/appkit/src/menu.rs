@@ -19,6 +19,9 @@ pub struct Menu {
     /// `-autoenablesItems`, inverted so that a fresh menu's zero is AppKit's
     /// `YES`.
     no_autoenable: usize,
+    /// `1 << NSRectEdge` for each edge `-_setHasPadding:onEdge:` took the
+    /// padding off, so a fresh menu's zero is padded all round, as AppKit's is.
+    unpadded: usize,
 }
 
 #[repr(C)]
@@ -464,6 +467,24 @@ unsafe extern "C" fn set_autoenables_items(receiver: Id, _sel: Sel, value: u8) {
     menu_of(receiver).no_autoenable = (value == 0) as usize;
 }
 
+/// `-_setHasPadding:onEdge:`, AppKit's private switch for the margin above
+/// the first item and below the last. Remembered only: a menu drawn here has
+/// no such margin to take away.
+unsafe extern "C" fn set_has_padding(receiver: Id, _sel: Sel, padded: u8, edge: usize) {
+    if edge < usize::BITS as usize {
+        let menu = menu_of(receiver);
+        match padded != 0 {
+            true => menu.unpadded &= !(1 << edge),
+            false => menu.unpadded |= 1 << edge,
+        }
+    }
+}
+
+/// `-_hasPaddingOnEdge:`, which reads back what the setter said.
+unsafe extern "C" fn has_padding(receiver: Id, _sel: Sel, edge: usize) -> u8 {
+    (edge >= usize::BITS as usize || menu_of(receiver).unpadded & 1 << edge == 0) as u8
+}
+
 /// Remembered only: the menu bar is chrome drawn by the compositor here, so
 /// hiding it has no effect, but `+menuBarVisible` should read back what was set.
 static MENU_BAR_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -626,6 +647,8 @@ pub(crate) fn install() {
         "setAutoenablesItems:" => set_autoenables_items, c"v20@0:8c16";
         "setMinimumWidth:" => ignored_width, c"v24@0:8d16";
         "minimumWidth" => zero_width, c"d16@0:8";
+        "_setHasPadding:onEdge:" => set_has_padding, c"v28@0:8c16Q20";
+        "_hasPaddingOnEdge:" => has_padding, c"c24@0:8Q16";
         "update" => update, c"v16@0:8";
         "performKeyEquivalent:" => perform_key_equivalent, c"c24@0:8@16";
         "performActionForItemAtIndex:" => perform_action_for_item_at_index, c"v24@0:8q16";
