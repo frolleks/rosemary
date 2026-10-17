@@ -12,6 +12,7 @@ mod block;
 pub mod boxed;
 pub mod bundle;
 pub mod calculate;
+mod cfhost;
 mod characterset;
 mod constant;
 pub mod cookies;
@@ -112,6 +113,8 @@ exports::group! {
     timer::cf,
     appleevent,
     proxy,
+    error::cf,
+    cfhost,
 }
 
 /// This user's home directory, as the guest spells it.
@@ -318,6 +321,8 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     out.extend(corefoundation::base::named_string_globals(
         NOTIFICATION_NAMES,
     ));
+    out.extend(corefoundation::base::named_string_globals(EXCEPTION_NAMES));
+    out.extend(cfhost::data_symbols());
     // `NSZeroPoint`, `NSZeroSize` and `NSZeroRect` are **structs** in Foundation's `__DATA`,
     // not pointers to them: the guest loads the symbol's address and reads two
     // or four doubles out of it. A one-word cell would leave the rest of the
