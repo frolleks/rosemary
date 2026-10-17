@@ -9,6 +9,7 @@ pub mod native;
 pub mod send;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use machish::extensions::objc::{ObjcCategory, ObjcClass, ObjcImage, ObjcMethod, ObjcProtocol};
@@ -134,6 +135,10 @@ pub struct ObjcRuntime {
     protocol_bounds: (u64, u64),
     stats: Stats,
     refusals: Vec<Refusal>,
+    /// The path of the image each guest class came from, by host `Class` -
+    /// what a duplicate class's warning names, as objc4's `_headerForClass`
+    /// answers it.
+    defined_in: AddrMap<Arc<str>>,
 }
 
 impl Default for ObjcRuntime {
@@ -148,6 +153,7 @@ impl Default for ObjcRuntime {
             protocol_bounds: (u64::MAX, 0),
             stats: Stats::default(),
             refusals: Vec::new(),
+            defined_in: AddrMap::default(),
         }
     }
 }
@@ -244,7 +250,7 @@ impl ObjcRuntime {
 /// Register every image's Objective-C metadata with the host runtime.
 pub fn register(r: &dyn Realizer) -> Result<ObjcRuntime, VmError> {
     let mut rt = ObjcRuntime::default();
-    register_images(r, &mut rt, &images_of(r.report()))?;
+    register_images(r, &mut rt, &named_images_of(r.report()))?;
     crate::objcexc::repair_image_records(&mut *r.memory(), r.report());
     Ok(rt)
 }
@@ -258,9 +264,19 @@ pub(crate) fn register_loaded(
     rt: &mut ObjcRuntime,
     report: &LinkReport,
 ) -> Result<(), VmError> {
-    register_images(r, rt, &images_of(report))?;
+    register_images(r, rt, &named_images_of(report))?;
     crate::objcexc::repair_image_records(&mut *r.memory(), report);
     Ok(())
+}
+
+/// [`images_of`], each beside the path it was read from.
+fn named_images_of(report: &LinkReport) -> Vec<(Arc<str>, &ObjcImage)> {
+    report
+        .images
+        .iter()
+        .rev()
+        .filter_map(|i| i.objc.as_ref().map(|o| (Arc::from(i.path.as_str()), o)))
+        .collect()
 }
 
 /// Every image in `report` carrying Objective-C metadata, dependencies first.
@@ -277,10 +293,11 @@ fn images_of(report: &LinkReport) -> Vec<&ObjcImage> {
 fn register_images(
     r: &dyn Realizer,
     rt: &mut ObjcRuntime,
-    images: &[&ObjcImage],
+    named: &[(Arc<str>, &ObjcImage)],
 ) -> Result<(), VmError> {
+    let images: Vec<&ObjcImage> = named.iter().map(|&(_, image)| image).collect();
     // Protocols first - a class adopts them as it is registered.
-    for image in images {
+    for image in &images {
         for p in &image.protocols {
             register_protocol(rt, p);
         }
@@ -288,28 +305,27 @@ fn register_images(
 
     // Then classes, superclass-first. The index is built across every image so
     // a subclass can find a superclass declared in another one.
-    let by_va: HashMap<u64, &ObjcClass> = images
+    let by_va: HashMap<u64, (&ObjcClass, &Arc<str>)> = named
         .iter()
-        .flat_map(|i| i.classes.iter())
-        .map(|c| (c.va, c))
+        .flat_map(|(path, i)| i.classes.iter().map(move |c| (c.va, (c, path))))
         .collect();
-    for image in images {
+    for (path, image) in named {
         for c in &image.classes {
             let mut chain = HashSet::new();
-            register_class(r, rt, &by_va, c, &mut chain);
+            register_class(r, rt, &by_va, (c, path), &mut chain);
         }
     }
 
     // Ivar offsets, once every class is realized and the runtime has laid them
     // out.
-    for image in images {
+    for image in &images {
         for c in &image.classes {
             patch_ivar_offsets(r, rt, c)?;
         }
     }
 
     // Categories last: one may extend a class registered above.
-    for image in images {
+    for image in &images {
         for c in &image.categories {
             register_category(r, rt, c);
         }
@@ -317,7 +333,7 @@ fn register_images(
 
     // Selector uniquing, which is independent of all of the above: it rewrites
     // the guest's own `__objc_selrefs` slots from string pointers to `SEL`s.
-    for image in images {
+    for image in &images {
         rt.stats.selectors += unique_selectors(r, image)?;
     }
 
@@ -425,8 +441,8 @@ fn memory_error(addr: u64) -> VmError {
 fn register_class(
     r: &dyn Realizer,
     rt: &mut ObjcRuntime,
-    by_va: &HashMap<u64, &ObjcClass>,
-    class: &ObjcClass,
+    by_va: &HashMap<u64, (&ObjcClass, &Arc<str>)>,
+    (class, image): (&ObjcClass, &Arc<str>),
     chain: &mut HashSet<u64>,
 ) -> Option<u64> {
     if let Some(&already) = rt.to_host.get(&class.va) {
@@ -485,19 +501,31 @@ fn register_class(
 
     // SAFETY: `c_name` is NUL-terminated and outlives the call; `superclass` is
     // either null, a `Class` the host runtime gave us, or one it created above.
-    let cls = unsafe { host::objc_allocateClassPair(superclass, c_name.as_ptr(), 0) };
+    let mut cls = unsafe { host::objc_allocateClassPair(superclass, c_name.as_ptr(), 0) };
     if cls.is_null() {
         // The runtime declines exactly one thing here, and it is worth telling
         // apart: a name already in use. A guest defining `NSString` is a
         // different problem from a guest defining something unrepresentable.
         // SAFETY: `c_name` as above.
-        let taken = unsafe { !host::objc_lookUpClass(c_name.as_ptr()).is_null() };
-        rt.refusals.push(if taken {
-            Refusal::NameTaken { name }
-        } else {
-            Refusal::AllocationFailed { name }
-        });
-        return None;
+        let taken = unsafe { host::objc_lookUpClass(c_name.as_ptr()) };
+        if !taken.is_null() {
+            // Apple's `readClass` realizes the second class of a name all
+            // the same, so the image that defines it goes on using its own;
+            // only lookup by name keeps answering the first.
+            // SAFETY: as above.
+            cls = unsafe { host::allocate_image_class_pair(superclass, c_name.as_ptr()) };
+            if !cls.is_null() {
+                inform_duplicate(rt, &name, taken, (class.va, image));
+            }
+        }
+        if cls.is_null() {
+            rt.refusals.push(if !taken.is_null() {
+                Refusal::NameTaken { name }
+            } else {
+                Refusal::AllocationFailed { name }
+            });
+            return None;
+        }
     }
 
     // Ivars, before registration: the runtime lays the class out at
@@ -616,6 +644,7 @@ fn register_class(
 
     let host_va = cls as u64;
     rt.link(class.va, host_va);
+    rt.defined_in.insert(host_va, image.clone());
     // The metaclass is a class the guest names too.
     if let Some(declared) = &class.meta {
         rt.link(declared.va, meta as u64);
@@ -631,6 +660,23 @@ fn register_class(
         });
     chain.remove(&class.va);
     Some(host_va)
+}
+
+/// objc4's `inform_duplicate`: the warning a second class of a taken name
+/// draws, on by default (`OBJC_DEBUG_DUPLICATE_CLASSES`).
+///
+/// Each class is named by the address the guest knows it by and the image
+/// that defined it - `??` for one no image did, as objc4 answers a class
+/// with no header.
+fn inform_duplicate(rt: &ObjcRuntime, name: &str, old: host::Class, (new, image): (u64, &str)) {
+    let old_image = rt.defined_in.get(&(old as u64)).map_or("??", |p| p);
+    eprintln!(
+        "objc[{}]: Class {name} is implemented in both {old_image} ({:#x}) and {image} ({new:#x}). \
+         This may cause spurious casting failures and mysterious crashes. \
+         One of the duplicates must be removed or renamed.",
+        std::process::id(),
+        rt.guest_or(old as u64),
+    );
 }
 
 /// Install one guest method on `target`.
