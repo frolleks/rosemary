@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::ffi::{CString, c_char, c_void};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use super::block;
@@ -99,8 +99,20 @@ pub struct Queue {
     label: CString,
     concurrent: bool,
     main: bool,
-    target: u64,
+    /// A retained queue, or zero for the pool itself.
+    target: AtomicU64,
     state: Mutex<State>,
+    /// `dispatch_queue_set_specific`'s entries, in the order they were set.
+    specifics: Mutex<Vec<Specific>>,
+}
+
+/// One `dispatch_queue_set_specific` entry: a key, its non-null context, and
+/// the destructor that context is handed to when it is replaced, removed or
+/// the queue goes away.
+struct Specific {
+    key: u64,
+    context: u64,
+    destructor: u64,
 }
 
 struct State {
@@ -129,11 +141,12 @@ fn new(label: &str, concurrent: bool, main: bool) -> u64 {
         label: CString::new(label).unwrap_or_default(),
         concurrent,
         main,
-        target: 0,
+        target: AtomicU64::new(0),
         state: Mutex::new(State {
             pending: VecDeque::new(),
             draining: false,
         }),
+        specifics: Mutex::new(Vec::new()),
     });
     Box::into_raw(queue) as u64
 }
@@ -243,7 +256,7 @@ fn inside(handle: u64) -> bool {
 }
 
 fn current_label() -> *const c_char {
-    let handle = CURRENT.with(|c| c.borrow().last().copied());
+    let handle = Some(current_queue()).filter(|&h| h != 0);
     // SAFETY: a handle this module put there, still live while this thread runs it.
     match handle.and_then(|h| unsafe { queue(h) }) {
         Some(q) => q.label.as_ptr(),
@@ -437,23 +450,180 @@ pub unsafe extern "C" fn queue_create_with_target(
     target: u64,
 ) -> u64 {
     let handle = unsafe { queue_create(label, attr) };
-    object::retain(target);
-    unsafe {
-        (*(handle as *mut Queue)).target = target;
-    }
+    // SAFETY: a queue this call just made.
+    unsafe { set_target_queue(handle, target) };
     handle
 }
 
 impl Drop for Queue {
     fn drop(&mut self) {
+        // As `_dispatch_queue_specific_head_dispose`: every context with a
+        // destructor is handed to it on the default queue.
+        let specifics = std::mem::take(self.specifics.get_mut().unwrap_or_else(|e| e.into_inner()));
+        for specific in specifics {
+            release_specific(specific);
+        }
         unsafe {
-            object::release(self.target);
+            object::release(*self.target.get_mut());
         }
     }
 }
 
 pub(crate) fn target(handle: u64) -> u64 {
-    unsafe { queue(handle) }.map_or(0, |q| q.target)
+    unsafe { queue(handle) }.map_or(0, |q| q.target.load(Ordering::Acquire))
+}
+
+/// `void dispatch_set_target_queue(dispatch_object_t, dispatch_queue_t)`.
+///
+/// For a queue: work it is given runs by way of `target` from now on. A null
+/// target is the default, which is the pool. The process's own queues - main
+/// and global - keep theirs, as `dispatch_set_target_queue` returns early for
+/// a global or root queue; so does anything that is not a queue, whose target
+/// here would only say where its finalizer runs.
+///
+/// # Safety
+///
+/// `handle` is null or a live dispatch object, and `target` null or a live
+/// queue.
+pub unsafe extern "C" fn set_target_queue(handle: u64, target: u64) {
+    // SAFETY: the caller's guarantee.
+    let Some(q) = (unsafe { queue(handle) }) else {
+        return;
+    };
+    if q.main || object::retain_count(handle) == usize::MAX {
+        return;
+    }
+    // Retargeting a queue at itself, directly or through a chain, would make
+    // scheduling it a loop.
+    let mut at = target;
+    while at != 0 {
+        if at == handle {
+            return;
+        }
+        at = self::target(at);
+    }
+    object::retain(target);
+    let previous = q.target.swap(target, Ordering::AcqRel);
+    // SAFETY: the reference this queue took when it was targeted there.
+    unsafe { object::release(previous) };
+}
+
+/// The queue this thread is running work for, innermost first; on the main
+/// thread outside any, the main queue, which `libdispatch_init` makes the main
+/// thread's current queue.
+fn current_queue() -> u64 {
+    match CURRENT.with(|c| c.borrow().last().copied()) {
+        Some(handle) => handle,
+        None if on_main_thread() => main_queue(),
+        None => 0,
+    }
+}
+
+/// Whether `q` keeps specifics: any queue but a global one, the main queue
+/// included, as `_dispatch_queue_admits_specific` decides.
+fn admits_specific(handle: u64, q: &Queue) -> bool {
+    q.main || object::retain_count(handle) != usize::MAX
+}
+
+/// Hand a replaced or removed entry's context to its destructor, on the
+/// default global queue.
+fn release_specific(specific: Specific) {
+    if specific.destructor != 0 {
+        // SAFETY: a `dispatch_function_t` the guest gave with this context.
+        unsafe { async_f(global_queue(0), specific.context, specific.destructor) };
+    }
+}
+
+/// `void dispatch_queue_set_specific(dispatch_queue_t, const void *key,
+/// void *context, dispatch_function_t destructor)`.
+///
+/// A null context removes the key. Whichever context a key held before is
+/// handed to its destructor. A global queue keeps none - Apple's crashes the
+/// process for being asked, and this one declines.
+///
+/// # Safety
+///
+/// `handle` is null or a live queue, and `destructor` null or callable with
+/// `context`.
+pub unsafe extern "C" fn queue_set_specific(handle: u64, key: u64, context: u64, destructor: u64) {
+    if key == 0 {
+        return;
+    }
+    // SAFETY: the caller's guarantee.
+    let Some(q) = (unsafe { queue(handle) }) else {
+        return;
+    };
+    if !admits_specific(handle, q) {
+        return;
+    }
+    let replaced = {
+        let mut specifics = q.specifics.lock().unwrap_or_else(|e| e.into_inner());
+        let found = specifics.iter().position(|s| s.key == key);
+        match (found, context) {
+            (Some(i), 0) => Some(specifics.remove(i)),
+            (Some(i), _) => Some(std::mem::replace(
+                &mut specifics[i],
+                Specific {
+                    key,
+                    context,
+                    destructor,
+                },
+            )),
+            (None, 0) => None,
+            (None, _) => {
+                specifics.push(Specific {
+                    key,
+                    context,
+                    destructor,
+                });
+                None
+            }
+        }
+    };
+    if let Some(replaced) = replaced {
+        release_specific(replaced);
+    }
+}
+
+/// The context `key` holds on `handle` itself, or null.
+fn specific(handle: u64, key: u64) -> u64 {
+    // SAFETY: a live queue - the caller's, or one a live queue targets.
+    let Some(q) = (unsafe { queue(handle) }) else {
+        return 0;
+    };
+    if !admits_specific(handle, q) {
+        return 0;
+    }
+    let specifics = q.specifics.lock().unwrap_or_else(|e| e.into_inner());
+    specifics
+        .iter()
+        .find(|s| s.key == key)
+        .map_or(0, |s| s.context)
+}
+
+/// `void *dispatch_queue_get_specific(dispatch_queue_t, const void *key)`.
+pub unsafe extern "C" fn queue_get_specific(handle: u64, key: u64) -> u64 {
+    match key {
+        0 => 0,
+        _ => specific(handle, key),
+    }
+}
+
+/// `void *dispatch_get_specific(const void *key)`: the key on the current
+/// queue, or else on the first queue up its target chain that has it.
+pub unsafe extern "C" fn get_specific(key: u64) -> u64 {
+    if key == 0 {
+        return 0;
+    }
+    let mut at = current_queue();
+    while at != 0 {
+        let found = specific(at, key);
+        if found != 0 {
+            return found;
+        }
+        at = target(at);
+    }
+    0
 }
 
 unsafe extern "C" fn run_targeted(context: *mut c_void) {
@@ -784,6 +954,61 @@ mod tests {
         // Long enough that a concurrent queue would interleave, so the ordering
         // assertion below is actually testing the serial guarantee.
         std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    /// What `dispatch_get_specific` answers from inside work on `context`'s
+    /// queue, written back into the `[u64; 2]` the context points at.
+    unsafe extern "C" fn read_specific(context: *mut c_void) {
+        // SAFETY: the caller's `[u64; 2]`: the key, then the answer.
+        let slots = unsafe { &*(context as *const [AtomicU64; 2]) };
+        let key = slots[0].load(Ordering::Acquire);
+        slots[1].store(unsafe { get_specific(key) } | 1 << 63, Ordering::Release);
+    }
+
+    /// A key set on a queue is found from work running on it, and from work
+    /// on a queue that targets it; replacing it hands the old context to its
+    /// destructor.
+    #[test]
+    fn a_specific_is_found_up_the_target_chain() {
+        static KEY: u8 = 0;
+        let key = &KEY as *const u8 as u64;
+        let destroyed = AtomicU32::new(0);
+        let outer = create_serial("specific outer");
+        // SAFETY: live queues, a key that outlives them, and a destructor
+        // whose context is the counter above.
+        unsafe {
+            let inner = queue_create_with_target(c"specific inner".as_ptr(), 0, outer);
+            queue_set_specific(outer, key, 0x1234, 0);
+            assert_eq!(queue_get_specific(outer, key), 0x1234);
+            assert_eq!(queue_get_specific(inner, key), 0, "only the queue's own");
+
+            let slots = [AtomicU64::new(key), AtomicU64::new(0)];
+            async_f(
+                inner,
+                &slots as *const _ as u64,
+                read_specific as *const () as u64,
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while slots[1].load(Ordering::Acquire) == 0 {
+                assert!(std::time::Instant::now() < deadline, "work never ran");
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert_eq!(slots[1].load(Ordering::Acquire) & !(1 << 63), 0x1234);
+
+            let counter = &destroyed as *const AtomicU32 as u64;
+            queue_set_specific(inner, key, counter, bump as *const () as u64);
+            queue_set_specific(inner, key, 0, 0);
+            wait_for(&destroyed, 1);
+            assert_eq!(queue_get_specific(inner, key), 0);
+
+            object::release(inner);
+            object::release(outer);
+        }
+        assert_eq!(
+            unsafe { get_specific(key) },
+            0,
+            "no queue on this thread has it"
+        );
     }
 
     #[test]
