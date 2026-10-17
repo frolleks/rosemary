@@ -93,6 +93,91 @@ pub unsafe extern "C" fn CGRectEqualToRect(a: NSRect, b: NSRect) -> u8 {
     u8::from(standardized(a) == standardized(b))
 }
 
+/// `bool CGRectIsNull(CGRect)`: whether the rect is `CGRectNull`, which is
+/// an origin at infinity on either axis.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGRectIsNull(rect: NSRect) -> u8 {
+    u8::from(rect.origin.x == f64::INFINITY || rect.origin.y == f64::INFINITY)
+}
+
+/// The keys of a rect's dictionary representation, in field order.
+const RECT_KEYS: [&str; 4] = ["X", "Y", "Width", "Height"];
+
+/// `CFDictionaryRef CGRectCreateDictionaryRepresentation(CGRect)`: the four
+/// fields as numbers, under `X`, `Y`, `Width` and `Height`.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGRectCreateDictionaryRepresentation(
+    rect: NSRect,
+) -> corefoundation::base::CFTypeRef {
+    use corefoundation::collections::{self, Number};
+    let fields = [
+        rect.origin.x,
+        rect.origin.y,
+        rect.size.width,
+        rect.size.height,
+    ];
+    let numbers = fields.map(|field| collections::new_number(Number::Float(field)));
+    let pairs: Vec<_> = RECT_KEYS
+        .iter()
+        .zip(numbers)
+        .map(|(key, number)| {
+            (
+                corefoundation::base::interned_name(key) as corefoundation::base::CFTypeRef,
+                number,
+            )
+        })
+        .collect();
+    let dictionary = collections::new_dictionary(
+        &pairs,
+        corefoundation::callbacks::Policy::from_key_callbacks(),
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    for number in numbers {
+        // SAFETY: the reference `new_number` returned; the dictionary holds
+        // its own.
+        unsafe { corefoundation::api::CFRelease(number) };
+    }
+    dictionary
+}
+
+/// `bool CGRectMakeWithDictionaryRepresentation(CFDictionaryRef, CGRect *)`:
+/// false, leaving `rect` alone, unless all four fields are there as numbers.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGRectMakeWithDictionaryRepresentation(
+    dictionary: corefoundation::base::CFTypeRef,
+    rect: *mut NSRect,
+) -> u8 {
+    use corefoundation::collections;
+    if rect.is_null() {
+        return 0;
+    }
+    // SAFETY: null or a dictionary the guest holds.
+    if unsafe { collections::dictionary(dictionary) }.is_none() {
+        return 0;
+    }
+    let mut fields = [0.0; 4];
+    for (field, key) in fields.iter_mut().zip(RECT_KEYS) {
+        let key = corefoundation::base::interned_name(key) as corefoundation::base::CFTypeRef;
+        // SAFETY: a dictionary, checked above.
+        let value = unsafe { corefoundation::api::CFDictionaryGetValue(dictionary, key) };
+        // SAFETY: null or one of the dictionary's values.
+        match unsafe { collections::number(value) } {
+            Some(number) => *field = number.as_f64(),
+            None => return 0,
+        }
+    }
+    let [x, y, width, height] = fields;
+    // SAFETY: the caller's rect.
+    unsafe {
+        *rect = NSRect {
+            origin: NSPoint { x, y },
+            size: foundation::geometry::NSSize { width, height },
+        }
+    };
+    1
+}
+
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn NSIsEmptyRect(rect: NSRect) -> u8 {
     u8::from(rect.size.width <= 0.0 || rect.size.height <= 0.0)

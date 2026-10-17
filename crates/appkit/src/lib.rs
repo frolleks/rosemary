@@ -11,6 +11,7 @@
 )]
 
 mod about;
+mod accessibility;
 pub mod alert;
 mod animation;
 pub mod appearance;
@@ -36,6 +37,7 @@ mod displaylink;
 pub mod dock;
 pub mod event;
 mod font;
+mod uttypes;
 pub use chrome::fonts;
 pub mod geometry;
 pub mod graphics;
@@ -141,6 +143,9 @@ exports::exports! {
         "CGSessionCopyCurrentDictionary" => screen::CGSessionCopyCurrentDictionary,
         "CGWindowServerCreateServerPort" => screen::CGWindowServerCreateServerPort,
         "CGDisplayBounds" => screen::CGDisplayBounds,
+        "CGDisplayUsesForceToGray" => screen::CGDisplayUsesForceToGray,
+        "CGDisplayUsesInvertedPolarity" => screen::CGDisplayUsesInvertedPolarity,
+        "CGDisplayCopyColorSpace" => screen::CGDisplayCopyColorSpace,
         "CGGetDisplayTransferByTable" => screen::CGGetDisplayTransferByTable,
         "CGSetDisplayTransferByTable" => screen::CGSetDisplayTransferByTable,
         "CGDisplayRestoreColorSyncSettings" => screen::CGDisplayRestoreColorSyncSettings,
@@ -247,6 +252,12 @@ exports::exports! {
         "NSDisableScreenUpdates" => geometry::NSDisableScreenUpdates,
         "NSEnableScreenUpdates" => geometry::NSEnableScreenUpdates,
         "CGRectEqualToRect" | "NSEqualRects" => geometry::CGRectEqualToRect,
+        "CGRectIsNull" => geometry::CGRectIsNull,
+        "CATransform3DMakeTranslation" => CATransform3DMakeTranslation,
+        "CATransform3DMakeScale" => CATransform3DMakeScale,
+        "CATransform3DIsIdentity" => CATransform3DIsIdentity,
+        "CGRectCreateDictionaryRepresentation" => geometry::CGRectCreateDictionaryRepresentation,
+        "CGRectMakeWithDictionaryRepresentation" => geometry::CGRectMakeWithDictionaryRepresentation,
         "GetCurrentKeyModifiers" => keymap::GetCurrentKeyModifiers,
         "TISCopyCurrentKeyboardInputSource" => textinput::TISCopyCurrentKeyboardInputSource,
         "TISCopyInputMethodKeyboardLayoutOverride" => textinput::TISCopyInputMethodKeyboardLayoutOverride,
@@ -301,6 +312,50 @@ pub fn ns_app_cell() -> u64 {
 // CoreGraphics exports these structures themselves, rather than pointers to
 // them. A guest loads their addresses from its GOT and copies the fields.
 static CG_AFFINE_TRANSFORM_IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+/// `CATransform3D`, sixteen doubles in row order `m11` to `m44`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Transform3D([f64; 16]);
+
+const IDENTITY_3D: Transform3D = Transform3D([
+    1.0, 0.0, 0.0, 0.0, //
+    0.0, 1.0, 0.0, 0.0, //
+    0.0, 0.0, 1.0, 0.0, //
+    0.0, 0.0, 0.0, 1.0,
+]);
+static CA_TRANSFORM_3D_IDENTITY: Transform3D = IDENTITY_3D;
+
+/// `CATransform3D CATransform3DMakeTranslation(CGFloat tx, CGFloat ty,
+/// CGFloat tz)`: the identity with the translation in `m41` to `m43`.
+#[allow(non_snake_case)]
+pub extern "C" fn CATransform3DMakeTranslation(tx: f64, ty: f64, tz: f64) -> Transform3D {
+    let mut t = IDENTITY_3D;
+    t.0[12] = tx;
+    t.0[13] = ty;
+    t.0[14] = tz;
+    t
+}
+
+/// `CATransform3D CATransform3DMakeScale(CGFloat sx, CGFloat sy, CGFloat sz)`:
+/// the identity with the scale on the diagonal.
+#[allow(non_snake_case)]
+pub extern "C" fn CATransform3DMakeScale(sx: f64, sy: f64, sz: f64) -> Transform3D {
+    let mut t = IDENTITY_3D;
+    t.0[0] = sx;
+    t.0[5] = sy;
+    t.0[10] = sz;
+    t
+}
+
+/// `bool CATransform3DIsIdentity(CATransform3D)`.
+#[allow(non_snake_case)]
+pub extern "C" fn CATransform3DIsIdentity(t: Transform3D) -> u8 {
+    u8::from(t.0 == IDENTITY_3D.0)
+}
+
+/// `{{INFINITY, INFINITY}, {0, 0}}`, the rect `CGRectIntersection` gives two
+/// that do not meet.
+static CG_RECT_NULL: [f64; 4] = [f64::INFINITY, f64::INFINITY, 0.0, 0.0];
 /// `{{-CGFLOAT_MAX / 2, -CGFLOAT_MAX / 2}, {CGFLOAT_MAX, CGFLOAT_MAX}}`.
 static CG_RECT_INFINITE: [f64; 4] = [f64::MAX / -2.0, f64::MAX / -2.0, f64::MAX, f64::MAX];
 
@@ -318,6 +373,14 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         "_CGRectInfinite".to_string(),
         CG_RECT_INFINITE.as_ptr() as usize as u64,
     ));
+    out.push((
+        "_CATransform3DIdentity".to_string(),
+        &CA_TRANSFORM_3D_IDENTITY as *const Transform3D as usize as u64,
+    ));
+    out.push((
+        "_CGRectNull".to_string(),
+        CG_RECT_NULL.as_ptr() as usize as u64,
+    ));
     let srgb = foundation::notification::name_object("kCGColorSpaceSRGB");
     out.push((
         "_kCGColorSpaceSRGB".to_string(),
@@ -334,6 +397,16 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         textinput::STRING_GLOBALS,
     ));
     out.extend(corefoundation::base::string_globals(STRING_GLOBALS));
+    out.extend(corefoundation::base::string_globals(accessibility::NAMES));
+    let types: Vec<(&str, &str)> = uttypes::TYPES
+        .iter()
+        .filter(|(symbol, _)| !STRING_GLOBALS.iter().any(|(s, _)| s == symbol))
+        .copied()
+        .collect();
+    out.extend(corefoundation::base::string_globals(&types));
+    out.extend(corefoundation::base::string_globals(
+        accessibility::UNPAIRED,
+    ));
     let gravities: Vec<(&str, &str)> = coreanimation::GRAVITIES
         .iter()
         .map(|(symbol, name, _)| (*symbol, *name))
@@ -407,6 +480,22 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     "NSWindowWillMiniaturizeNotification",
     "NSWindowWillMoveNotification",
     "NSWindowDidChangeOcclusionStateNotification",
+    // Observed by a browser's display, theme, menu and power code. No colour
+    // profile, tint, menu tracking, Space, fast user switch or power-off
+    // happens here to post them.
+    "NSScreenColorSpaceDidChangeNotification",
+    "NSApplicationDidHideNotification",
+    "NSApplicationDidUnhideNotification",
+    "NSControlTintDidChangeNotification",
+    "NSMenuDidBeginTrackingNotification",
+    "NSMenuDidEndTrackingNotification",
+    "NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification",
+    "NSWorkspaceActiveSpaceDidChangeNotification",
+    "NSWorkspaceDidActivateApplicationNotification",
+    "NSWorkspaceDidDeactivateApplicationNotification",
+    "NSWorkspaceSessionDidBecomeActiveNotification",
+    "NSWorkspaceSessionDidResignActiveNotification",
+    "NSWorkspaceWillPowerOffNotification",
 ];
 
 /// The other AppKit string globals a program reads.
@@ -415,6 +504,108 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
 /// space and an attribute key are compared against by string, so publishing the
 /// documented value is exact.
 pub const STRING_GLOBALS: &[(&str, &str)] = &[
+    // The `NSFontDescriptor` keys, which are CoreText's descriptor keys: the
+    // two descriptor types are toll-free, so each is the same string as its
+    // `kCTFont*` counterpart in [`coretext`].
+    ("_NSFontNameAttribute", "NSFontNameAttribute"),
+    ("_NSFontFamilyAttribute", "NSFontFamilyAttribute"),
+    ("_NSFontFaceAttribute", "NSFontFaceAttribute"),
+    ("_NSFontSizeAttribute", "NSFontSizeAttribute"),
+    ("_NSFontVisibleNameAttribute", "NSFontVisibleNameAttribute"),
+    ("_NSFontTraitsAttribute", "NSCTFontTraitsAttribute"),
+    ("_NSFontSymbolicTrait", "NSCTFontSymbolicTrait"),
+    ("_NSFontWeightTrait", "NSCTFontWeightTrait"),
+    ("_NSFontWidthTrait", "NSCTFontProportionTrait"),
+    ("_NSFontSlantTrait", "NSCTFontSlantTrait"),
+    // A user-notification launch's key in the launch notification.
+    (
+        "_NSApplicationLaunchUserNotificationKey",
+        "NSApplicationLaunchUserNotificationKey",
+    ),
+    ("_NSImageCompressionFactor", "NSImageCompressionFactor"),
+    ("_NSPasteboardTypePNG", "public.png"),
+    ("_NSPasteboardTypeTIFF", "public.tiff"),
+    ("_NSPasteboardNameFind", "Apple CFPasteboard find"),
+    ("_NSPrintAllPages", "NSPrintAllPages"),
+    ("_NSPrintFirstPage", "NSPrintFirstPage"),
+    ("_NSPrintLastPage", "NSPrintLastPage"),
+    // The bindings vocabulary's option and info keys.
+    ("_NSDisplayNameBindingOption", "NSDisplayName"),
+    ("_NSDisplayPatternBindingOption", "NSDisplayPattern"),
+    (
+        "_NSMultipleValuesPlaceholderBindingOption",
+        "NSMultipleValuesPlaceholder",
+    ),
+    (
+        "_NSNoSelectionPlaceholderBindingOption",
+        "NSNoSelectionPlaceholder",
+    ),
+    (
+        "_NSNotApplicablePlaceholderBindingOption",
+        "NSNotApplicablePlaceholder",
+    ),
+    ("_NSNullPlaceholderBindingOption", "NSNullPlaceholder"),
+    ("_NSObservedKeyPathKey", "NSObservedKeyPath"),
+    ("_NSObservedObjectKey", "NSObservedObject"),
+    ("_NSOptionsKey", "NSOptions"),
+    // The Touch Bar's standard item identifiers, whose values are their names.
+    (
+        "_NSTouchBarItemIdentifierFixedSpaceSmall",
+        "NSTouchBarItemIdentifierFixedSpaceSmall",
+    ),
+    (
+        "_NSTouchBarItemIdentifierFixedSpaceLarge",
+        "NSTouchBarItemIdentifierFixedSpaceLarge",
+    ),
+    (
+        "_NSTouchBarItemIdentifierFlexibleSpace",
+        "NSTouchBarItemIdentifierFlexibleSpace",
+    ),
+    (
+        "_NSTouchBarItemIdentifierOtherItemsProxy",
+        "NSTouchBarItemIdentifierOtherItemsProxy",
+    ),
+    (
+        "_NSTouchBarItemIdentifierCharacterPicker",
+        "NSTouchBarItemIdentifierCharacterPicker",
+    ),
+    (
+        "_NSTouchBarItemIdentifierCandidateList",
+        "NSTouchBarItemIdentifierCandidateList",
+    ),
+    // `+[CATransaction setDisableActions:]`'s key-value spelling.
+    ("_kCATransactionDisableActions", "disableActions"),
+    ("_kCATransactionAnimationDuration", "animationDuration"),
+    // `CGWindowListCopyWindowInfo`'s keys, whose values are their names.
+    ("_kCGWindowNumber", "kCGWindowNumber"),
+    ("_kCGWindowStoreType", "kCGWindowStoreType"),
+    ("_kCGWindowLayer", "kCGWindowLayer"),
+    ("_kCGWindowBounds", "kCGWindowBounds"),
+    ("_kCGWindowSharingState", "kCGWindowSharingState"),
+    ("_kCGWindowAlpha", "kCGWindowAlpha"),
+    ("_kCGWindowOwnerPID", "kCGWindowOwnerPID"),
+    ("_kCGWindowMemoryUsage", "kCGWindowMemoryUsage"),
+    ("_kCGWindowOwnerName", "kCGWindowOwnerName"),
+    ("_kCGWindowName", "kCGWindowName"),
+    ("_kCGWindowIsOnscreen", "kCGWindowIsOnscreen"),
+    (
+        "_kCGWindowBackingLocationVideoMemory",
+        "kCGWindowBackingLocationVideoMemory",
+    ),
+    // The named colour spaces, whose values are their own names.
+    ("_kCGColorSpaceDisplayP3", "kCGColorSpaceDisplayP3"),
+    ("_kCGColorSpaceExtendedSRGB", "kCGColorSpaceExtendedSRGB"),
+    ("_kCGColorSpaceGenericRGB", "kCGColorSpaceGenericRGB"),
+    ("_kCGColorSpaceGenericGray", "kCGColorSpaceGenericGray"),
+    (
+        "_kCGColorSpaceGenericRGBLinear",
+        "kCGColorSpaceGenericRGBLinear",
+    ),
+    ("_kCGColorSpaceLinearSRGB", "kCGColorSpaceLinearSRGB"),
+    (
+        "_kCGColorSpaceExtendedLinearSRGB",
+        "kCGColorSpaceExtendedLinearSRGB",
+    ),
     ("_kCAMediaTimingFunctionLinear", coreanimation::LINEAR),
     ("_kCAMediaTimingFunctionEaseIn", coreanimation::EASE_IN),
     ("_kCAMediaTimingFunctionEaseOut", coreanimation::EASE_OUT),
@@ -453,6 +644,8 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_kUTTypeUTF8PlainText", "public.utf8-plain-text"),
     ("_kUTTagClassMIMEType", "public.mime-type"),
     ("_kUTTagClassFilenameExtension", "public.filename-extension"),
+    ("_kUTTagClassNSPboardType", "com.apple.nspboard-type"),
+    ("_kUTTagClassOSType", "com.apple.ostype"),
     // CoreGraphics names, passed back in as colour space names and as an
     // options key that is free to be ignored.
     (
@@ -527,6 +720,7 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ),
     ("_NSDeviceSize", "NSDeviceSize"),
     ("_NSModalPanelRunLoopMode", "NSModalPanelRunLoopMode"),
+    ("_NSEventTrackingRunLoopMode", "NSEventTrackingRunLoopMode"),
     // The pasteboard's plain-text type, under both its spellings: the modern one
     // is a uniform type identifier and the deprecated one is not, and a program
     // that writes with one and reads with the other has to name the same type.
@@ -561,6 +755,18 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     // Attributed-string attribute names. Each is shorter than its symbol, as
     // `NSForegroundColorAttributeName` above already is.
     ("_NSUnderlineStyleAttributeName", "NSUnderline"),
+    ("_NSBackgroundColorAttributeName", "NSBackgroundColor"),
+    ("_NSStrikethroughStyleAttributeName", "NSStrikethrough"),
+    ("_NSStrikethroughColorAttributeName", "NSStrikethroughColor"),
+    ("_NSWritingDirectionAttributeName", "NSWritingDirection"),
+    (
+        "_NSMarkedClauseSegmentAttributeName",
+        "NSMarkedClauseSegment",
+    ),
+    (
+        "_NSTextInputReplacementRangeAttributeName",
+        "NSTextInputReplacementRangeAttributeName",
+    ),
     ("_NSUnderlineColorAttributeName", "NSUnderlineColor"),
     ("_NSDocumentTypeDocumentAttribute", "DocumentType"),
     ("_NSHTMLTextDocumentType", "NSHTML"),
