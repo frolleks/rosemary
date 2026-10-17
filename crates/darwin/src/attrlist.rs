@@ -586,6 +586,16 @@ impl Unpack<'_> {
             tv_nsec: nsec as _,
         })
     }
+    /// A time that is set rather than read past. The host takes two
+    /// out-of-range nanosecond values as `UTIME_NOW` and `UTIME_OMIT`, so
+    /// every one outside a second is refused before it can reach it.
+    fn kept_time(&mut self) -> Result<libc::timespec, c_int> {
+        let time = self.time()?;
+        match (0..1_000_000_000).contains(&time.tv_nsec) {
+            true => Ok(time),
+            false => Err(libc::EINVAL),
+        }
+    }
 }
 
 /// Whether `list` asks for anything, or why it may not ask for what it does -
@@ -630,14 +640,14 @@ fn changes(list: &AttrList, buf: &[u8]) -> Result<Changes, c_int> {
         at.time()?;
     }
     if common & ATTR_CMN_MODTIME != 0 {
-        out.modified = Some(at.time()?);
+        out.modified = Some(at.kept_time()?);
     }
     // Read and ignored by xnu too: the change time is the kernel's to keep.
     if common & ATTR_CMN_CHGTIME != 0 {
         at.time()?;
     }
     if common & ATTR_CMN_ACCTIME != 0 {
-        out.accessed = Some(at.time()?);
+        out.accessed = Some(at.kept_time()?);
     }
     if common & ATTR_CMN_BKUPTIME != 0 {
         at.time()?;
@@ -1165,6 +1175,13 @@ mod tests {
             call(list(ATTR_CMN_MODTIME, 0, 0), &[0; 8], 8),
             call(list(ATTR_CMN_UUID, 0, 0), &[0; 16], 16),
             call(list(ATTR_CMN_CRTIME | ATTR_CMN_FLAGS, 0, 0), &[0; 20], 20),
+            // Linux's UTIME_OMIT, which must not be taken as "leave it".
+            call(
+                list(ATTR_CMN_MODTIME, 0, 0),
+                &times(&[(5, (1 << 30) - 2)]),
+                16,
+            ),
+            call(list(ATTR_CMN_ACCTIME, 0, 0), &times(&[(5, -1)]), 16),
         ];
         std::fs::remove_file(&file).unwrap();
         assert_eq!(
@@ -1178,6 +1195,8 @@ mod tests {
                 Err(libc::ENOTSUP),
                 // Kept nowhere here, as on a volume that has neither.
                 Ok(()),
+                Err(libc::EINVAL),
+                Err(libc::EINVAL),
             ]
         );
     }
