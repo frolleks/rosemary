@@ -803,14 +803,6 @@ pub unsafe extern "C" fn CGColorGetColorSpace(color: CFTypeRef) -> CFTypeRef {
         as CFTypeRef
 }
 
-/// `kCGColorSpaceModelRGB` for any space, since only RGB ones are made here.
-pub unsafe extern "C" fn CGColorSpaceGetModel(space: CFTypeRef) -> i32 {
-    match space.is_null() {
-        true => -1,
-        false => 1,
-    }
-}
-
 // Paths are not kept on a context (see `CGContextAddPath`), so neither is a rect.
 unsafe extern "C" fn ignored_context_rect(_context: CFTypeRef, _rect: NSRect) {}
 
@@ -1057,7 +1049,6 @@ exports::exports! {
         "CGColorGetConstantColor" => CGColorGetConstantColor,
         "CGColorGetTypeID" => CGColorGetTypeID,
         "CGColorGetColorSpace" => CGColorGetColorSpace,
-        "CGColorSpaceGetModel" => CGColorSpaceGetModel,
         "CGContextAddRect" | "CGContextAddEllipseInRect" => ignored_context_rect,
         "CGColorSpaceCreatePattern" | "CGPatternCreate" => null_object,
         "CGPatternRelease" | "CGShadingRelease" => release_object,
