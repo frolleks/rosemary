@@ -700,6 +700,15 @@ fn is_symlink(path: *const c_char) -> bool {
     unsafe { libc::lstat(path, &mut st) == 0 && st.st_mode & libc::S_IFMT == libc::S_IFLNK }
 }
 
+/// Whether `st` is the root of a volume: the guest's `/`, the one mount
+/// `getmntinfo` reports.
+fn is_volume_root(st: &Stat) -> bool {
+    let mut root = Stat::default();
+    // SAFETY: a NUL-terminated path and a live local.
+    let rc = unsafe { crate::stat::stat(c"/".as_ptr(), &mut root) };
+    rc == 0 && (root.dev, root.ino) == (st.dev, st.ino)
+}
+
 /// The file a `setattrlist` changes.
 #[derive(Clone, Copy)]
 enum Target {
@@ -709,6 +718,20 @@ enum Target {
 }
 
 impl Target {
+    /// The file as `stat` shows it to the guest, or `None` with `errno` set.
+    fn stat(self) -> Option<Stat> {
+        let mut st = Stat::default();
+        // SAFETY: the guest's own path or descriptor, and a live local.
+        let rc = unsafe {
+            match self {
+                Target::Path(path, true) => crate::stat::stat(path, &mut st),
+                Target::Path(path, false) => crate::stat::lstat(path, &mut st),
+                Target::Fd(fd) => crate::stat::fstat(fd, &mut st),
+            }
+        };
+        (rc == 0).then_some(st)
+    }
+
     /// Finder info, as `setattrlist_setfinderinfo` writes it: an extended
     /// attribute, which thirty-two zero bytes remove.
     fn set_finder_info(self, info: &[u8; 32]) -> c_int {
@@ -869,10 +892,21 @@ unsafe fn set(target: Target, list: *const AttrList, buf: *const c_void, size: u
         // SAFETY: the caller's buffer of `size` bytes.
         _ => unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), size) },
     };
-    match changes(&list, bytes) {
-        Ok(changes) => target.apply(changes),
-        Err(errno) => fail(errno),
+    let changes = match changes(&list, bytes) {
+        Ok(changes) => changes,
+        Err(errno) => return fail(errno),
+    };
+    // Volume attributes, the common ones among them, are the volume's, and
+    // xnu refuses them on anything but its root.
+    if list.volattr != 0 {
+        let Some(st) = target.stat() else {
+            return -1;
+        };
+        if !is_volume_root(&st) {
+            return fail(libc::EINVAL);
+        }
     }
+    target.apply(changes)
 }
 
 /// `int setattrlist(const char *path, struct attrlist *attrList, void
@@ -1105,6 +1139,25 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         assert_eq!((got, read), (32, info));
         assert_eq!((cleared, after), (0, -1));
+    }
+
+    /// Volume attributes, common ones included, are refused on a file that
+    /// is not the volume's root rather than applied to it.
+    #[test]
+    fn setattrlist_refuses_volume_attributes_below_the_root() {
+        use std::os::unix::fs::MetadataExt;
+        let (file, path) = scratch_file("setattrlist-volume");
+        let before = std::fs::metadata(&file).unwrap().mtime();
+        let buf = times(&[(1_000_000_000, 0)]);
+        let mut l = list(ATTR_CMN_MODTIME, 0, 0);
+        l.volattr = ATTR_VOL_INFO;
+        // SAFETY: live locals of the sizes passed.
+        let rc = unsafe { setattrlist(path.as_ptr(), &l, buf.as_ptr().cast(), buf.len(), 0) };
+        let errno = crate::errno::get();
+        let after = std::fs::metadata(&file).unwrap().mtime();
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!((rc, errno), (-1, libc::EINVAL));
+        assert_eq!(after, before);
     }
 
     /// Through a descriptor the Finder info lands on the open file, even once
