@@ -133,6 +133,22 @@ mod host {
         }
     }
 
+    /// [`set`] on an open descriptor, neither creating nor replacing only.
+    ///
+    /// # Safety
+    ///
+    /// `value` is `size` readable bytes.
+    pub unsafe fn set_fd(fd: libc::c_int, name: &CStr, value: *const c_void, size: usize) -> i32 {
+        // SAFETY: the caller's descriptor and buffer, with a name this module owns.
+        unsafe { libc::fsetxattr(fd, name.as_ptr(), value, size, 0) }
+    }
+
+    /// [`remove`] on an open descriptor.
+    pub fn remove_fd(fd: libc::c_int, name: &CStr) -> i32 {
+        // SAFETY: the caller's descriptor, with a name this module owns.
+        unsafe { libc::fremovexattr(fd, name.as_ptr()) }
+    }
+
     /// Every attribute on `path` the guest could have written, in its own
     /// spelling. `None` leaves `errno` set.
     ///
@@ -311,6 +327,26 @@ mod host {
         }
     }
 
+    /// [`set`] on an open descriptor, neither creating nor replacing only.
+    ///
+    /// # Safety
+    ///
+    /// `value` is `size` readable bytes.
+    pub unsafe fn set_fd(fd: libc::c_int, name: &CStr, value: *const c_void, size: usize) -> i32 {
+        // SAFETY: the caller's descriptor and buffer, with a name this module owns.
+        let rc = unsafe { libc::extattr_set_fd(fd, NAMESPACE, name.as_ptr(), value, size) };
+        match rc < 0 {
+            true => -1,
+            false => 0,
+        }
+    }
+
+    /// [`remove`] on an open descriptor.
+    pub fn remove_fd(fd: libc::c_int, name: &CStr) -> i32 {
+        // SAFETY: the caller's descriptor, with a name this module owns.
+        unsafe { libc::extattr_delete_fd(fd, NAMESPACE, name.as_ptr()) }
+    }
+
     /// Every attribute on `path` the guest could have written. `None` leaves
     /// `errno` set.
     ///
@@ -370,6 +406,14 @@ mod host {
 
     pub unsafe fn remove(path: *const c_char, name: &CStr, nofollow: bool) -> i32 {
         unsafe { libc::removexattr(path, name.as_ptr(), if nofollow { NOFOLLOW } else { 0 }) }
+    }
+
+    pub unsafe fn set_fd(fd: libc::c_int, name: &CStr, value: *const c_void, size: usize) -> i32 {
+        unsafe { libc::fsetxattr(fd, name.as_ptr(), value, size, 0, 0) }
+    }
+
+    pub fn remove_fd(fd: libc::c_int, name: &CStr) -> i32 {
+        unsafe { libc::fremovexattr(fd, name.as_ptr(), 0) }
     }
 
     pub unsafe fn list(path: *const c_char, nofollow: bool) -> Option<Vec<Vec<u8>>> {
@@ -598,6 +642,25 @@ pub(crate) unsafe fn set_on_host(
         },
         // SAFETY: the caller's path.
         None => unsafe { host::remove(path.as_ptr(), &host, nofollow) },
+    };
+    absent_as_enoattr(rc)
+}
+
+/// [`set_on_host`] for the file open on `fd`: the descriptor itself, so the
+/// attribute lands on that file whatever it is now called.
+///
+/// # Safety
+///
+/// `name` is NUL-terminated.
+pub(crate) unsafe fn set_on_fd(fd: libc::c_int, name: &CStr, value: Option<&[u8]>) -> i32 {
+    let Some(host) = (unsafe { host_name(name.as_ptr()) }) else {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    };
+    let rc = match value {
+        // SAFETY: the caller's descriptor, and a buffer of the length given.
+        Some(value) => unsafe { host::set_fd(fd, &host, value.as_ptr().cast(), value.len()) },
+        None => host::remove_fd(fd, &host),
     };
     absent_as_enoattr(rc)
 }

@@ -695,32 +695,23 @@ impl Target {
     /// attribute, which thirty-two zero bytes remove.
     fn set_finder_info(self, info: &[u8; 32]) -> c_int {
         let value = (info != &[0; 32]).then_some(&info[..]);
-        let set = |host: &CStr, follow: bool| {
-            // SAFETY: a NUL-terminated host path and a name this module owns.
-            let rc = unsafe { crate::xattr::set_on_host(host, FINDER_INFO, value, !follow) };
-            match rc != 0 && value.is_none() && crate::xattr::is_absent(crate::errno::get()) {
-                // Nothing to remove is the state asked for.
-                true => 0,
-                false => rc,
-            }
-        };
+        // Nothing to remove is the state asked for.
+        let removed_nothing =
+            |rc: c_int| rc != 0 && value.is_none() && crate::xattr::is_absent(crate::errno::get());
         match self {
             Target::Path(path, follow) => crate::stat::with_fallback(path, |host| {
-                // SAFETY: the path `with_fallback` translated.
-                let rc = set(unsafe { CStr::from_ptr(host) }, follow);
+                // SAFETY: the path `with_fallback` translated, and a name this
+                // module owns.
+                let rc = unsafe {
+                    crate::xattr::set_on_host(CStr::from_ptr(host), FINDER_INFO, value, !follow)
+                };
+                let rc = if removed_nothing(rc) { 0 } else { rc };
                 (rc, rc == 0)
             }),
             Target::Fd(fd) => {
-                let Some(path) = starnix::fd::path(fd) else {
-                    crate::errno::set(libc::EBADF);
-                    return -1;
-                };
-                let Ok(path) = std::ffi::CString::new(path.into_os_string().into_encoded_bytes())
-                else {
-                    crate::errno::set(libc::EBADF);
-                    return -1;
-                };
-                set(&path, true)
+                // SAFETY: the caller's descriptor, and a name this module owns.
+                let rc = unsafe { crate::xattr::set_on_fd(fd, FINDER_INFO, value) };
+                if removed_nothing(rc) { 0 } else { rc }
             }
         }
     }
@@ -1051,6 +1042,51 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         assert_eq!((got, read), (32, info));
         assert_eq!((cleared, after), (0, -1));
+    }
+
+    /// Through a descriptor the Finder info lands on the open file, even once
+    /// the name it was opened by is gone.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn fsetattrlist_writes_finder_info_on_a_renamed_file() {
+        use std::os::fd::AsRawFd;
+        let (file, _) = scratch_file("fsetattrlist-finderinfo");
+        let moved = file.with_extension("moved");
+        let handle = std::fs::File::open(&file).unwrap();
+        std::fs::rename(&file, &moved).unwrap();
+        let mut info = [0u8; 32];
+        info[..8].copy_from_slice(b"TEXTttxt");
+        let l = list(ATTR_CMN_FNDRINFO, 0, 0);
+        let set = |info: &[u8; 32]| {
+            // SAFETY: an open descriptor and live locals of the sizes passed.
+            unsafe { fsetattrlist(handle.as_raw_fd(), &l, info.as_ptr().cast(), 32, 0) }
+        };
+        if set(&info) != 0 {
+            let errno = crate::errno::get();
+            std::fs::remove_file(&moved).unwrap();
+            assert_eq!(
+                errno,
+                libc::EOPNOTSUPP,
+                "only a filesystem without attributes refuses"
+            );
+            return;
+        }
+        let path = std::ffi::CString::new(moved.to_str().unwrap()).unwrap();
+        let mut read = [0u8; 32];
+        // SAFETY: the host's own call, on a path and buffer of this test's.
+        let got = unsafe {
+            libc::getxattr(
+                path.as_ptr(),
+                c"user.com.apple.FinderInfo".as_ptr(),
+                read.as_mut_ptr().cast(),
+                read.len(),
+            )
+        };
+        let cleared = set(&[0; 32]);
+        let cleared_again = set(&[0; 32]);
+        std::fs::remove_file(&moved).unwrap();
+        assert_eq!((got, read), (32, info));
+        assert_eq!((cleared, cleared_again), (0, 0));
     }
 
     /// xnu's checks, in xnu's order: an attribute that cannot be set is
