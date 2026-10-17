@@ -104,7 +104,7 @@ static FRAMEWORKS: &[Framework] = &[
         version: 'A',
         umbrellas: &[],
         provide: Some(applicationservices::provide),
-        data: None,
+        data: Some(applicationservices::data_symbols),
         symbol: Some(applicationservices::symbol),
     },
     Framework {
@@ -186,6 +186,14 @@ static FRAMEWORKS: &[Framework] = &[
         provide: None,
         data: Some(webkit::data_symbols),
         symbol: Some(webkit::symbol),
+    },
+    Framework {
+        leaf: "Network",
+        version: 'A',
+        umbrellas: &[],
+        provide: Some(network::provide),
+        data: None,
+        symbol: Some(network::symbol),
     },
     Framework {
         leaf: "Metal",
