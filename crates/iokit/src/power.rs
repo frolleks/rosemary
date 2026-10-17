@@ -90,8 +90,58 @@ pub unsafe extern "C" fn IOPMAssertionRelease(_assertion: u32) -> i32 {
     0
 }
 
+/// `IOReturn IOPMAssertionCreateWithName(CFStringRef type, IOPMAssertionLevel,
+/// CFStringRef name, IOPMAssertionID *)`: the older spelling of the call
+/// above, granted the same way.
+pub unsafe extern "C" fn IOPMAssertionCreateWithName(
+    _kind: CFTypeRef,
+    _level: u32,
+    _name: CFTypeRef,
+    assertion: *mut u32,
+) -> i32 {
+    if assertion.is_null() {
+        return BAD_ARGUMENT;
+    }
+    let id = NEXT_ASSERTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: an out parameter the caller sized.
+    unsafe { assertion.write(id) };
+    0
+}
+
+/// `kIOReturnBadArgument` and `kIOReturnNotFound`.
+const BAD_ARGUMENT: i32 = 0xe000_02c2u32 as i32;
+const NOT_FOUND: i32 = 0xe000_02f0u32 as i32;
+
+/// `IOReturn IOPMCopyCPUPowerStatus(CFDictionaryRef *cpuPowerStatus)`.
+///
+/// `IOPMPowerNotifications.c` reads `State:/IOKit/Power/CPUPower` from the
+/// SCDynamicStore, where `powerd` publishes the processor speed and count
+/// limits a thermal event imposes, and answers `kIOReturnNotFound` when nothing
+/// has been published - which, with no `powerd` here, is always.
+pub unsafe extern "C" fn IOPMCopyCPUPowerStatus(status: *mut CFTypeRef) -> i32 {
+    if status.is_null() {
+        return BAD_ARGUMENT;
+    }
+    // SAFETY: the caller's out-parameter.
+    unsafe { status.write(std::ptr::null()) };
+    NOT_FOUND
+}
+
+/// `IOReturn IOPMGetThermalWarningLevel(uint32_t *thermalLevel)`.
+///
+/// The same store, the `ThermalWarning` key, and the same answer.
+pub unsafe extern "C" fn IOPMGetThermalWarningLevel(level: *mut u32) -> i32 {
+    if level.is_null() {
+        return BAD_ARGUMENT;
+    }
+    NOT_FOUND
+}
+
 exports::exports! {
     functions {
+        "IOPMAssertionCreateWithName" => IOPMAssertionCreateWithName,
+        "IOPMCopyCPUPowerStatus" => IOPMCopyCPUPowerStatus,
+        "IOPMGetThermalWarningLevel" => IOPMGetThermalWarningLevel,
         "IOPMAssertionCreateWithDescription" => IOPMAssertionCreateWithDescription,
         "IOPMAssertionRelease" => IOPMAssertionRelease,
         "IOPSCopyPowerSourcesInfo" => IOPSCopyPowerSourcesInfo,
