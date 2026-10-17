@@ -335,7 +335,17 @@ pub fn install() {
     // `abort`, with no pc, no image and no registers. The handler restores the
     // previous disposition and returns, so the abort still happens - this only
     // adds the sentence in front of it.
-    for signal in [libc::SIGSEGV, libc::SIGBUS, libc::SIGABRT] {
+    // `SIGILL` and `SIGTRAP` for the trap a compiler plants: `IMMEDIATE_CRASH`,
+    // `__builtin_trap` and a failed `CHECK` are an `int3` and a `ud2`, and a
+    // translation runs them as the host instructions they are - so without
+    // these a program's own assertion ended the process with no guest pc.
+    for signal in [
+        libc::SIGSEGV,
+        libc::SIGBUS,
+        libc::SIGABRT,
+        libc::SIGILL,
+        libc::SIGTRAP,
+    ] {
         // SAFETY: `action` and `old` are live locals of the right type;
         // `sa_sigaction` holds a handler with the `SA_SIGINFO` signature, which
         // is what `SA_SIGINFO` in the flags declares it to be. Installing a
@@ -383,7 +393,13 @@ fn keep_the_fault_signals() {
     if !std::env::var_os(KEEP_FAULT_HANDLER_ENV).is_some_and(|v| v != "0") {
         return;
     }
-    for signal in [libc::SIGSEGV, libc::SIGBUS, libc::SIGABRT, libc::SIGILL] {
+    for signal in [
+        libc::SIGSEGV,
+        libc::SIGBUS,
+        libc::SIGABRT,
+        libc::SIGILL,
+        libc::SIGTRAP,
+    ] {
         // The registry is keyed by Darwin's numbering, which is what the guest's
         // `sigaction` is given. `SIGBUS` is 10 there and 7 here.
         if let Some(darwin) = darwin::signal::signal_from_host(signal) {
@@ -393,8 +409,8 @@ fn keep_the_fault_signals() {
     install_alternate_stack();
     darwin::signal::retain_altstack();
     eprintln!(
-        "rosemary: the guest's own handlers for SIGSEGV, SIGBUS, SIGABRT and SIGILL will be \
-         accepted and ignored ({KEEP_FAULT_HANDLER_ENV} is set)"
+        "rosemary: the guest's own handlers for SIGSEGV, SIGBUS, SIGABRT, SIGILL and SIGTRAP \
+         will be accepted and ignored ({KEEP_FAULT_HANDLER_ENV} is set)"
     );
 }
 
@@ -461,11 +477,15 @@ const fn saved() -> Saved {
 static SEGV: Saved = saved();
 static BUS: Saved = saved();
 static ABRT: Saved = saved();
+static ILL: Saved = saved();
+static TRAP: Saved = saved();
 
 fn saved_for(signal: i32) -> &'static Saved {
     match signal {
         libc::SIGBUS => &BUS,
         libc::SIGABRT => &ABRT,
+        libc::SIGILL => &ILL,
+        libc::SIGTRAP => &TRAP,
         _ => &SEGV,
     }
 }
@@ -614,6 +634,8 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
             libc::SIGBUS => "SIGBUS",
             libc::SIGSEGV => "SIGSEGV",
             libc::SIGABRT => "SIGABRT",
+            libc::SIGILL => "SIGILL",
+            libc::SIGTRAP => "SIGTRAP",
             _ => "signal",
         });
         line.str(" on thread ");
@@ -638,6 +660,8 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
         libc::SIGBUS => "SIGBUS",
         libc::SIGSEGV => "SIGSEGV",
         libc::SIGABRT => "SIGABRT",
+        libc::SIGILL => "SIGILL",
+        libc::SIGTRAP => "SIGTRAP",
         _ => "signal",
     });
 
@@ -1111,6 +1135,13 @@ fn restore(signal: i32) {
         saved.mask.get().apply(&mut action);
         action.sa_flags = saved.flags.load(Ordering::SeqCst);
         libc::sigaction(signal, &action, std::ptr::null_mut());
+        // A breakpoint is a trap, not a fault: the pc is already past the
+        // `int3`, so returning would carry on as if it had not been there.
+        // Raised again instead, for whatever disposition was there before.
+        #[cfg(not(target_os = "macos"))]
+        if signal == libc::SIGTRAP {
+            libc::raise(signal);
+        }
         // Returning to a synchronous fault raises another Mach exception on
         // macOS, which a guest crash server may leave unanswered. Deliver the
         // default disposition as a signal instead of retrying the instruction.
