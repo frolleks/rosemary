@@ -37,6 +37,12 @@ fn nanoseconds(clock: libc::clockid_t) -> u64 {
 }
 
 unsafe extern "C" fn absolute_time() -> u64 {
+    absolute()
+}
+
+/// `mach_absolute_time`, for a framework that stamps its own times on the
+/// guest's timeline. Ticks are nanoseconds: the timebase is one to one.
+pub fn absolute() -> u64 {
     nanoseconds(libc::CLOCK_MONOTONIC)
 }
 
@@ -141,6 +147,12 @@ exports::exports! {
             | "thread_swap_exception_ports" => task::task_swap_exception_ports,
 
         "mach_port_allocate" => space::mach_port_allocate,
+        "mach_port_construct" => space::mach_port_construct,
+        "mach_port_destruct" => space::mach_port_destruct,
+        "mach_port_guard" => space::mach_port_guard,
+        "mach_port_unguard" => space::mach_port_unguard,
+        "mach_port_get_context" => space::mach_port_get_context,
+        "mach_port_set_context" => space::mach_port_set_context,
         "mach_port_deallocate" => space::mach_port_deallocate,
         "mach_port_destroy" => space::mach_port_destroy,
         "mach_port_mod_refs" => space::mach_port_mod_refs,
@@ -163,6 +175,8 @@ exports::exports! {
         "mach_msg" => msg::mach_msg,
         "mach_msg_overwrite" => msg::mach_msg_overwrite,
         "mach_msg_destroy" => msg::mach_msg_destroy,
+        "mach_msg_send" => msg::mach_msg_send,
+        "mach_msg_receive" => msg::mach_msg_receive,
         "mig_get_reply_port" => msg::mig_get_reply_port,
         "mig_put_reply_port" => msg::mig_put_reply_port,
         "mig_dealloc_reply_port" => msg::mig_dealloc_reply_port,
