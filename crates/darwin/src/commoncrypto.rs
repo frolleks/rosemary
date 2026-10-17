@@ -139,6 +139,7 @@ const KCC_BUFFER_TOO_SMALL: i32 = -4301;
 const KCC_ALIGNMENT_ERROR: i32 = -4303;
 const KCC_DECODE_ERROR: i32 = -4304;
 const KCC_UNIMPLEMENTED: i32 = -4305;
+const KCC_RNG_FAILURE: i32 = -4307;
 const KCC_ENCRYPT: u32 = 0;
 const KCC_DECRYPT: u32 = 1;
 const KCC_OPTION_PKCS7_PADDING: u32 = 1;
@@ -710,8 +711,49 @@ digest_api!(
     Sha512,
     Sha512
 );
+/// `CCRNGStatus CCRandomGenerateBytes(void *bytes, size_t count)`, from
+/// `CommonRandom.h`.
+///
+/// As `CommonRandom.c` has it: nothing asked for is success whatever `bytes`
+/// is, a null buffer for something is `kCCParamError`, and a generator that
+/// fails is `kCCRNGFailure` rather than an abort.
+///
+/// # Safety
+///
+/// `bytes` is null or writable for `count` bytes.
+unsafe extern "C" fn random_generate_bytes(bytes: *mut c_void, count: usize) -> i32 {
+    if count == 0 {
+        return KCC_SUCCESS;
+    }
+    if bytes.is_null() {
+        return KCC_PARAM_ERROR;
+    }
+    // SAFETY: the caller's buffer of `count` bytes.
+    let out = unsafe { std::slice::from_raw_parts_mut(bytes.cast::<u8>(), count) };
+    match getrandom::fill(out) {
+        Ok(()) => KCC_SUCCESS,
+        Err(_) => KCC_RNG_FAILURE,
+    }
+}
+
+/// `int CCRandomCopyBytes(CCRandomRef rnd, void *bytes, size_t count)`, the
+/// older spelling, whose generator argument `CommonRandom.c` ignores.
+///
+/// # Safety
+///
+/// As [`random_generate_bytes`].
+unsafe extern "C" fn random_copy_bytes(
+    _rnd: *const c_void,
+    bytes: *mut c_void,
+    count: usize,
+) -> i32 {
+    unsafe { random_generate_bytes(bytes, count) }
+}
+
 exports::exports! {
     functions {
+        "CCRandomGenerateBytes"=>random_generate_bytes,
+        "CCRandomCopyBytes"=>random_copy_bytes,
         "CC_MD5_Init"=>md5_init,
         "CC_MD5_Update"=>md5_update,
         "CC_MD5_Final"=>md5_final,
@@ -771,6 +813,29 @@ mod tests {
             ]
         );
     }
+    #[test]
+    fn random_bytes_follow_commonrandom_c() {
+        let mut a = [0u8; 64];
+        let mut b = [0u8; 64];
+        unsafe {
+            assert_eq!(
+                random_generate_bytes(a.as_mut_ptr().cast(), a.len()),
+                KCC_SUCCESS
+            );
+            assert_eq!(
+                random_copy_bytes(std::ptr::null(), b.as_mut_ptr().cast(), b.len()),
+                0
+            );
+            assert_eq!(random_generate_bytes(std::ptr::null_mut(), 0), KCC_SUCCESS);
+            assert_eq!(
+                random_generate_bytes(std::ptr::null_mut(), 1),
+                KCC_PARAM_ERROR
+            );
+        }
+        assert_ne!(a, [0; 64]);
+        assert_ne!(a, b);
+    }
+
     #[test]
     fn one_shot_returns_output_argument() {
         let mut out = [0u8; 20];
