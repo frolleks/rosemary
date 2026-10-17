@@ -1,18 +1,27 @@
 pub mod codesign;
+mod constants;
+mod der;
 pub mod keychain;
+pub mod sectask;
 pub mod trust;
 
 exports::group! {
     codesign,
     keychain,
+    sectask,
     trust,
 }
 
 /// The `kSec*` key globals, each a cell holding an `NSString *`.
 pub fn data_symbols() -> Vec<(String, u64)> {
     foundation::bootstrap();
+    // Apple's constants, less any the keychain module lists itself.
+    let constants = constants::CONSTANTS
+        .iter()
+        .filter(|(symbol, _)| !keychain::KEYS.iter().any(|(s, _)| s == symbol));
     let mut symbols: Vec<_> = keychain::KEYS
         .iter()
+        .chain(constants)
         .map(|(symbol, text)| {
             (
                 (*symbol).to_string(),
