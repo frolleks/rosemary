@@ -1,6 +1,9 @@
 #![cfg(not(target_os = "macos"))]
 
-use std::ffi::c_char;
+use std::ffi::{c_char, c_int};
+use std::sync::OnceLock;
+
+use sha2::{Digest, Sha256};
 
 /// `uuid_t`: sixteen bytes, on both platforms.
 const LEN: usize = 16;
@@ -204,8 +207,70 @@ unsafe extern "C" fn parse(text: *const c_char, out: *mut u8) -> i32 {
     0
 }
 
+/// The UUID that names this host, the same for every process on it and across
+/// restarts: what `gethostuuid` and the platform UUID report.
+///
+/// Derived from the host's machine id rather than being it, because
+/// `machine-id(5)` asks that the id not be handed out as is: hashed with the
+/// name of this use, as `sd_id128_get_machine_app_specific` does, and marked a
+/// version-4 UUID. A host with no machine id is named by its hostname instead,
+/// and one with neither by a UUID that lasts as long as the process.
+pub fn host_uuid() -> [u8; LEN] {
+    static UUID: OnceLock<[u8; LEN]> = OnceLock::new();
+    *UUID.get_or_init(|| {
+        let seed = ["/etc/machine-id", "/var/lib/dbus/machine-id", "/etc/hostid"]
+            .iter()
+            .filter_map(|path| std::fs::read_to_string(path).ok())
+            .map(|text| text.trim().to_string())
+            .find(|id| !id.is_empty())
+            .or_else(hostname);
+        let Some(seed) = seed else {
+            return random();
+        };
+        let digest = Sha256::new()
+            .chain_update(b"darwin gethostuuid\0")
+            .chain_update(seed.as_bytes())
+            .finalize();
+        let mut bytes = [0u8; LEN];
+        bytes.copy_from_slice(&digest[..LEN]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        bytes
+    })
+}
+
+fn hostname() -> Option<String> {
+    let mut name = [0u8; 256];
+    // SAFETY: a buffer of the length given.
+    if unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } != 0 {
+        return None;
+    }
+    let end = name.iter().position(|&b| b == 0)?;
+    (end > 0).then(|| String::from_utf8_lossy(&name[..end]).into_owned())
+}
+
+/// `int gethostuuid(uuid_t id, const struct timespec *wait)`
+///
+/// xnu's: the sixteen bytes that identify the host, or -1 with `EFAULT` for a
+/// buffer that is not one. The UUID is always at hand here, so the wait is
+/// never needed and `EWOULDBLOCK` never happens.
+///
+/// # Safety
+///
+/// `id` is null or sixteen writable bytes.
+unsafe extern "C" fn gethostuuid(id: *mut u8, _wait: *const libc::timespec) -> c_int {
+    if id.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller's sixteen bytes.
+    unsafe { core::ptr::copy_nonoverlapping(host_uuid().as_ptr(), id, LEN) };
+    0
+}
+
 exports::exports! {
     functions {
+        "gethostuuid" => gethostuuid,
         "uuid_clear" => clear,
         "uuid_compare" => compare,
         "uuid_copy" => copy,
@@ -222,6 +287,23 @@ exports::exports! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_host_uuid_is_stable_and_well_formed() {
+        let mut first = [0u8; LEN];
+        let mut second = [0u8; LEN];
+        // SAFETY: sixteen writable bytes each.
+        unsafe {
+            assert_eq!(gethostuuid(first.as_mut_ptr(), core::ptr::null()), 0);
+            assert_eq!(gethostuuid(second.as_mut_ptr(), core::ptr::null()), 0);
+            assert_eq!(gethostuuid(core::ptr::null_mut(), core::ptr::null()), -1);
+        }
+        assert_eq!(crate::errno::get(), libc::EFAULT);
+        assert_eq!(first, second);
+        assert_ne!(first, [0; LEN]);
+        assert_eq!(first[6] >> 4, 4, "a version-4 UUID");
+        assert_eq!(first[8] >> 6, 0b10, "the RFC 4122 variant");
+    }
 
     fn generated() -> [u8; LEN] {
         let mut out = [0u8; LEN];
