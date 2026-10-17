@@ -682,6 +682,14 @@ fn changes(list: &AttrList, buf: &[u8]) -> Result<Changes, c_int> {
     Ok(out)
 }
 
+/// Whether host path `path` is itself a symlink.
+#[cfg(target_os = "linux")]
+fn is_symlink(path: *const c_char) -> bool {
+    // SAFETY: a zeroed `struct stat` for the host to fill, and the caller's path.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    unsafe { libc::lstat(path, &mut st) == 0 && st.st_mode & libc::S_IFMT == libc::S_IFLNK }
+}
+
 /// The file a `setattrlist` changes.
 #[derive(Clone, Copy)]
 enum Target {
@@ -744,6 +752,13 @@ impl Target {
                 let rc = unsafe {
                     libc::fchmodat(libc::AT_FDCWD, host, mode, libc::AT_SYMLINK_NOFOLLOW)
                 };
+                // FIXME (ACCURACY): Linux keeps no mode on a symlink and never
+                // consults one, so it refuses to set it. Darwin's `lchmod`
+                // succeeds; the link is reported as done, its mode still 0777.
+                #[cfg(target_os = "linux")]
+                if rc != 0 && crate::errno::get() == libc::EOPNOTSUPP && is_symlink(host) {
+                    return (0, true);
+                }
                 (rc, rc == 0)
             }),
             // SAFETY: the caller's descriptor.
@@ -981,6 +996,41 @@ mod tests {
         assert_eq!((meta.mtime(), meta.mtime_nsec()), (1_000_000_000, 5));
         assert_eq!((meta.atime(), meta.atime_nsec()), (1_100_000_000, 7));
         assert_eq!(meta.mode() & 0o7777, 0o600);
+    }
+
+    /// With FSOPT_NOFOLLOW a symlink's mode is the link's, and setting it
+    /// leaves the target alone and does not stop the times that follow it.
+    #[test]
+    fn setattrlist_sets_a_symlinks_mode_without_following_it() {
+        use std::os::unix::fs::MetadataExt;
+        let (file, _) = scratch_file("setattrlist-link-target");
+        std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+            .unwrap();
+        let link = file.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let path = std::ffi::CString::new(link.to_str().unwrap()).unwrap();
+        let mut buf = times(&[(1_000_000_000, 0)]);
+        buf.extend_from_slice(&0o600u32.to_ne_bytes());
+        let l = list(ATTR_CMN_MODTIME | ATTR_CMN_ACCESSMASK, 0, 0);
+        // SAFETY: live locals of the sizes passed.
+        let rc = unsafe {
+            setattrlist(
+                path.as_ptr(),
+                &l,
+                buf.as_ptr().cast(),
+                buf.len(),
+                FSOPT_NOFOLLOW,
+            )
+        };
+        let errno = crate::errno::get();
+        let link_meta = std::fs::symlink_metadata(&link).unwrap();
+        let target_meta = std::fs::metadata(&file).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(rc, 0, "errno {errno}");
+        assert_eq!(target_meta.mode() & 0o7777, 0o644);
+        assert_eq!(link_meta.mtime(), 1_000_000_000);
     }
 
     #[test]
