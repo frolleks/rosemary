@@ -877,6 +877,56 @@ unsafe extern "C" fn write_to_file(receiver: Id, _sel: Sel, path: Id, atomically
     write_bytes_to_file(&path, bytes, atomically != 0).is_ok() as u8
 }
 
+/// `-[NSArray writeToFile:atomically:]` and `-[NSDictionary
+/// writeToFile:atomically:]`: the receiver as an XML property list.
+///
+/// `NO`, and nothing written, for a collection holding anything a property
+/// list cannot - which is checked all the way down before a byte is written,
+/// as Apple's documents.
+unsafe extern "C" fn write_property_list_to_file(
+    receiver: Id,
+    _sel: Sel,
+    path: Id,
+    atomically: u8,
+) -> u8 {
+    // SAFETY: an `NSString`, or nil.
+    let path = unsafe { crate::string::bytes(path) };
+    match String::from_utf8(path) {
+        // SAFETY: the receiver is a collection.
+        Ok(path) if !path.is_empty() => unsafe { write_property_list(receiver, &path, atomically) },
+        _ => 0,
+    }
+}
+
+/// `-writeToURL:atomically:`, the same for a file URL. Any other URL is `NO`.
+unsafe extern "C" fn write_property_list_to_url(
+    receiver: Id,
+    _sel: Sel,
+    url: Id,
+    atomically: u8,
+) -> u8 {
+    // SAFETY: an `NSURL`, or nil.
+    let path = unsafe { corefoundation::url::as_url(url as CFTypeRef) }.and_then(|u| u.file_path());
+    match path {
+        // SAFETY: the receiver is a collection.
+        Some(path) => unsafe { write_property_list(receiver, &path, atomically) },
+        None => 0,
+    }
+}
+
+/// # Safety
+///
+/// `receiver` is an array or a dictionary.
+unsafe fn write_property_list(receiver: Id, path: &str, atomically: u8) -> u8 {
+    // SAFETY: the caller's.
+    let Some(value) = (unsafe { corefoundation::propertylist::value_of(receiver as CFTypeRef) })
+    else {
+        return 0;
+    };
+    let xml = corefoundation::plist::write_xml(&value);
+    write_bytes_to_file(path, &xml, atomically != 0).is_ok() as u8
+}
+
 pub(crate) fn write_bytes_to_file(
     guest_path: &str,
     bytes: &[u8],
@@ -2528,6 +2578,8 @@ pub(crate) fn install() {
     let array = objc::class::lookup(c"NSArray").expect("CoreFoundation registered NSArray");
     let mutable_array = objc::class::lookup(c"NSMutableArray").expect("NSMutableArray");
     methods!(array, {
+        "writeToFile:atomically:" => write_property_list_to_file, c"B28@0:8@16B24";
+        "writeToURL:atomically:" => write_property_list_to_url, c"B28@0:8@16B24";
         "count" => count, c"Q16@0:8";
         "objectAtIndex:" => object_at_index, c"@24@0:8Q16";
         "subarrayWithRange:" => subarray_with_range, c"@32@0:8{_NSRange=QQ}16";
@@ -2594,6 +2646,8 @@ pub(crate) fn install() {
     let mutable_dictionary =
         objc::class::lookup(c"NSMutableDictionary").expect("NSMutableDictionary");
     methods!(dictionary_class, {
+        "writeToFile:atomically:" => write_property_list_to_file, c"B28@0:8@16B24";
+        "writeToURL:atomically:" => write_property_list_to_url, c"B28@0:8@16B24";
         "count" => dictionary_count, c"Q16@0:8";
         "objectForKey:" => object_for_key, c"@24@0:8@16";
         "objectForKeyedSubscript:" => object_for_key, c"@24@0:8@16";
@@ -2774,4 +2828,57 @@ pub(crate) fn install() {
         "numberWithUnsignedChar:" => number_with_unsigned_char, c"@24@0:8C16";
         "numberWithFloat:" => number_with_float, c"@24@0:8f16";
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A dictionary written as a property list reads back as the same values,
+    /// and one holding something a property list cannot is refused with
+    /// nothing written.
+    #[test]
+    fn a_dictionary_is_written_as_a_property_list() {
+        crate::bootstrap();
+        let directory = std::env::temp_dir().join(format!("rosemary-plist-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("a scratch directory");
+        let path = directory.join("written.plist");
+        let policy = corefoundation::callbacks::Policy::from_type_callbacks();
+        let key = crate::string::from_str("Name");
+        let value = crate::string::from_str("League");
+        let dictionary = corefoundation::collections::new_dictionary(
+            &[(key as CFTypeRef, value as CFTypeRef)],
+            policy,
+            policy,
+            false,
+        ) as Id;
+        let sel = objc::sel::get("writeToFile:atomically:");
+        let target = crate::string::from_str(path.to_str().expect("a UTF-8 path"));
+        // SAFETY: `BOOL (id, SEL, id, BOOL)`, with a dictionary and a string.
+        assert_eq!(
+            unsafe { write_property_list_to_file(dictionary, sel, target, 1) },
+            1
+        );
+        let written = std::fs::read(&path).expect("the file was written");
+        let parsed = corefoundation::plist::parse(&written).expect("a property list");
+        assert_eq!(parsed.get("Name").and_then(|v| v.as_str()), Some("League"));
+
+        let not_a_plist =
+            objc::object::create_instance(objc::class::lookup(c"NSObject").expect("NSObject"), 0);
+        let refused_path = directory.join("refused.plist");
+        let refused = corefoundation::collections::new_dictionary(
+            &[(key as CFTypeRef, not_a_plist as CFTypeRef)],
+            policy,
+            policy,
+            false,
+        ) as Id;
+        let refused_target = crate::string::from_str(refused_path.to_str().expect("UTF-8"));
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { write_property_list_to_file(refused, sel, refused_target, 0) },
+            0
+        );
+        assert!(!refused_path.exists());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
 }
