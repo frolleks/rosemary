@@ -320,6 +320,27 @@ fn dispatch_data_create(
     Ok(())
 }
 
+/// `uint32_t notify_register_dispatch(const char *name, int *out_token,
+/// dispatch_queue_t queue, notify_handler_t handler)`
+fn notify_register_dispatch(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let (name, out_token, queue, handler) = (ctx.rdi, ctx.rsi, ctx.rdx, ctx.rcx);
+    if handler != 0 {
+        substitute_block(symbol, handler, mem, callbacks)?;
+    }
+    let host = host_or_refuse(symbol)?;
+    // SAFETY: the libnotify entry point's own four arguments and `uint32_t`
+    // result; the handler's code pointers have been rewritten above.
+    let f: extern "C" fn(u64, u64, u64, u64) -> u32 =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u64, u64, u64, u64) -> u32>(host) };
+    ctx.rax = u64::from(f(name, out_token, queue, handler));
+    Ok(())
+}
+
 /// One of this module's implementations, in the shape [`crate::shims`] wants -
 /// the wider one, carrying [`Callbacks`].
 pub type Shim = crate::signal::Shim;
@@ -337,6 +358,7 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         "dispatch_data_create" => Some(dispatch_data_create),
         "dispatch_group_notify" => Some(dispatch_group_notify),
         "dispatch_group_async" => Some(dispatch_group_async),
+        "notify_register_dispatch" => Some(notify_register_dispatch),
         "CFRunLoopObserverCreateWithHandler" => Some(run_loop_observer_create_with_handler),
         // Both spellings.
         "_Block_copy" | "Block_copy" => Some(block_copy),
