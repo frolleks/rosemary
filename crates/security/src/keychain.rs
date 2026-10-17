@@ -39,6 +39,17 @@ pub const KEYS: &[(&str, &str)] = &[
     ("_kSecReturnAttributes", "r_Attributes"),
     ("_kSecMatchLimit", "m_Limit"),
     ("_kSecMatchLimitOne", "m_LimitOne"),
+    ("_kSecMatchLimitAll", "m_LimitAll"),
+    ("_kSecMatchTrustedOnly", "m_TrustedOnly"),
+    ("_kSecMatchPolicy", "m_Policy"),
+    ("_kSecMatchSearchList", "m_SearchList"),
+    ("_kSecClassCertificate", "cert"),
+    ("_kSecClassKey", "keys"),
+    ("_kSecClassIdentity", "idnt"),
+    ("_kSecReturnRef", "r_Ref"),
+    ("_kSecReturnPersistentRef", "r_PersistentRef"),
+    ("_kSecValueRef", "v_Ref"),
+    ("_kSecValuePersistentRef", "v_PersistentRef"),
 ];
 
 /// What identifies an item: its class, its service and its account.
