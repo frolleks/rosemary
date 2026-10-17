@@ -70,6 +70,8 @@ exports::exports! {
         "method_getImplementation" => api::method_getImplementation,
         "method_getTypeEncoding" => api::method_getTypeEncoding,
         "method_getName" => api::method_getName,
+        "method_exchangeImplementations" => api::method_exchangeImplementations,
+        "class_copyMethodList" => api::class_copyMethodList,
         "method_setImplementation" => api::method_setImplementation,
         "imp_implementationWithBlock" => imp_block::imp_implementationWithBlock,
         "imp_getBlock" => imp_block::imp_getBlock,
@@ -315,6 +317,28 @@ mod invariants {
     }
 
     #[test]
+    fn a_second_class_of_a_taken_name_is_realized_but_not_named() {
+        let named = class_named(c"RosemaryDuplicateName");
+        let nsobject = class::lookup(c"NSObject").expect("NSObject");
+        assert!(class::allocate_pair(Some(nsobject), c"RosemaryDuplicateName", 0).is_none());
+
+        let duplicate = class::allocate_image_pair(Some(nsobject), c"RosemaryDuplicateName", 0);
+        let sel = sel::get("answer");
+        assert!(duplicate.add_method(sel, first as *const c_void, c"Q16@0:8"));
+        class::register_pair(duplicate);
+
+        assert!(!std::ptr::eq(named, duplicate));
+        assert_eq!(duplicate.name_str(), "RosemaryDuplicateName");
+        assert!(duplicate.is_registered());
+        assert!(std::ptr::eq(
+            class::lookup(c"RosemaryDuplicateName").expect("named"),
+            named
+        ));
+        assert!(duplicate.method(sel).is_some());
+        assert!(named.method(sel).is_none());
+    }
+
+    #[test]
     fn method_get_implementation_returns_the_pointer_that_was_installed() {
         let class = class_named(c"RosemaryInvariantA");
         let sel = sel::get("answer");
@@ -440,6 +464,48 @@ mod invariants {
             assert_eq!(send(std::ptr::null_mut(), sel::get("answer")), 0);
             let send_f: extern "C" fn(Id, Sel) -> f64 = std::mem::transmute(msg::entry());
             assert_eq!(send_f(std::ptr::null_mut(), sel::get("answer")), 0.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod method_list_tests {
+    use super::*;
+    use std::ffi::c_void;
+
+    unsafe extern "C" fn one(_receiver: object::Id, _sel: sel::Sel) -> u64 {
+        1
+    }
+    unsafe extern "C" fn two(_receiver: object::Id, _sel: sel::Sel) -> u64 {
+        2
+    }
+
+    /// A class's own methods are listed, and two exchanged swap `IMP`s.
+    #[test]
+    fn methods_are_listed_and_exchanged() {
+        bootstrap();
+        let nsobject = class::lookup(c"NSObject").expect("NSObject");
+        let cls = class::allocate_pair(Some(nsobject), c"RosemaryMethodListTest", 0).expect("fresh");
+        class::register_pair(cls);
+        let (a, b) = (sel::get("first"), sel::get("second"));
+        assert!(cls.add_method(a, one as *const c_void, c"Q16@0:8"));
+        assert!(cls.add_method(b, two as *const c_void, c"Q16@0:8"));
+        let mut count = 0u32;
+        // SAFETY: a class of this runtime's and a writable count.
+        unsafe {
+            let list = api::class_copyMethodList(class::ptr(cls) as *const c_void, &mut count);
+            assert_eq!(count, 2);
+            let names: Vec<_> = (0..count as usize)
+                .map(|i| api::method_getName(*list.add(i)))
+                .collect();
+            assert!(names.contains(&a) && names.contains(&b));
+            allocator::guest_free(list as *mut c_void);
+
+            let first = api::class_getInstanceMethod(class::ptr(cls) as *const c_void, a);
+            let second = api::class_getInstanceMethod(class::ptr(cls) as *const c_void, b);
+            api::method_exchangeImplementations(first, second);
+            assert_eq!(api::method_getImplementation(first), two as *const c_void);
+            assert_eq!(api::method_getImplementation(second), one as *const c_void);
         }
     }
 }
