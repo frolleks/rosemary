@@ -61,6 +61,18 @@ const KEYS: &[(&str, &str)] = &[
     ("_kIOSurfacePixelFormat", PIXEL_FORMAT),
     ("_kIOSurfacePlaneInfo", PLANE_INFO),
     ("_kIOSurfaceCacheMode", "IOSurfaceCacheMode"),
+    ("_kIOSurfacePlaneWidth", "IOSurfacePlaneWidth"),
+    ("_kIOSurfacePlaneHeight", "IOSurfacePlaneHeight"),
+    ("_kIOSurfacePlaneBytesPerRow", "IOSurfacePlaneBytesPerRow"),
+    ("_kIOSurfacePlaneOffset", "IOSurfacePlaneOffset"),
+    ("_kIOSurfacePlaneSize", "IOSurfacePlaneSize"),
+    ("_kIOSurfacePlaneBase", "IOSurfacePlaneBase"),
+    (
+        "_kIOSurfacePlaneBytesPerElement",
+        "IOSurfacePlaneBytesPerElement",
+    ),
+    ("_kIOSurfacePlaneElementWidth", "IOSurfacePlaneElementWidth"),
+    ("_kIOSurfacePlaneElementHeight", "IOSurfacePlaneElementHeight"),
     ("_kIOSurfaceIsGlobal", "IOSurfaceIsGlobal"),
     (
         "_kIOSurfacePixelSizeCastingAllowed",
