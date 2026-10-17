@@ -10,40 +10,76 @@ use foundation::geometry::{NSPoint, NSRect, NSSize};
 
 use crate::fonts::{self, FaceInfo, LoadedFace};
 
+/// CoreText's keys, with the values Apple's CoreText gives them. A descriptor
+/// key is the same string as its `NSFontDescriptor` counterpart, which is what
+/// makes the two descriptor types interchangeable.
 const ATTRIBUTE_GLOBALS: &[(&str, &str)] = &[
-    ("_kCTFontCopyrightNameKey", "CTFontCopyrightNameKey"),
-    ("_kCTFontAttributeName", "CTFontAttributeName"),
-    ("_kCTFontCascadeListAttribute", "CTFontCascadeListAttribute"),
-    ("_kCTFontFamilyNameAttribute", "CTFontFamilyNameAttribute"),
+    ("_kCTFontFamilyNameKey", "CTFontFamilyName"),
+    ("_kCTFontSubFamilyNameKey", "CTFontSubFamilyName"),
+    ("_kCTFontStyleNameKey", "CTFontStyleName"),
+    ("_kCTFontFullNameKey", "CTFontFullName"),
+    ("_kCTFontDisplayNameAttribute", "NSFontVisibleNameAttribute"),
+    ("_kCTFontFormatAttribute", "NSCTFontFormatAttribute"),
+    ("_kCTFontVariationAttribute", "NSCTFontVariationAttribute"),
+    ("_kCTFontWidthTrait", "NSCTFontProportionTrait"),
+    (
+        "_kCTFontVariationAxisIdentifierKey",
+        "NSCTVariationAxisIdentifier",
+    ),
+    (
+        "_kCTFontVariationAxisMinimumValueKey",
+        "NSCTVariationAxisMinimumValue",
+    ),
+    (
+        "_kCTFontVariationAxisMaximumValueKey",
+        "NSCTVariationAxisMaximumValue",
+    ),
+    (
+        "_kCTFontVariationAxisDefaultValueKey",
+        "NSCTVariationAxisDefaultValue",
+    ),
+    ("_kCTFontVariationAxisNameKey", "NSCTVariationAxisName"),
+    (
+        "_kCTFontCollectionRemoveDuplicatesOption",
+        "NSFontCollectionRemoveDuplicates",
+    ),
+    (
+        "_kCTFontManagerRegisteredFontsChangedNotification",
+        "CTFontManagerFontChangedNotification",
+    ),
+    ("_kCTFontCopyrightNameKey", "CTFontCopyrightName"),
+    ("_kCTFontAttributeName", "NSFont"),
+    (
+        "_kCTFontCascadeListAttribute",
+        "NSCTFontCascadeListAttribute",
+    ),
+    ("_kCTFontFamilyNameAttribute", "NSFontFamilyAttribute"),
     (
         "_kCTFontFeatureSelectorIdentifierKey",
         "CTFeatureSelectorIdentifier",
     ),
     (
         "_kCTFontFeatureSettingsAttribute",
-        "CTFontFeatureSettingsAttribute",
+        "NSCTFontFeatureSettingsAttribute",
     ),
     (
         "_kCTFontFeatureTypeIdentifierKey",
         "CTFeatureTypeIdentifier",
     ),
-    ("_kCTFontLanguagesAttribute", "CTFontLanguagesAttribute"),
-    ("_kCTFontNameAttribute", "CTFontNameAttribute"),
-    ("_kCTFontPostScriptNameKey", "CTFontPostScriptNameKey"),
-    ("_kCTFontSizeAttribute", "CTFontSizeAttribute"),
-    ("_kCTFontSlantTrait", "CTFontSlantTrait"),
-    ("_kCTFontStyleNameAttribute", "CTFontStyleNameAttribute"),
-    ("_kCTFontSymbolicTrait", "CTFontSymbolicTrait"),
-    ("_kCTFontTraitsAttribute", "CTFontTraitsAttribute"),
-    ("_kCTFontURLAttribute", "CTFontURLAttribute"),
-    ("_kCTFontUniqueNameKey", "CTFontUniqueNameKey"),
-    ("_kCTFontWeightTrait", "CTFontWeightTrait"),
-    (
-        "_kCTForegroundColorAttributeName",
-        "CTForegroundColorAttributeName",
-    ),
-    ("_kCTKernAttributeName", "CTKernAttributeName"),
-    ("_kCTLanguageAttributeName", "CTLanguageAttributeName"),
+    ("_kCTFontLanguagesAttribute", "NSCTFontLanguagesAttribute"),
+    ("_kCTFontNameAttribute", "NSFontNameAttribute"),
+    ("_kCTFontPostScriptNameKey", "CTFontPostScriptName"),
+    ("_kCTFontSizeAttribute", "NSFontSizeAttribute"),
+    ("_kCTFontSlantTrait", "NSCTFontSlantTrait"),
+    ("_kCTFontStyleNameAttribute", "NSFontFaceAttribute"),
+    ("_kCTFontSymbolicTrait", "NSCTFontSymbolicTrait"),
+    ("_kCTFontTraitsAttribute", "NSCTFontTraitsAttribute"),
+    ("_kCTFontURLAttribute", "NSCTFontFileURLAttribute"),
+    ("_kCTFontUniqueNameKey", "CTFontUniqueName"),
+    ("_kCTFontWeightTrait", "NSCTFontWeightTrait"),
+    ("_kCTForegroundColorAttributeName", "CTForegroundColor"),
+    ("_kCTKernAttributeName", "NSKern"),
+    ("_kCTLanguageAttributeName", "NSLanguage"),
     (
         "_kCTTypesetterOptionForcedEmbeddingLevel",
         "CTTypesetterOptionForcedEmbeddingLevel",
@@ -201,9 +237,9 @@ fn face_attributes(info: &FaceInfo, size: f64) -> CFTypeRef {
         symbolic_traits(info),
     ))));
     let traits = own(new_dictionary(&[
-        (key("CTFontWeightTrait"), weight),
-        (key("CTFontSlantTrait"), slant),
-        (key("CTFontSymbolicTrait"), symbolic),
+        (key("NSCTFontWeightTrait"), weight),
+        (key("NSCTFontSlantTrait"), slant),
+        (key("NSCTFontSymbolicTrait"), symbolic),
     ]));
     let postscript = match info.postscript.is_empty() {
         true => format!(
@@ -221,17 +257,17 @@ fn face_attributes(info: &FaceInfo, size: f64) -> CFTypeRef {
         release(language);
     }
     let pairs = [
-        (key("CTFontFamilyNameAttribute"), own(string(&info.family))),
-        (key("CTFontStyleNameAttribute"), own(string(&info.style))),
-        (key("CTFontNameAttribute"), own(string(&postscript))),
+        (key("NSFontFamilyAttribute"), own(string(&info.family))),
+        (key("NSFontFaceAttribute"), own(string(&info.style))),
+        (key("NSFontNameAttribute"), own(string(&postscript))),
         (
-            key("CTFontSizeAttribute"),
+            key("NSFontSizeAttribute"),
             own(collections::new_number(Number::Float(size))),
         ),
-        (key("CTFontTraitsAttribute"), traits),
-        (key("CTFontLanguagesAttribute"), languages),
+        (key("NSCTFontTraitsAttribute"), traits),
+        (key("NSCTFontLanguagesAttribute"), languages),
         (
-            key("CTFontURLAttribute"),
+            key("NSCTFontFileURLAttribute"),
             own(corefoundation::url::new_file_url(&info.path, false)),
         ),
         (key(PATH_KEY), own(string(&info.path))),
@@ -254,8 +290,8 @@ fn face_attributes(info: &FaceInfo, size: f64) -> CFTypeRef {
 fn resolve(descriptor: CFTypeRef) -> Option<FaceInfo> {
     if let Some(path) = get_string(descriptor, PATH_KEY) {
         let index = get_number(descriptor, INDEX_KEY).unwrap_or(0.0) as u32;
-        let family = get_string(descriptor, "CTFontFamilyNameAttribute").unwrap_or_default();
-        let style = get_string(descriptor, "CTFontStyleNameAttribute").unwrap_or_default();
+        let family = get_string(descriptor, "NSFontFamilyAttribute").unwrap_or_default();
+        let style = get_string(descriptor, "NSFontFaceAttribute").unwrap_or_default();
         if let Some(found) = fonts::all_faces()
             .into_iter()
             .find(|face| face.path == path && face.index == index)
@@ -273,19 +309,19 @@ fn resolve(descriptor: CFTypeRef) -> Option<FaceInfo> {
             monospace: false,
         });
     }
-    let traits = get(descriptor, "CTFontTraitsAttribute");
-    let weight = get_number(traits, "CTFontWeightTrait").map_or(400, weight_class);
-    let symbolic = get_number(traits, "CTFontSymbolicTrait").unwrap_or(0.0) as u32;
-    let slant = get_number(traits, "CTFontSlantTrait").unwrap_or(0.0);
+    let traits = get(descriptor, "NSCTFontTraitsAttribute");
+    let weight = get_number(traits, "NSCTFontWeightTrait").map_or(400, weight_class);
+    let symbolic = get_number(traits, "NSCTFontSymbolicTrait").unwrap_or(0.0) as u32;
+    let slant = get_number(traits, "NSCTFontSlantTrait").unwrap_or(0.0);
     let weight = match symbolic & BOLD_TRAIT != 0 {
         true => weight.max(700),
         false => weight,
     };
     let italic = symbolic & ITALIC_TRAIT != 0 || slant > 0.0;
-    let family = get_string(descriptor, "CTFontFamilyNameAttribute")
-        .or_else(|| get_string(descriptor, "CTFontNameAttribute"))
+    let family = get_string(descriptor, "NSFontFamilyAttribute")
+        .or_else(|| get_string(descriptor, "NSFontNameAttribute"))
         .unwrap_or_default();
-    let style = get_string(descriptor, "CTFontStyleNameAttribute");
+    let style = get_string(descriptor, "NSFontFaceAttribute");
     if let Some(style) = style {
         if let Some(face) = fonts::all_faces().into_iter().find(|face| {
             face.family.eq_ignore_ascii_case(&family) && face.style.eq_ignore_ascii_case(&style)
@@ -301,7 +337,7 @@ fn resolve(descriptor: CFTypeRef) -> Option<FaceInfo> {
 fn make_font(descriptor: CFTypeRef, size: f64) -> CFTypeRef {
     let size = match size > 0.0 {
         true => size,
-        false => get_number(descriptor, "CTFontSizeAttribute")
+        false => get_number(descriptor, "NSFontSizeAttribute")
             .filter(|size| *size > 0.0)
             .unwrap_or(DEFAULT_SIZE),
     };
@@ -309,7 +345,7 @@ fn make_font(descriptor: CFTypeRef, size: f64) -> CFTypeRef {
         // No face at all: the descriptor with its size, so that the font
         // still answers its names.
         let size = collections::new_number(Number::Float(size));
-        let overrides = new_dictionary(&[(key("CTFontSizeAttribute"), size)]);
+        let overrides = new_dictionary(&[(key("NSFontSizeAttribute"), size)]);
         let font = merged_attributes(descriptor, overrides);
         release(overrides);
         release(size);
@@ -340,7 +376,7 @@ fn loaded(font: CFTypeRef) -> Option<Arc<LoadedFace>> {
 }
 
 fn font_size(font: CFTypeRef) -> f64 {
-    get_number(font, "CTFontSizeAttribute").unwrap_or(0.0)
+    get_number(font, "NSFontSizeAttribute").unwrap_or(0.0)
 }
 
 /// The face a font draws with and its size in points, for text AppKit draws
@@ -365,7 +401,7 @@ pub unsafe extern "C" fn CTFontCreateUIFontForLanguage(
     // `kCTFontUIFontUserFixedPitch` is 1; every other kind is proportional.
     let family = fonts::default_family(kind == 1).unwrap_or_else(|| "Sans".to_string());
     let name = string(&family);
-    let descriptor = new_dictionary(&[(key("CTFontFamilyNameAttribute"), name)]);
+    let descriptor = new_dictionary(&[(key("NSFontFamilyAttribute"), name)]);
     let font = make_font(descriptor, if size > 0.0 { size } else { 13.0 });
     release(descriptor);
     release(name);
@@ -381,8 +417,8 @@ pub unsafe extern "C" fn CTFontCreateWithName(
         return std::ptr::null();
     }
     let descriptor = new_dictionary(&[
-        (key("CTFontNameAttribute"), name),
-        (key("CTFontFamilyNameAttribute"), name),
+        (key("NSFontNameAttribute"), name),
+        (key("NSFontFamilyAttribute"), name),
     ]);
     let font = make_font(descriptor, size);
     release(descriptor);
@@ -422,12 +458,12 @@ fn copy_string_attribute(font: CFTypeRef, name: &'static str) -> CFTypeRef {
 
 pub unsafe extern "C" fn CTFontCopyName(font: CFTypeRef, name_key: CFTypeRef) -> CFTypeRef {
     let wanted = [
-        ("CTFontFamilyNameKey", "CTFontFamilyNameAttribute"),
-        ("CTFontSubFamilyNameKey", "CTFontStyleNameAttribute"),
-        ("CTFontStyleNameKey", "CTFontStyleNameAttribute"),
-        ("CTFontPostScriptNameKey", "CTFontNameAttribute"),
-        ("CTFontUniqueNameKey", "CTFontNameAttribute"),
-        ("CTFontFullNameKey", "CTFontNameAttribute"),
+        ("CTFontFamilyName", "NSFontFamilyAttribute"),
+        ("CTFontSubFamilyName", "NSFontFaceAttribute"),
+        ("CTFontStyleName", "NSFontFaceAttribute"),
+        ("CTFontPostScriptName", "NSFontNameAttribute"),
+        ("CTFontUniqueName", "NSFontNameAttribute"),
+        ("CTFontFullName", "NSFontNameAttribute"),
     ];
     for (name, attribute) in wanted {
         // SAFETY: both are strings, or `name_key` is null.
@@ -440,16 +476,16 @@ pub unsafe extern "C" fn CTFontCopyName(font: CFTypeRef, name_key: CFTypeRef) ->
 }
 
 pub unsafe extern "C" fn CTFontCopyFamilyName(font: CFTypeRef) -> CFTypeRef {
-    copy_string_attribute(font, "CTFontFamilyNameAttribute")
+    copy_string_attribute(font, "NSFontFamilyAttribute")
 }
 
 pub unsafe extern "C" fn CTFontCopyPostScriptName(font: CFTypeRef) -> CFTypeRef {
-    copy_string_attribute(font, "CTFontNameAttribute")
+    copy_string_attribute(font, "NSFontNameAttribute")
 }
 
 pub unsafe extern "C" fn CTFontGetSymbolicTraits(font: CFTypeRef) -> u32 {
-    let traits = get(font, "CTFontTraitsAttribute");
-    get_number(traits, "CTFontSymbolicTrait").unwrap_or(0.0) as u32
+    let traits = get(font, "NSCTFontTraitsAttribute");
+    get_number(traits, "NSCTFontSymbolicTrait").unwrap_or(0.0) as u32
 }
 
 pub unsafe extern "C" fn CTFontGetUnitsPerEm(font: CFTypeRef) -> u32 {
@@ -761,7 +797,7 @@ pub unsafe extern "C" fn CTFontCopyAttribute(font: CFTypeRef, attribute: CFTypeR
 }
 
 pub unsafe extern "C" fn CTFontCopyTraits(font: CFTypeRef) -> CFTypeRef {
-    let traits = get(font, "CTFontTraitsAttribute");
+    let traits = get(font, "NSCTFontTraitsAttribute");
     match traits.is_null() {
         true => new_dictionary(&[]),
         // SAFETY: a live attribute value.
@@ -787,7 +823,7 @@ pub unsafe extern "C" fn CTFontDescriptorCreateMatchingFontDescriptor(
     let info = resolve(descriptor);
     match info {
         Some(info) => {
-            let size = get_number(descriptor, "CTFontSizeAttribute").unwrap_or(0.0);
+            let size = get_number(descriptor, "NSFontSizeAttribute").unwrap_or(0.0);
             let resolved = face_attributes(&info, size);
             let merged = merged_attributes(descriptor, resolved);
             release(resolved);
@@ -807,8 +843,8 @@ pub unsafe extern "C" fn CTFontDescriptorCreateMatchingFontDescriptors(
         return std::ptr::null();
     }
     if get(descriptor, PATH_KEY).is_null() {
-        if let Some(family) = get_string(descriptor, "CTFontFamilyNameAttribute") {
-            let style = get_string(descriptor, "CTFontStyleNameAttribute");
+        if let Some(family) = get_string(descriptor, "NSFontFamilyAttribute") {
+            let style = get_string(descriptor, "NSFontFaceAttribute");
             let faces: Vec<CFTypeRef> = fonts::all_faces()
                 .iter()
                 .filter(|face| face.family.eq_ignore_ascii_case(&family))
@@ -853,8 +889,8 @@ pub unsafe extern "C" fn CTFontDescriptorCreateWithNameAndSize(
     }
     let size = collections::new_number(Number::Float(size));
     let descriptor = new_dictionary(&[
-        (key("CTFontNameAttribute"), name),
-        (key("CTFontSizeAttribute"), size),
+        (key("NSFontNameAttribute"), name),
+        (key("NSFontSizeAttribute"), size),
     ]);
     release(size);
     descriptor
@@ -939,7 +975,7 @@ pub unsafe extern "C" fn CTFontCopyDefaultCascadeListForLanguages(
         .iter()
         .map(|family| {
             let name = string(family);
-            let descriptor = new_dictionary(&[(key("CTFontFamilyNameAttribute"), name)]);
+            let descriptor = new_dictionary(&[(key("NSFontFamilyAttribute"), name)]);
             release(name);
             descriptor
         })
@@ -987,27 +1023,152 @@ pub unsafe extern "C" fn CTFontManagerCreateFontDescriptorsFromURL(url: CFTypeRe
     descriptors_for(&fonts::register_file(&path.to_string_lossy()))
 }
 
-/// As [`CTFontManagerCreateFontDescriptorsFromURL`], for font bytes in memory,
-/// which are written to a file so that they load like every other face.
-pub unsafe extern "C" fn CTFontManagerCreateFontDescriptorFromData(data: CFTypeRef) -> CFTypeRef {
-    // SAFETY: null or an object this runtime allocated.
-    let Some(bytes) = (unsafe { collections::data(data) }) else {
-        return std::ptr::null();
-    };
+/// Font bytes in memory, written to a file of their own so that they load
+/// like every other face: one file per distinct content.
+fn font_file(bytes: &[u8]) -> Option<String> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut hasher);
     let directory = std::env::temp_dir().join("rosemary-fonts");
     let _ = std::fs::create_dir_all(&directory);
     let path = directory.join(format!("{:016x}.ttf", hasher.finish()));
-    if !path.exists() && std::fs::write(&path, bytes.as_slice()).is_err() {
-        return std::ptr::null();
+    if !path.exists() && std::fs::write(&path, bytes).is_err() {
+        return None;
     }
-    let faces = fonts::register_file(&path.to_string_lossy());
+    Some(path.to_string_lossy().into_owned())
+}
+
+/// As [`CTFontManagerCreateFontDescriptorsFromURL`], for font bytes in memory.
+pub unsafe extern "C" fn CTFontManagerCreateFontDescriptorFromData(data: CFTypeRef) -> CFTypeRef {
+    // SAFETY: null or an object this runtime allocated.
+    let Some(bytes) = (unsafe { collections::data(data) }) else {
+        return std::ptr::null();
+    };
+    let Some(path) = font_file(bytes.as_slice()) else {
+        return std::ptr::null();
+    };
+    let faces = fonts::register_file(&path);
     let Some(first) = faces.first() else {
         return std::ptr::null();
     };
     face_attributes(first, 0.0)
+}
+
+/// `CGFontRef CGFontCreateWithDataProvider(CGDataProviderRef provider)`: the
+/// first face in the font data a provider holds, or null for data that is not
+/// a font.
+///
+/// A graphics font is the same attributes dictionary as its CTFont (see
+/// [`CTFontCreateWithGraphicsFont`]). It is not registered: as on a Mac, a
+/// font made this way draws, and becomes one a lookup by name finds only once
+/// [`CTFontManagerRegisterGraphicsFont`] registers it.
+pub unsafe extern "C" fn CGFontCreateWithDataProvider(provider: CFTypeRef) -> CFTypeRef {
+    let Some(path) = crate::graphics::provider_bytes(provider).and_then(font_file) else {
+        return std::ptr::null();
+    };
+    match fonts::describe_file(&path).first() {
+        Some(face) => face_attributes(face, 0.0),
+        None => std::ptr::null(),
+    }
+}
+
+/// `void CGFontRelease(CGFontRef font)`: `CFRelease`, except that a null font
+/// is no error.
+pub unsafe extern "C" fn CGFontRelease(font: CFTypeRef) {
+    if !font.is_null() {
+        release(font);
+    }
+}
+
+/// `kCTFontManagerErrorDomain`
+const FONT_MANAGER_ERROR_DOMAIN: &str = "com.apple.CoreText.CTFontManagerErrorDomain";
+/// `kCTFontManagerErrorInvalidFontData`
+const INVALID_FONT_DATA: i64 = 104;
+/// `kCTFontManagerErrorAlreadyRegistered`
+const ALREADY_REGISTERED: i64 = 105;
+/// `kCTFontManagerErrorNotRegistered`
+const NOT_REGISTERED: i64 = 201;
+
+/// The face a graphics font draws with, read from its file.
+fn graphics_face(font: CFTypeRef) -> Option<FaceInfo> {
+    if font.is_null() {
+        return None;
+    }
+    let path = get_string(font, PATH_KEY)?;
+    let index = get_number(font, INDEX_KEY).unwrap_or(0.0) as u32;
+    fonts::describe_file(&path)
+        .into_iter()
+        .find(|face| face.index == index)
+}
+
+/// A font manager error, stored where the caller asked for one, which owns it.
+fn font_manager_error(error: *mut CFTypeRef, code: i64, description: &str) {
+    if error.is_null() {
+        return;
+    }
+    let made = foundation::error::make(FONT_MANAGER_ERROR_DOMAIN, code, description);
+    // SAFETY: the caller's optional out-pointer; a `CFErrorRef *` result is
+    // the caller's to release, and `make`'s is autoreleased.
+    unsafe { *error = objc::arc::retain(made) as CFTypeRef };
+}
+
+/// `bool CTFontManagerRegisterGraphicsFont(CGFontRef font, CFErrorRef *error)`:
+/// make a graphics font available to this process by name. A font whose
+/// PostScript name is registered already is refused with
+/// `kCTFontManagerErrorAlreadyRegistered`, as Apple's is.
+pub unsafe extern "C" fn CTFontManagerRegisterGraphicsFont(
+    font: CFTypeRef,
+    error: *mut CFTypeRef,
+) -> bool {
+    let Some(face) = graphics_face(font) else {
+        font_manager_error(
+            error,
+            INVALID_FONT_DATA,
+            "The file does not contain valid font data.",
+        );
+        return false;
+    };
+    if !fonts::register(&face) {
+        font_manager_error(
+            error,
+            ALREADY_REGISTERED,
+            &format!(
+                "The font {:?} has already been registered in the specified scope.",
+                face.postscript
+            ),
+        );
+        return false;
+    }
+    true
+}
+
+/// `bool CTFontManagerUnregisterGraphicsFont(CGFontRef font, CFErrorRef *error)`:
+/// withdraw what [`CTFontManagerRegisterGraphicsFont`] registered, and refuse
+/// a font that is not registered with `kCTFontManagerErrorNotRegistered`.
+pub unsafe extern "C" fn CTFontManagerUnregisterGraphicsFont(
+    font: CFTypeRef,
+    error: *mut CFTypeRef,
+) -> bool {
+    let Some(face) = graphics_face(font) else {
+        font_manager_error(
+            error,
+            INVALID_FONT_DATA,
+            "The file does not contain valid font data.",
+        );
+        return false;
+    };
+    if !fonts::unregister(&face) {
+        font_manager_error(
+            error,
+            NOT_REGISTERED,
+            &format!(
+                "The font {:?} is not registered in the specified scope.",
+                face.postscript
+            ),
+        );
+        return false;
+    }
+    true
 }
 
 exports::exports! {
@@ -1047,6 +1208,10 @@ exports::exports! {
         "CTFontManagerCopyAvailableFontFamilyNames" => CTFontManagerCopyAvailableFontFamilyNames,
         "CTFontManagerCreateFontDescriptorsFromURL" => CTFontManagerCreateFontDescriptorsFromURL,
         "CTFontManagerCreateFontDescriptorFromData" => CTFontManagerCreateFontDescriptorFromData,
+        "CTFontManagerRegisterGraphicsFont" => CTFontManagerRegisterGraphicsFont,
+        "CTFontManagerUnregisterGraphicsFont" => CTFontManagerUnregisterGraphicsFont,
+        "CGFontCreateWithDataProvider" => CGFontCreateWithDataProvider,
+        "CGFontRelease" => CGFontRelease,
         "CTFontDescriptorCreateCopyWithAttributes" => CTFontDescriptorCreateCopyWithAttributes,
         "CTFontDescriptorCreateWithNameAndSize" => CTFontDescriptorCreateWithNameAndSize,
         "CTFontDescriptorCreateMatchingFontDescriptors" => CTFontDescriptorCreateMatchingFontDescriptors,
@@ -1145,7 +1310,7 @@ mod tests {
         unsafe {
             let original = CTFontDescriptorCreateWithNameAndSize(name, 12.0);
             let size = collections::new_number(Number::Float(20.0));
-            let overrides = new_dictionary(&[(key("CTFontSizeAttribute"), size)]);
+            let overrides = new_dictionary(&[(key("NSFontSizeAttribute"), size)]);
             let copy = CTFontDescriptorCreateCopyWithAttributes(original, overrides);
             assert_eq!(CTFontGetSize(copy), 20.0);
             assert_eq!(CTFontGetSize(original), 12.0);
