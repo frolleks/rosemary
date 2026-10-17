@@ -638,6 +638,7 @@ unsafe extern "C" fn init_with_content_rect(
 ) -> Id {
     let window = window_of(receiver);
     window.style_mask = style_mask;
+    let content_size = rect.size;
     // The content rectangle grows upwards by the chrome, as a Mac's frame
     // rectangle does: the SDL window is the whole frame.
     let inset = inset_of(receiver, style_mask, false);
@@ -680,7 +681,45 @@ unsafe extern "C" fn init_with_content_rect(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push((sdl as usize, receiver as usize));
+    // SAFETY: a window whose SDL window was made above.
+    unsafe { install_default_content_view(receiver, content_size) };
     receiver
+}
+
+/// "The new window creates a view to be its default content view", as Apple's
+/// designated initializer says: a plain `NSView` the size of the content
+/// rectangle, which a program replaces by setting `contentView` - or keeps,
+/// sending `-addSubview:` to it and never setting one at all.
+///
+/// Installed through `-setContentView:` so it is fitted to the window and
+/// linked to it exactly as a view the program set would be.
+///
+/// # Safety
+///
+/// `window` is an `NSWindow` this crate has just initialized.
+unsafe fn install_default_content_view(window: Id, size: NSSize) {
+    let Some(class) = objc::class::lookup(c"NSView") else {
+        return;
+    };
+    let frame = NSRect {
+        origin: NSPoint::default(),
+        size,
+    };
+    // SAFETY: `+alloc` is `id (Class, SEL)`, `-initWithFrame:` is
+    // `id (id, SEL, NSRect)` and `-setContentView:` is `void (id, SEL, id)`.
+    unsafe {
+        let alloc: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+        let init: unsafe extern "C" fn(Id, Sel, NSRect) -> Id =
+            std::mem::transmute(objc::msg::entry());
+        let set: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc::msg::entry());
+        let view = alloc(class as *const _ as Id, objc::sel::get("alloc"));
+        let view = init(view, objc::sel::get("initWithFrame:"), frame);
+        if view.is_null() {
+            return;
+        }
+        set(window, objc::sel::get("setContentView:"), view);
+        objc::arc::release(view);
+    }
 }
 
 /// The designated initializer's screen-aware spelling. SDL chooses the host

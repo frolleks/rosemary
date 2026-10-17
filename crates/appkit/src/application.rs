@@ -124,17 +124,27 @@ fn register_application_fonts() {
     }
 }
 
-unsafe extern "C" fn delegate(receiver: Id, _sel: Sel) -> Id {
-    // SAFETY: an application.
-    unsafe { (*(receiver as *const Application)).delegate }
+/// The delegate, retained for the caller to release.
+///
+/// The property is `@property (weak, nullable) id<NSApplicationDelegate>
+/// delegate`: not retained, and zeroed when the delegate is deallocated, so one
+/// the program has let go of reads as nil rather than as freed memory.
+fn delegate_retained(app: Id) -> Id {
+    // SAFETY: an application, whose `delegate` word is a weak slot.
+    objc::arc::load_weak_retained(unsafe { &raw mut (*(app as *mut Application)).delegate })
 }
 
-/// `-setDelegate:`, which does not retain - Apple's rule, and the reason a
-/// delegate outliving its application is the program's business rather than
-/// this one's.
+unsafe extern "C" fn delegate(receiver: Id, _sel: Sel) -> Id {
+    objc::arc::autorelease(delegate_retained(receiver))
+}
+
+/// `-setDelegate:`, a weak store - see [`delegate_retained`].
 unsafe extern "C" fn set_delegate(receiver: Id, _sel: Sel, value: Id) {
-    // SAFETY: an application.
-    unsafe { (*(receiver as *mut Application)).delegate = value };
+    // SAFETY: an application, whose `delegate` word is a weak slot.
+    objc::arc::store_weak(
+        unsafe { &raw mut (*(receiver as *mut Application)).delegate },
+        value,
+    );
 }
 
 unsafe extern "C" fn main_menu(receiver: Id, _sel: Sel) -> Id {
@@ -214,8 +224,7 @@ unsafe extern "C" fn is_active(receiver: Id, _sel: Sel) -> u8 {
 /// real Mac receives, and a program that opens its untitled document from the
 /// handler opens nothing without it.
 unsafe extern "C" fn finish_launching(receiver: Id, _sel: Sel) {
-    // SAFETY: an application.
-    let delegate = unsafe { (*(receiver as *const Application)).delegate };
+    let delegate = delegate_retained(receiver);
     for (name, selector) in [
         (WILL_FINISH_LAUNCHING, "applicationWillFinishLaunching:"),
         (DID_FINISH_LAUNCHING, "applicationDidFinishLaunching:"),
@@ -238,6 +247,7 @@ unsafe extern "C" fn finish_launching(receiver: Id, _sel: Sel) {
     // After the delegate has built its menus, and before any key press, so
     // Control-Command-F works without the menu having been opened.
     crate::menu::add_full_screen_item();
+    objc::arc::release(delegate);
 }
 
 /// The URLs this launch was asked to open, in the order they were given.
@@ -491,12 +501,12 @@ unsafe extern "C" fn stop(receiver: Id, _sel: Sel, _sender: Id) {
 /// program that wanted to veto its own exit gets no chance to, which is worth
 /// saying out loud rather than discovering.
 unsafe extern "C" fn terminate(receiver: Id, _sel: Sel, _sender: Id) {
-    // SAFETY: an application.
-    let delegate = unsafe { (*(receiver as *const Application)).delegate };
+    let delegate = delegate_retained(receiver);
     let notification =
         foundation::notification::make(WILL_TERMINATE, receiver, std::ptr::null_mut());
     // SAFETY: a delegate method is `void (id, SEL, NSNotification *)`.
     unsafe { send_if_implemented(delegate, "applicationWillTerminate:", notification) };
+    objc::arc::release(delegate);
     foundation::notification::post(WILL_TERMINATE, receiver, std::ptr::null_mut());
     darwin::exit::finalize(0);
     std::process::exit(0);
@@ -526,21 +536,18 @@ pub(crate) fn check_last_window_closed() {
     {
         return;
     }
-    // SAFETY: an application.
-    let delegate = unsafe { (*(app as *const Application)).delegate };
+    let delegate = delegate_retained(app);
     let sel = objc::sel::get("applicationShouldTerminateAfterLastWindowClosed:");
     // SAFETY: null or a live object this runtime allocated.
-    let Some(method) = unsafe { objc::object::class_of(delegate) }.and_then(|c| c.method(sel))
-    else {
-        return;
-    };
+    let method = unsafe { objc::object::class_of(delegate) }.and_then(|c| c.method(sel));
     // SAFETY: the method is `BOOL (id, SEL, NSApplication *)`.
-    let quit = unsafe {
+    let quit = method.is_some_and(|method| unsafe {
         let f: unsafe extern "C" fn(Id, Sel, Id) -> u8 =
             std::mem::transmute(method.implementation());
-        f(delegate, sel, app)
-    };
-    if quit != 0 {
+        f(delegate, sel, app) != 0
+    });
+    objc::arc::release(delegate);
+    if quit {
         // SAFETY: `-terminate:` is `void (id, SEL, id)`; sent so a subclass's
         // override runs.
         unsafe {
