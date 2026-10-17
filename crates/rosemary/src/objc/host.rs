@@ -126,6 +126,34 @@ pub fn deny_foreign_classes(provider: &mut machish::resolve::NativeDylibProvider
     }
 }
 
+/// A class pair for a class an image defines under a name another class
+/// already has, or null where the runtime has no way to make one.
+///
+/// What objc4's `readClass` does for such a class: it is realized like any
+/// other, and lookup by name goes on answering the first. Apple's libobjc does
+/// that only for a class it reads from an image itself, so with the host's own
+/// runtime there is nothing to call.
+///
+/// # Safety
+///
+/// `superclass` is null or a `Class` of the selected runtime, and `name` is
+/// NUL-terminated.
+pub unsafe fn allocate_image_class_pair(superclass: Class, name: *const c_char) -> Class {
+    match backend() {
+        Backend::Native => std::ptr::null_mut(),
+        Backend::Builtin => {
+            // SAFETY: the caller's two obligations.
+            let (superclass, name) = unsafe {
+                (
+                    builtin::class::from_ptr(superclass as *const builtin::class::Class),
+                    std::ffi::CStr::from_ptr(name),
+                )
+            };
+            builtin::class::ptr(builtin::class::allocate_image_pair(superclass, name, 0)) as Class
+        }
+    }
+}
+
 /// The host's own libobjc, reached by `dlsym`.
 ///
 /// Empty off macOS, where [`backend`] never selects it.
