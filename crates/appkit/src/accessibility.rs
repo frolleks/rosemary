@@ -1,0 +1,563 @@
+//! AppKit's accessibility names.
+//!
+//! Each `NSAccessibility*` constant is the string its HIServices `kAX*`
+//! counterpart defines - `NSAccessibilityChildrenAttribute` is
+//! `kAXChildrenAttribute`, `"AXChildren"` - so this table pairs the names
+//! `NSAccessibilityConstants.h` declares with the values `AXAttributeConstants.h`,
+//! `AXRoleConstants.h`, `AXActionConstants.h`, `AXNotificationConstants.h` and
+//! `AXValueConstants.h` give them (macOS 11.3 SDK). Nothing here serves
+//! accessibility clients; a program names these when it describes itself to
+//! one, and an unbound data import is a read through zero.
+
+/// `(Mach-O symbol, value)`, from the two headers.
+pub const NAMES: &[(&str, &str)] = &[
+    ("_NSAccessibilityRoleAttribute", "AXRole"),
+    (
+        "_NSAccessibilityRoleDescriptionAttribute",
+        "AXRoleDescription",
+    ),
+    ("_NSAccessibilitySubroleAttribute", "AXSubrole"),
+    ("_NSAccessibilityValueAttribute", "AXValue"),
+    ("_NSAccessibilityMinValueAttribute", "AXMinValue"),
+    ("_NSAccessibilityMaxValueAttribute", "AXMaxValue"),
+    ("_NSAccessibilityEnabledAttribute", "AXEnabled"),
+    ("_NSAccessibilityFocusedAttribute", "AXFocused"),
+    ("_NSAccessibilityParentAttribute", "AXParent"),
+    ("_NSAccessibilityChildrenAttribute", "AXChildren"),
+    ("_NSAccessibilityWindowAttribute", "AXWindow"),
+    (
+        "_NSAccessibilityTopLevelUIElementAttribute",
+        "AXTopLevelUIElement",
+    ),
+    (
+        "_NSAccessibilitySelectedChildrenAttribute",
+        "AXSelectedChildren",
+    ),
+    (
+        "_NSAccessibilityVisibleChildrenAttribute",
+        "AXVisibleChildren",
+    ),
+    ("_NSAccessibilityPositionAttribute", "AXPosition"),
+    ("_NSAccessibilitySizeAttribute", "AXSize"),
+    ("_NSAccessibilityContentsAttribute", "AXContents"),
+    (
+        "_NSAccessibilityValueDescriptionAttribute",
+        "AXValueDescription",
+    ),
+    (
+        "_NSAccessibilitySharedFocusElementsAttribute",
+        "AXSharedFocusElements",
+    ),
+    (
+        "_NSAccessibilityPreviousContentsAttribute",
+        "AXPreviousContents",
+    ),
+    ("_NSAccessibilityNextContentsAttribute", "AXNextContents"),
+    ("_NSAccessibilityHeaderAttribute", "AXHeader"),
+    ("_NSAccessibilityEditedAttribute", "AXEdited"),
+    ("_NSAccessibilityTabsAttribute", "AXTabs"),
+    (
+        "_NSAccessibilityHorizontalScrollBarAttribute",
+        "AXHorizontalScrollBar",
+    ),
+    (
+        "_NSAccessibilityVerticalScrollBarAttribute",
+        "AXVerticalScrollBar",
+    ),
+    (
+        "_NSAccessibilityOverflowButtonAttribute",
+        "AXOverflowButton",
+    ),
+    (
+        "_NSAccessibilityIncrementButtonAttribute",
+        "AXIncrementButton",
+    ),
+    (
+        "_NSAccessibilityDecrementButtonAttribute",
+        "AXDecrementButton",
+    ),
+    ("_NSAccessibilityFilenameAttribute", "AXFilename"),
+    ("_NSAccessibilityExpandedAttribute", "AXExpanded"),
+    ("_NSAccessibilitySelectedAttribute", "AXSelected"),
+    ("_NSAccessibilitySplittersAttribute", "AXSplitters"),
+    ("_NSAccessibilityDocumentAttribute", "AXDocument"),
+    ("_NSAccessibilityURLAttribute", "AXURL"),
+    ("_NSAccessibilityIndexAttribute", "AXIndex"),
+    ("_NSAccessibilityRowCountAttribute", "AXRowCount"),
+    ("_NSAccessibilityColumnCountAttribute", "AXColumnCount"),
+    ("_NSAccessibilityOrderedByRowAttribute", "AXOrderedByRow"),
+    ("_NSAccessibilityWarningValueAttribute", "AXWarningValue"),
+    ("_NSAccessibilityCriticalValueAttribute", "AXCriticalValue"),
+    (
+        "_NSAccessibilityPlaceholderValueAttribute",
+        "AXPlaceholderValue",
+    ),
+    (
+        "_NSAccessibilityAlternateUIVisibleAttribute",
+        "AXAlternateUIVisible",
+    ),
+    (
+        "_NSAccessibilityTitleUIElementAttribute",
+        "AXTitleUIElement",
+    ),
+    (
+        "_NSAccessibilityServesAsTitleForUIElementsAttribute",
+        "AXServesAsTitleForUIElements",
+    ),
+    (
+        "_NSAccessibilityLinkedUIElementsAttribute",
+        "AXLinkedUIElements",
+    ),
+    ("_NSAccessibilitySelectedTextAttribute", "AXSelectedText"),
+    (
+        "_NSAccessibilitySelectedTextRangeAttribute",
+        "AXSelectedTextRange",
+    ),
+    (
+        "_NSAccessibilityNumberOfCharactersAttribute",
+        "AXNumberOfCharacters",
+    ),
+    (
+        "_NSAccessibilityVisibleCharacterRangeAttribute",
+        "AXVisibleCharacterRange",
+    ),
+    (
+        "_NSAccessibilitySharedTextUIElementsAttribute",
+        "AXSharedTextUIElements",
+    ),
+    (
+        "_NSAccessibilitySharedCharacterRangeAttribute",
+        "AXSharedCharacterRange",
+    ),
+    (
+        "_NSAccessibilityInsertionPointLineNumberAttribute",
+        "AXInsertionPointLineNumber",
+    ),
+    (
+        "_NSAccessibilitySelectedTextRangesAttribute",
+        "AXSelectedTextRanges",
+    ),
+    (
+        "_NSAccessibilityLineForIndexParameterizedAttribute",
+        "AXLineForIndex",
+    ),
+    (
+        "_NSAccessibilityRangeForLineParameterizedAttribute",
+        "AXRangeForLine",
+    ),
+    (
+        "_NSAccessibilityStringForRangeParameterizedAttribute",
+        "AXStringForRange",
+    ),
+    (
+        "_NSAccessibilityRangeForPositionParameterizedAttribute",
+        "AXRangeForPosition",
+    ),
+    (
+        "_NSAccessibilityRangeForIndexParameterizedAttribute",
+        "AXRangeForIndex",
+    ),
+    (
+        "_NSAccessibilityBoundsForRangeParameterizedAttribute",
+        "AXBoundsForRange",
+    ),
+    (
+        "_NSAccessibilityRTFForRangeParameterizedAttribute",
+        "AXRTFForRange",
+    ),
+    (
+        "_NSAccessibilityStyleRangeForIndexParameterizedAttribute",
+        "AXStyleRangeForIndex",
+    ),
+    (
+        "_NSAccessibilityAttributedStringForRangeParameterizedAttribute",
+        "AXAttributedStringForRange",
+    ),
+    ("_NSAccessibilityMainAttribute", "AXMain"),
+    ("_NSAccessibilityMinimizedAttribute", "AXMinimized"),
+    ("_NSAccessibilityCloseButtonAttribute", "AXCloseButton"),
+    ("_NSAccessibilityZoomButtonAttribute", "AXZoomButton"),
+    (
+        "_NSAccessibilityMinimizeButtonAttribute",
+        "AXMinimizeButton",
+    ),
+    ("_NSAccessibilityToolbarButtonAttribute", "AXToolbarButton"),
+    ("_NSAccessibilityProxyAttribute", "AXProxy"),
+    ("_NSAccessibilityGrowAreaAttribute", "AXGrowArea"),
+    ("_NSAccessibilityModalAttribute", "AXModal"),
+    ("_NSAccessibilityDefaultButtonAttribute", "AXDefaultButton"),
+    ("_NSAccessibilityCancelButtonAttribute", "AXCancelButton"),
+    (
+        "_NSAccessibilityFullScreenButtonAttribute",
+        "AXFullScreenButton",
+    ),
+    ("_NSAccessibilityMenuBarAttribute", "AXMenuBar"),
+    ("_NSAccessibilityWindowsAttribute", "AXWindows"),
+    ("_NSAccessibilityFrontmostAttribute", "AXFrontmost"),
+    ("_NSAccessibilityHiddenAttribute", "AXHidden"),
+    ("_NSAccessibilityMainWindowAttribute", "AXMainWindow"),
+    ("_NSAccessibilityFocusedWindowAttribute", "AXFocusedWindow"),
+    (
+        "_NSAccessibilityFocusedUIElementAttribute",
+        "AXFocusedUIElement",
+    ),
+    ("_NSAccessibilityExtrasMenuBarAttribute", "AXExtrasMenuBar"),
+    ("_NSAccessibilityOrientationAttribute", "AXOrientation"),
+    (
+        "_NSAccessibilityVerticalOrientationValue",
+        "AXVerticalOrientation",
+    ),
+    (
+        "_NSAccessibilityHorizontalOrientationValue",
+        "AXHorizontalOrientation",
+    ),
+    (
+        "_NSAccessibilityUnknownOrientationValue",
+        "AXUnknownOrientation",
+    ),
+    ("_NSAccessibilityColumnTitlesAttribute", "AXColumnTitles"),
+    ("_NSAccessibilitySearchButtonAttribute", "AXSearchButton"),
+    ("_NSAccessibilityClearButtonAttribute", "AXClearButton"),
+    ("_NSAccessibilityRowsAttribute", "AXRows"),
+    ("_NSAccessibilityVisibleRowsAttribute", "AXVisibleRows"),
+    ("_NSAccessibilitySelectedRowsAttribute", "AXSelectedRows"),
+    ("_NSAccessibilityColumnsAttribute", "AXColumns"),
+    (
+        "_NSAccessibilityVisibleColumnsAttribute",
+        "AXVisibleColumns",
+    ),
+    (
+        "_NSAccessibilitySelectedColumnsAttribute",
+        "AXSelectedColumns",
+    ),
+    ("_NSAccessibilitySortDirectionAttribute", "AXSortDirection"),
+    ("_NSAccessibilitySelectedCellsAttribute", "AXSelectedCells"),
+    ("_NSAccessibilityVisibleCellsAttribute", "AXVisibleCells"),
+    (
+        "_NSAccessibilityRowHeaderUIElementsAttribute",
+        "AXRowHeaderUIElements",
+    ),
+    (
+        "_NSAccessibilityColumnHeaderUIElementsAttribute",
+        "AXColumnHeaderUIElements",
+    ),
+    (
+        "_NSAccessibilityCellForColumnAndRowParameterizedAttribute",
+        "AXCellForColumnAndRow",
+    ),
+    ("_NSAccessibilityRowIndexRangeAttribute", "AXRowIndexRange"),
+    (
+        "_NSAccessibilityColumnIndexRangeAttribute",
+        "AXColumnIndexRange",
+    ),
+    (
+        "_NSAccessibilityHorizontalUnitsAttribute",
+        "AXHorizontalUnits",
+    ),
+    ("_NSAccessibilityVerticalUnitsAttribute", "AXVerticalUnits"),
+    (
+        "_NSAccessibilityHorizontalUnitDescriptionAttribute",
+        "AXHorizontalUnitDescription",
+    ),
+    (
+        "_NSAccessibilityVerticalUnitDescriptionAttribute",
+        "AXVerticalUnitDescription",
+    ),
+    (
+        "_NSAccessibilityLayoutPointForScreenPointParameterizedAttribute",
+        "AXLayoutPointForScreenPoint",
+    ),
+    (
+        "_NSAccessibilityLayoutSizeForScreenSizeParameterizedAttribute",
+        "AXLayoutSizeForScreenSize",
+    ),
+    (
+        "_NSAccessibilityScreenPointForLayoutPointParameterizedAttribute",
+        "AXScreenPointForLayoutPoint",
+    ),
+    (
+        "_NSAccessibilityScreenSizeForLayoutSizeParameterizedAttribute",
+        "AXScreenSizeForLayoutSize",
+    ),
+    ("_NSAccessibilityHandlesAttribute", "AXHandles"),
+    (
+        "_NSAccessibilityAscendingSortDirectionValue",
+        "AXAscendingSortDirection",
+    ),
+    (
+        "_NSAccessibilityDescendingSortDirectionValue",
+        "AXDescendingSortDirection",
+    ),
+    (
+        "_NSAccessibilityUnknownSortDirectionValue",
+        "AXUnknownSortDirection",
+    ),
+    ("_NSAccessibilityDisclosingAttribute", "AXDisclosing"),
+    ("_NSAccessibilityDisclosedRowsAttribute", "AXDisclosedRows"),
+    (
+        "_NSAccessibilityDisclosedByRowAttribute",
+        "AXDisclosedByRow",
+    ),
+    (
+        "_NSAccessibilityDisclosureLevelAttribute",
+        "AXDisclosureLevel",
+    ),
+    ("_NSAccessibilityAllowedValuesAttribute", "AXAllowedValues"),
+    (
+        "_NSAccessibilityLabelUIElementsAttribute",
+        "AXLabelUIElements",
+    ),
+    ("_NSAccessibilityLabelValueAttribute", "AXLabelValue"),
+    ("_NSAccessibilityMatteHoleAttribute", "AXMatteHole"),
+    (
+        "_NSAccessibilityMatteContentUIElementAttribute",
+        "AXMatteContentUIElement",
+    ),
+    (
+        "_NSAccessibilityMarkerUIElementsAttribute",
+        "AXMarkerUIElements",
+    ),
+    ("_NSAccessibilityUnitsAttribute", "AXUnits"),
+    (
+        "_NSAccessibilityUnitDescriptionAttribute",
+        "AXUnitDescription",
+    ),
+    ("_NSAccessibilityMarkerTypeAttribute", "AXMarkerType"),
+    (
+        "_NSAccessibilityMarkerTypeDescriptionAttribute",
+        "AXMarkerTypeDescription",
+    ),
+    ("_NSAccessibilityIdentifierAttribute", "AXIdentifier"),
+    ("_NSAccessibilityPressAction", "AXPress"),
+    ("_NSAccessibilityIncrementAction", "AXIncrement"),
+    ("_NSAccessibilityDecrementAction", "AXDecrement"),
+    ("_NSAccessibilityConfirmAction", "AXConfirm"),
+    ("_NSAccessibilityPickAction", "AXPick"),
+    ("_NSAccessibilityCancelAction", "AXCancel"),
+    ("_NSAccessibilityRaiseAction", "AXRaise"),
+    ("_NSAccessibilityShowMenuAction", "AXShowMenu"),
+    ("_NSAccessibilityShowAlternateUIAction", "AXShowAlternateUI"),
+    ("_NSAccessibilityShowDefaultUIAction", "AXShowDefaultUI"),
+    (
+        "_NSAccessibilityMainWindowChangedNotification",
+        "AXMainWindowChanged",
+    ),
+    (
+        "_NSAccessibilityFocusedWindowChangedNotification",
+        "AXFocusedWindowChanged",
+    ),
+    (
+        "_NSAccessibilityFocusedUIElementChangedNotification",
+        "AXFocusedUIElementChanged",
+    ),
+    (
+        "_NSAccessibilityApplicationActivatedNotification",
+        "AXApplicationActivated",
+    ),
+    (
+        "_NSAccessibilityApplicationDeactivatedNotification",
+        "AXApplicationDeactivated",
+    ),
+    (
+        "_NSAccessibilityApplicationHiddenNotification",
+        "AXApplicationHidden",
+    ),
+    (
+        "_NSAccessibilityApplicationShownNotification",
+        "AXApplicationShown",
+    ),
+    (
+        "_NSAccessibilityWindowCreatedNotification",
+        "AXWindowCreated",
+    ),
+    ("_NSAccessibilityWindowMovedNotification", "AXWindowMoved"),
+    (
+        "_NSAccessibilityWindowResizedNotification",
+        "AXWindowResized",
+    ),
+    (
+        "_NSAccessibilityWindowMiniaturizedNotification",
+        "AXWindowMiniaturized",
+    ),
+    (
+        "_NSAccessibilityWindowDeminiaturizedNotification",
+        "AXWindowDeminiaturized",
+    ),
+    (
+        "_NSAccessibilityDrawerCreatedNotification",
+        "AXDrawerCreated",
+    ),
+    ("_NSAccessibilitySheetCreatedNotification", "AXSheetCreated"),
+    (
+        "_NSAccessibilityUIElementDestroyedNotification",
+        "AXUIElementDestroyed",
+    ),
+    ("_NSAccessibilityValueChangedNotification", "AXValueChanged"),
+    ("_NSAccessibilityTitleChangedNotification", "AXTitleChanged"),
+    ("_NSAccessibilityResizedNotification", "AXResized"),
+    ("_NSAccessibilityMovedNotification", "AXMoved"),
+    ("_NSAccessibilityCreatedNotification", "AXCreated"),
+    (
+        "_NSAccessibilityLayoutChangedNotification",
+        "AXLayoutChanged",
+    ),
+    (
+        "_NSAccessibilityHelpTagCreatedNotification",
+        "AXHelpTagCreated",
+    ),
+    (
+        "_NSAccessibilitySelectedTextChangedNotification",
+        "AXSelectedTextChanged",
+    ),
+    (
+        "_NSAccessibilityRowCountChangedNotification",
+        "AXRowCountChanged",
+    ),
+    (
+        "_NSAccessibilitySelectedChildrenChangedNotification",
+        "AXSelectedChildrenChanged",
+    ),
+    (
+        "_NSAccessibilitySelectedRowsChangedNotification",
+        "AXSelectedRowsChanged",
+    ),
+    (
+        "_NSAccessibilitySelectedColumnsChangedNotification",
+        "AXSelectedColumnsChanged",
+    ),
+    ("_NSAccessibilityRowExpandedNotification", "AXRowExpanded"),
+    ("_NSAccessibilityRowCollapsedNotification", "AXRowCollapsed"),
+    (
+        "_NSAccessibilitySelectedCellsChangedNotification",
+        "AXSelectedCellsChanged",
+    ),
+    ("_NSAccessibilityUnitsChangedNotification", "AXUnitsChanged"),
+    (
+        "_NSAccessibilitySelectedChildrenMovedNotification",
+        "AXSelectedChildrenMoved",
+    ),
+    (
+        "_NSAccessibilityAnnouncementRequestedNotification",
+        "AXAnnouncementRequested",
+    ),
+    ("_NSAccessibilityUnknownRole", "AXUnknown"),
+    ("_NSAccessibilityButtonRole", "AXButton"),
+    ("_NSAccessibilityRadioButtonRole", "AXRadioButton"),
+    ("_NSAccessibilityCheckBoxRole", "AXCheckBox"),
+    ("_NSAccessibilitySliderRole", "AXSlider"),
+    ("_NSAccessibilityTabGroupRole", "AXTabGroup"),
+    ("_NSAccessibilityTextFieldRole", "AXTextField"),
+    ("_NSAccessibilityStaticTextRole", "AXStaticText"),
+    ("_NSAccessibilityTextAreaRole", "AXTextArea"),
+    ("_NSAccessibilityScrollAreaRole", "AXScrollArea"),
+    ("_NSAccessibilityPopUpButtonRole", "AXPopUpButton"),
+    ("_NSAccessibilityMenuButtonRole", "AXMenuButton"),
+    ("_NSAccessibilityTableRole", "AXTable"),
+    ("_NSAccessibilityApplicationRole", "AXApplication"),
+    ("_NSAccessibilityGroupRole", "AXGroup"),
+    ("_NSAccessibilityRadioGroupRole", "AXRadioGroup"),
+    ("_NSAccessibilityListRole", "AXList"),
+    ("_NSAccessibilityScrollBarRole", "AXScrollBar"),
+    ("_NSAccessibilityValueIndicatorRole", "AXValueIndicator"),
+    ("_NSAccessibilityImageRole", "AXImage"),
+    ("_NSAccessibilityMenuBarRole", "AXMenuBar"),
+    ("_NSAccessibilityMenuBarItemRole", "AXMenuBarItem"),
+    ("_NSAccessibilityMenuRole", "AXMenu"),
+    ("_NSAccessibilityMenuItemRole", "AXMenuItem"),
+    ("_NSAccessibilityColumnRole", "AXColumn"),
+    ("_NSAccessibilityRowRole", "AXRow"),
+    ("_NSAccessibilityToolbarRole", "AXToolbar"),
+    ("_NSAccessibilityBusyIndicatorRole", "AXBusyIndicator"),
+    (
+        "_NSAccessibilityProgressIndicatorRole",
+        "AXProgressIndicator",
+    ),
+    ("_NSAccessibilityWindowRole", "AXWindow"),
+    ("_NSAccessibilityDrawerRole", "AXDrawer"),
+    ("_NSAccessibilitySystemWideRole", "AXSystemWide"),
+    ("_NSAccessibilityOutlineRole", "AXOutline"),
+    ("_NSAccessibilityIncrementorRole", "AXIncrementor"),
+    ("_NSAccessibilityBrowserRole", "AXBrowser"),
+    ("_NSAccessibilityComboBoxRole", "AXComboBox"),
+    ("_NSAccessibilitySplitGroupRole", "AXSplitGroup"),
+    ("_NSAccessibilitySplitterRole", "AXSplitter"),
+    ("_NSAccessibilityColorWellRole", "AXColorWell"),
+    ("_NSAccessibilityGrowAreaRole", "AXGrowArea"),
+    ("_NSAccessibilitySheetRole", "AXSheet"),
+    ("_NSAccessibilityHelpTagRole", "AXHelpTag"),
+    ("_NSAccessibilityMatteRole", "AXMatte"),
+    ("_NSAccessibilityRulerRole", "AXRuler"),
+    ("_NSAccessibilityRulerMarkerRole", "AXRulerMarker"),
+    (
+        "_NSAccessibilityDisclosureTriangleRole",
+        "AXDisclosureTriangle",
+    ),
+    ("_NSAccessibilityGridRole", "AXGrid"),
+    (
+        "_NSAccessibilityRelevanceIndicatorRole",
+        "AXRelevanceIndicator",
+    ),
+    ("_NSAccessibilityLevelIndicatorRole", "AXLevelIndicator"),
+    ("_NSAccessibilityCellRole", "AXCell"),
+    ("_NSAccessibilityPopoverRole", "AXPopover"),
+    ("_NSAccessibilityLayoutAreaRole", "AXLayoutArea"),
+    ("_NSAccessibilityLayoutItemRole", "AXLayoutItem"),
+    ("_NSAccessibilityHandleRole", "AXHandle"),
+    ("_NSAccessibilityUnknownSubrole", "AXUnknown"),
+    ("_NSAccessibilityCloseButtonSubrole", "AXCloseButton"),
+    ("_NSAccessibilityZoomButtonSubrole", "AXZoomButton"),
+    ("_NSAccessibilityMinimizeButtonSubrole", "AXMinimizeButton"),
+    ("_NSAccessibilityToolbarButtonSubrole", "AXToolbarButton"),
+    ("_NSAccessibilityTableRowSubrole", "AXTableRow"),
+    ("_NSAccessibilityOutlineRowSubrole", "AXOutlineRow"),
+    (
+        "_NSAccessibilitySecureTextFieldSubrole",
+        "AXSecureTextField",
+    ),
+    ("_NSAccessibilityStandardWindowSubrole", "AXStandardWindow"),
+    ("_NSAccessibilityDialogSubrole", "AXDialog"),
+    ("_NSAccessibilitySystemDialogSubrole", "AXSystemDialog"),
+    ("_NSAccessibilityFloatingWindowSubrole", "AXFloatingWindow"),
+    (
+        "_NSAccessibilitySystemFloatingWindowSubrole",
+        "AXSystemFloatingWindow",
+    ),
+    ("_NSAccessibilityIncrementArrowSubrole", "AXIncrementArrow"),
+    ("_NSAccessibilityDecrementArrowSubrole", "AXDecrementArrow"),
+    ("_NSAccessibilityIncrementPageSubrole", "AXIncrementPage"),
+    ("_NSAccessibilityDecrementPageSubrole", "AXDecrementPage"),
+    ("_NSAccessibilitySearchFieldSubrole", "AXSearchField"),
+    ("_NSAccessibilityTimelineSubrole", "AXTimeline"),
+    ("_NSAccessibilitySortButtonSubrole", "AXSortButton"),
+    (
+        "_NSAccessibilityRatingIndicatorSubrole",
+        "AXRatingIndicator",
+    ),
+    ("_NSAccessibilityContentListSubrole", "AXContentList"),
+    ("_NSAccessibilityDefinitionListSubrole", "AXDefinitionList"),
+    (
+        "_NSAccessibilityFullScreenButtonSubrole",
+        "AXFullScreenButton",
+    ),
+    ("_NSAccessibilityToggleSubrole", "AXToggle"),
+    ("_NSAccessibilitySwitchSubrole", "AXSwitch"),
+    (
+        "_NSAccessibilityDescriptionListSubrole",
+        "AXDescriptionList",
+    ),
+    ("_NSAccessibilityUIElementsKey", "AXUIElementsKey"),
+    ("_NSAccessibilityPriorityKey", "AXPriorityKey"),
+    ("_NSAccessibilityAnnouncementKey", "AXAnnouncementKey"),
+];
+
+/// AppKit names with no `kAX*` macro, by the value AppKit gives them.
+pub const UNPAIRED: &[(&str, &str)] = &[
+    ("_NSAccessibilityLinkRole", "AXLink"),
+    ("_NSAccessibilityRequiredAttribute", "AXRequired"),
+    (
+        "_NSAccessibilityMarkedMisspelledTextAttribute",
+        "AXMarkedMisspelled",
+    ),
+    ("_NSAccessibilityAnnouncementKey", "AXAnnouncementKey"),
+    ("_NSAccessibilityPriorityKey", "AXPriorityKey"),
+];

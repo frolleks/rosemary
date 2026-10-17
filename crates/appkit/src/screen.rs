@@ -387,6 +387,30 @@ unsafe extern "C" fn color_space(_receiver: Id, _sel: Sel) -> Id {
 /// definition rather than by measurement.
 const POINTS_PER_INCH: f64 = 72.0;
 
+/// `boolean_t CGDisplayUsesForceToGray(void)`: whether the accessibility
+/// setting that shows every display in grayscale is on. It is a Mac's own
+/// setting, and nothing here turns it on.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayUsesForceToGray() -> u32 {
+    0
+}
+
+/// `boolean_t CGDisplayUsesInvertedPolarity(void)`: likewise, the setting that
+/// inverts the display's colours.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayUsesInvertedPolarity() -> u32 {
+    0
+}
+
+/// `CGColorSpaceRef CGDisplayCopyColorSpace(CGDirectDisplayID)`: sRGB, the
+/// space this host's displays are composited in.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGDisplayCopyColorSpace(_display: u32) -> corefoundation::base::CFTypeRef {
+    let name = foundation::notification::name_object("kCGColorSpaceSRGB");
+    // SAFETY: a constant string.
+    unsafe { crate::graphics::CGColorSpaceCreateWithName(name as _) }
+}
+
 /// `CGDirectDisplayID CGMainDisplayID(void)`.
 ///
 /// CoreGraphics is below AppKit and this is its only entry point here, which is
