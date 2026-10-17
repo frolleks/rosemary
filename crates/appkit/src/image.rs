@@ -780,7 +780,7 @@ pub(crate) fn draw_tinted(receiver: Id, destination: NSRect, tint: [f64; 4]) {
         image.size,
         destination,
         NSRect::default(),
-        2,
+        SOURCE_OVER,
         1.0,
         false,
     );
@@ -904,6 +904,25 @@ unsafe extern "C" fn draw_in_rect(
     draw(receiver, sel, destination, from, operation, fraction, false);
 }
 
+/// `NSCompositingOperationSourceOver`.
+const SOURCE_OVER: usize = 2;
+
+/// `-drawInRect:`, which `NSImage.h` defines as
+/// `-drawInRect:fromRect:NSZeroRect operation:NSCompositingOperationSourceOver
+/// fraction:1 respectFlipped:YES hints:nil` - the whole image, scaled to the
+/// rectangle.
+unsafe extern "C" fn draw_whole_in_rect(receiver: Id, sel: Sel, destination: NSRect) {
+    draw(
+        receiver,
+        sel,
+        destination,
+        NSRect::default(),
+        SOURCE_OVER,
+        1.0,
+        true,
+    );
+}
+
 /// Everything that still needs a decoded raster this module cannot produce.
 ///
 /// One implementation for the whole family, naming the selector it was reached
@@ -992,6 +1011,7 @@ pub(crate) fn install() {
     methods!(class, {
         "lockFocus" => lock_focus, c"v16@0:8";
         "unlockFocus" => unlock_focus, c"v16@0:8";
+        "drawInRect:" => draw_whole_in_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "drawInRect:fromRect:operation:fraction:" => draw_in_rect,
             c"v96@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16{CGRect={CGPoint=dd}{CGSize=dd}}48Q80d88";
         "drawInRect:fromRect:operation:fraction:respectFlipped:hints:" =>
@@ -1089,9 +1109,79 @@ pub mod bitmap {
         /// rep is half as many points as pixels - and that is exactly what the
         /// setter is for.
         declared: NSSize,
+        /// `NSBitmapFormat`: zero, Apple's default, is premultiplied samples
+        /// with alpha last.
+        format: usize,
+        /// The image `-CGImage` last answered, which the rep owns.
+        cg_image: *const c_void,
     }
 
     pub const INSTANCE_SIZE: usize = size_of::<BitmapRep>();
+
+    /// `NSBitmapFormatAlphaFirst`
+    pub(crate) const ALPHA_FIRST: usize = 1 << 0;
+    /// `NSBitmapFormatAlphaNonpremultiplied`
+    pub(crate) const ALPHA_NONPREMULTIPLIED: usize = 1 << 1;
+
+    /// Where a rep's pixels are and how they are laid out, for something that
+    /// draws into them.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Layout {
+        pub data: *mut u8,
+        pub width: usize,
+        pub height: usize,
+        pub bytes_per_pixel: usize,
+        pub bytes_per_row: usize,
+        pub has_alpha: bool,
+        pub format: usize,
+        /// The rep's size in points, which its pixels cover.
+        pub points: NSSize,
+    }
+
+    fn is_rep(object: Id) -> bool {
+        // SAFETY: null or an object this runtime allocated.
+        !object.is_null()
+            && unsafe { objc::object::class_of(object) }.is_some_and(|c| {
+                objc::class::lookup(c"NSBitmapImageRep")
+                    .is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
+            })
+    }
+
+    /// A rep's [`Layout`], for an eight-bit, interleaved rep of three or four
+    /// samples with alpha last or first, which is every rep this module
+    /// makes. `None` for anything else, or a rep with no pixels.
+    pub(crate) fn layout(object: Id) -> Option<Layout> {
+        if !is_rep(object) {
+            return None;
+        }
+        let rep = rep_of(object);
+        // SAFETY: `-bitmapData` is this module's own.
+        let data = unsafe { bitmap_data(object, objc::sel::get("bitmapData")) };
+        let bytes_per_pixel = rep.bits_per_pixel / 8;
+        // Four samples are RGBA and three RGB: four without alpha would be
+        // CMYK, which nothing here draws.
+        let fits = rep.bits_per_sample == 8
+            && matches!(rep.samples, 3 | 4)
+            && (rep.samples == 4) == (rep.has_alpha != 0)
+            && rep.bits_per_pixel % 8 == 0
+            && bytes_per_pixel >= rep.samples
+            && rep.bytes_per_row >= rep.width * bytes_per_pixel;
+        if data.is_null() || !fits {
+            return None;
+        }
+        // SAFETY: as `-size` answers.
+        let points = unsafe { rep_size(object, objc::sel::get("size")) };
+        Some(Layout {
+            data,
+            width: rep.width,
+            height: rep.height,
+            bytes_per_pixel,
+            bytes_per_row: rep.bytes_per_row,
+            has_alpha: rep.has_alpha != 0,
+            format: rep.format,
+            points,
+        })
+    }
 
     fn rep_of<'a>(receiver: Id) -> &'a mut BitmapRep {
         // SAFETY: a bitmap rep of this crate's.
@@ -1186,7 +1276,7 @@ pub mod bitmap {
         has_alpha: u8,
         is_planar: u8,
         _colour_space: Id,
-        _format: usize,
+        format: usize,
         bytes_per_row: isize,
         bits_per_pixel: isize,
     ) -> Id {
@@ -1209,6 +1299,7 @@ pub mod bitmap {
         rep.samples = samples as usize;
         rep.bits_per_sample = 8;
         rep.has_alpha = (has_alpha != 0) as usize;
+        rep.format = format;
         rep.bits_per_pixel = match bits_per_pixel > 0 {
             true => bits_per_pixel as usize,
             false => samples as usize * 8,
@@ -1274,15 +1365,7 @@ pub mod bitmap {
     /// `None` rather than reinterpreted, because the bytes would be read as a
     /// format they are not.
     pub fn pixels_of(object: Id) -> Option<crate::raster::Bitmap> {
-        if object.is_null() {
-            return None;
-        }
-        // SAFETY: null or an object this runtime allocated.
-        let is_rep = unsafe { objc::object::class_of(object) }.is_some_and(|c| {
-            objc::class::lookup(c"NSBitmapImageRep")
-                .is_some_and(|k| c.chain().any(|x| std::ptr::eq(x, k)))
-        });
-        if !is_rep {
+        if !is_rep(object) {
             return None;
         }
         let rep = rep_of(object);
@@ -1318,6 +1401,91 @@ pub mod bitmap {
             // SAFETY: a buffer this object leaked, which outlives every caller.
             false => unsafe { (*rep.pixels).as_mut_ptr() },
         }
+    }
+
+    /// `-copyWithZone:`, from `NSCopying`: a rep of the same class and
+    /// description whose pixels are its own copy of this one's, so drawing
+    /// into either leaves the other as it was - a buffer the guest supplied
+    /// included, which the copy does not write through.
+    unsafe extern "C" fn copy_with_zone(receiver: Id, _sel: Sel, _zone: *mut c_void) -> Id {
+        // SAFETY: a rep of this module's, so its class is too.
+        let Some(class) = (unsafe { objc::object::class_of(receiver) }) else {
+            return std::ptr::null_mut();
+        };
+        let source = rep_of(receiver);
+        // SAFETY: `-bitmapData` is this module's own.
+        let data = unsafe { bitmap_data(receiver, objc::sel::get("bitmapData")) };
+        let pixels = match data.is_null() {
+            true => std::ptr::null_mut(),
+            false => {
+                let length = source.bytes_per_row * source.height;
+                // SAFETY: an interleaved rep's buffer holds a row per pixel row.
+                let bytes = unsafe { std::slice::from_raw_parts(data, length) }.to_vec();
+                Box::into_raw(Box::new(bytes))
+            }
+        };
+        let copy = objc::object::create_instance(class, 0);
+        if copy.is_null() {
+            return copy;
+        }
+        let target = rep_of(copy);
+        target.pixels = pixels;
+        target.supplied = std::ptr::null_mut();
+        target.width = source.width;
+        target.height = source.height;
+        target.samples = source.samples;
+        target.bits_per_sample = source.bits_per_sample;
+        target.bits_per_pixel = source.bits_per_pixel;
+        target.bytes_per_row = source.bytes_per_row;
+        target.has_alpha = source.has_alpha;
+        target.declared = source.declared;
+        target.format = source.format;
+        target.cg_image = std::ptr::null();
+        copy
+    }
+
+    /// `-CGImage`: an image of the rep's pixels as they are now.
+    ///
+    /// The rep owns it, as Apple's does, so the caller neither releases it nor
+    /// sees it change when the rep is drawn into later: it is a copy, and the
+    /// one an earlier call made is let go at the end of the current pool.
+    /// Null for a rep of a layout `CGImage` here cannot describe.
+    unsafe extern "C" fn cg_image(receiver: Id, _sel: Sel) -> *const c_void {
+        let Some(layout) = layout(receiver) else {
+            return std::ptr::null();
+        };
+        // `CGImageAlphaInfo`, from what the rep's `NSBitmapFormat` says.
+        let premultiplied = layout.format & ALPHA_NONPREMULTIPLIED == 0;
+        let alpha = match (
+            layout.has_alpha,
+            layout.format & ALPHA_FIRST != 0,
+            premultiplied,
+        ) {
+            (true, false, true) => 1,
+            (true, true, true) => 2,
+            (true, false, false) => 3,
+            (true, true, false) => 4,
+            (false, _, _) if layout.bytes_per_pixel == 4 => 5,
+            (false, _, _) => 0,
+        };
+        let length = layout.bytes_per_row * layout.height;
+        // SAFETY: the rep's buffer is `bytes_per_row * height` bytes.
+        let pixels = unsafe { std::slice::from_raw_parts(layout.data, length) }.to_vec();
+        let image = crate::graphics::image_from_pixels(
+            layout.width,
+            layout.height,
+            layout.bytes_per_pixel * 8,
+            layout.bytes_per_row,
+            alpha,
+            pixels,
+        );
+        let rep = rep_of(receiver);
+        let previous = std::mem::replace(&mut rep.cg_image, image);
+        if !previous.is_null() {
+            // SAFETY: the image the previous call made, which the rep owned.
+            unsafe { corefoundation::api::CFAutorelease(previous) };
+        }
+        image
     }
 
     unsafe extern "C" fn pixels_wide(receiver: Id, _sel: Sel) -> isize {
@@ -1413,6 +1581,7 @@ pub mod bitmap {
             "initWithBitmapDataPlanes:pixelsWide:pixelsHigh:bitsPerSample:samplesPerPixel:hasAlpha:isPlanar:colorSpaceName:bytesPerRow:bitsPerPixel:"
                 => init_with_planes_default_format, c"@96@0:8^*16q24q32q40q48c56c64@72q80q88";
             "bitmapData" => bitmap_data, c"^v16@0:8";
+            "CGImage" => cg_image, c"^{CGImage=}16@0:8";
             "pixelsWide" => pixels_wide, c"q16@0:8";
             "pixelsHigh" => pixels_high, c"q16@0:8";
             "samplesPerPixel" => samples_per_pixel, c"q16@0:8";
@@ -1424,6 +1593,7 @@ pub mod bitmap {
             "size" => rep_size, c"{CGSize=dd}16@0:8";
             "setSize:" => set_rep_size, c"v32@0:8{CGSize=dd}16";
             "TIFFRepresentation" => tiff_representation, c"@16@0:8";
+            "copyWithZone:" => copy_with_zone, c"@24@0:8^{_NSZone=}16";
         });
     }
 
@@ -1649,6 +1819,48 @@ pub mod bitmap {
             // SAFETY: `-bitmapData` is `void * (id, SEL)`.
             let got = unsafe { bitmap_data(rep, objc::sel::get("bitmapData")) };
             assert_eq!(got, buffer.as_mut_ptr());
+        }
+
+        /// A copy keeps its own pixels: what is drawn into the original after,
+        /// through the buffer the guest supplied, does not reach it.
+        #[test]
+        fn a_copy_owns_its_pixels() {
+            crate::bootstrap();
+            let mut buffer: Vec<u8> = (0..16).collect();
+            let mut planes = [buffer.as_mut_ptr()];
+            let rep = objc::object::create_instance(
+                objc::class::lookup(c"NSBitmapImageRep").expect("NSBitmapImageRep"),
+                0,
+            );
+            // SAFETY: the prototype is the eleven-argument initialiser's, and
+            // `-copyWithZone:` is `id (id, SEL, NSZone *)`.
+            unsafe {
+                let rep = init_with_planes(
+                    rep,
+                    objc::sel::get("initWithBitmapDataPlanes:"),
+                    planes.as_mut_ptr(),
+                    2,
+                    2,
+                    8,
+                    4,
+                    1,
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    8,
+                    32,
+                );
+                let copy =
+                    copy_with_zone(rep, objc::sel::get("copyWithZone:"), std::ptr::null_mut());
+                assert!(!copy.is_null());
+                buffer[0] = 0xff;
+                let copied = bitmap_data(copy, objc::sel::get("bitmapData"));
+                assert_ne!(copied, buffer.as_mut_ptr());
+                let bytes = std::slice::from_raw_parts(copied, 16);
+                assert_eq!(bytes, (0..16).collect::<Vec<u8>>().as_slice());
+                assert_eq!(pixels_wide(copy, objc::sel::get("pixelsWide")), 2);
+                assert_eq!(bytes_per_row(copy, objc::sel::get("bytesPerRow")), 8);
+            }
         }
 
         /// The legacy AppKit text path snapshots a blank `NSImage` through the
