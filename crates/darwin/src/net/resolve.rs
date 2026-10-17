@@ -1,6 +1,55 @@
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{CStr, c_char, c_int, c_void};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use super::addr;
+
+/// `extern int h_errno` (Libinfo's `netdb.h`): one `int` for the process, not
+/// one per thread, which every `gethostby*` sets - to the lookup's status, so
+/// zero after one that answered. The codes are the same on both platforms:
+/// `NETDB_INTERNAL` -1, `HOST_NOT_FOUND` 1, `TRY_AGAIN` 2, `NO_RECOVERY` 3 and
+/// `NO_DATA` 4.
+///
+/// An atomic because a guest reads and writes it as a plain `int`, which is the
+/// same four bytes.
+static H_ERRNO: AtomicI32 = AtomicI32::new(0);
+
+/// Set the guest's `h_errno`, as Darwin's resolver does after a lookup.
+pub fn set_h_errno(status: c_int) {
+    H_ERRNO.store(status, Ordering::Relaxed);
+}
+
+/// The host resolver's last status on this thread.
+fn host_h_errno() -> c_int {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe extern "C" {
+        fn __h_errno_location() -> *mut c_int;
+    }
+    #[cfg(target_os = "freebsd")]
+    unsafe extern "C" {
+        #[link_name = "__h_errno"]
+        fn __h_errno_location() -> *mut c_int;
+    }
+    #[cfg(target_os = "macos")]
+    unsafe extern "C" {
+        static h_errno: c_int;
+    }
+    // SAFETY: the resolver's own thread-local status, always readable.
+    #[cfg(not(target_os = "macos"))]
+    return unsafe { *__h_errno_location() };
+    // SAFETY: the host's global, as above.
+    #[cfg(target_os = "macos")]
+    return unsafe { h_errno };
+}
+
+/// Record a `hostent` lookup's outcome in `h_errno` as Libinfo does: the
+/// status, which is zero when there was an answer.
+fn noted(answer: *mut libc::hostent) -> *mut libc::hostent {
+    set_h_errno(match answer.is_null() {
+        true => host_h_errno(),
+        false => 0,
+    });
+    answer
+}
 
 /// Darwin's `struct addrinfo`.
 ///
@@ -242,6 +291,68 @@ unsafe extern "C" fn getaddrinfo(
     0
 }
 
+/// Why [`addresses`] found none: the Darwin `EAI_*` code `getaddrinfo` would
+/// have returned, and for `EAI_SYSTEM` (11) the Darwin `errno` with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LookupError {
+    pub eai: i32,
+    pub errno: i32,
+}
+
+/// The addresses `name` resolves to, each as the bytes of a Darwin `sockaddr`
+/// (`sa_len` and `sa_family` first), in the order the resolver gave them.
+///
+/// For a framework that resolves on a guest's behalf - CFNetwork's `CFHost`
+/// hands its client the same `sockaddr`s a `getaddrinfo` would - so it asks
+/// the resolver this module's `getaddrinfo` does, `ROSEMARY_BLOCK_HOST`
+/// included. `family`, `socktype` and `flags` are this host's `AF_*`,
+/// `SOCK_*` and `AI_*`.
+pub fn addresses(
+    name: &CStr,
+    family: c_int,
+    socktype: c_int,
+    flags: c_int,
+) -> Result<Vec<Vec<u8>>, LookupError> {
+    // SAFETY: NUL-terminated.
+    if unsafe { blocked(name.as_ptr()) } {
+        // Darwin's `EAI_NONAME`.
+        return Err(LookupError { eai: 8, errno: 0 });
+    }
+    // SAFETY: zeroed is a valid `struct addrinfo`.
+    let mut hints: libc::addrinfo = unsafe { core::mem::zeroed() };
+    hints.ai_flags = flags;
+    hints.ai_family = family;
+    hints.ai_socktype = socktype;
+    let mut list: *mut libc::addrinfo = core::ptr::null_mut();
+    // SAFETY: a NUL-terminated name and hints this function owns.
+    let rc = unsafe { libc::getaddrinfo(name.as_ptr(), core::ptr::null(), &hints, &mut list) };
+    if rc != 0 {
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        return Err(LookupError {
+            eai: error_from_host(rc),
+            errno: crate::errno::from_host(errno),
+        });
+    }
+    let mut out = Vec::new();
+    let mut at = list;
+    while !at.is_null() {
+        // SAFETY: a node of the list the host just returned.
+        let node = unsafe { &*at };
+        if !node.ai_addr.is_null() {
+            // SAFETY: the host's address, with the length it gave for it.
+            if let Some((address, len)) =
+                unsafe { addr::darwin_from_host(node.ai_addr.cast(), node.ai_addrlen) }
+            {
+                out.push(address[..len].to_vec());
+            }
+        }
+        at = node.ai_next;
+    }
+    // SAFETY: the host's list, now copied.
+    unsafe { libc::freeaddrinfo(list) };
+    Ok(out)
+}
+
 /// Whether `ROSEMARY_BLOCK_HOST` names this host, as a comma-separated list.
 ///
 /// A diagnostic, not a policy: a client that reads its configuration from a
@@ -439,7 +550,7 @@ unsafe fn in_darwins_shape(answer: *mut libc::hostent) -> *mut c_void {
 /// `name` is a NUL-terminated string.
 unsafe extern "C" fn gethostbyname(name: *const c_char) -> *mut c_void {
     // SAFETY: the caller's string.
-    unsafe { in_darwins_shape(host_gethostbyname(name)) }
+    unsafe { in_darwins_shape(noted(host_gethostbyname(name))) }
 }
 
 /// `struct hostent *gethostbyname2(const char *, int af)`
@@ -453,7 +564,7 @@ unsafe extern "C" fn gethostbyname2(name: *const c_char, af: i32) -> *mut c_void
         return core::ptr::null_mut();
     };
     // SAFETY: the caller's string.
-    unsafe { in_darwins_shape(host_gethostbyname2(name, af)) }
+    unsafe { in_darwins_shape(noted(host_gethostbyname2(name, af))) }
 }
 
 /// `struct hostent *gethostbyaddr(const void *, socklen_t, int)`
@@ -468,7 +579,7 @@ unsafe extern "C" fn gethostbyaddr(addr: *const c_void, len: u32, af: i32) -> *m
         return core::ptr::null_mut();
     };
     // SAFETY: the caller's address, at the length they gave for it.
-    unsafe { in_darwins_shape(host_gethostbyaddr(addr, len, af)) }
+    unsafe { in_darwins_shape(noted(host_gethostbyaddr(addr, len, af))) }
 }
 
 exports::exports! {
@@ -480,6 +591,9 @@ exports::exports! {
         "gethostbyname" => gethostbyname,
         "gethostbyname2" => gethostbyname2,
         "gethostbyaddr" => gethostbyaddr,
+    }
+    constants {
+        "h_errno" => H_ERRNO.as_ptr() as usize as u64,
     }
 }
 
@@ -589,6 +703,19 @@ mod tests {
             assert_eq!(core::slice::from_raw_parts(bytes.add(4), 4), [127, 0, 0, 1]);
             freeaddrinfo(list);
         }
+    }
+
+    /// Libinfo sets `h_errno` to a lookup's status, and an answer's is zero.
+    #[test]
+    fn a_lookup_that_answers_leaves_h_errno_zero() {
+        set_h_errno(-7);
+        // SAFETY: a static string; numeric, so nothing is asked of the network.
+        let answer = unsafe { gethostbyname(c"127.0.0.1".as_ptr()) };
+        assert!(!answer.is_null());
+        // The address the guest binds `_h_errno` to is the one that changed.
+        let at = symbol("h_errno").expect("published") as usize as *const c_int;
+        // SAFETY: the static `constants` publishes.
+        assert_eq!(unsafe { at.read() }, 0);
     }
 
     /// A name that does not resolve reports Darwin's code, not this host's.
