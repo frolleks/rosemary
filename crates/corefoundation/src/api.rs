@@ -123,6 +123,14 @@ pub unsafe extern "C" fn CFAutorelease(object: CFTypeRef) -> CFTypeRef {
     objc::arc::autorelease(object as Id) as CFTypeRef
 }
 
+/// `CFTypeRef CFMakeCollectable(CFTypeRef cf)`.
+///
+/// Handed an object to garbage collection under the collector Apple removed;
+/// without one, `CFRuntime.c` answers `cf` itself, retain count untouched.
+pub unsafe extern "C" fn CFMakeCollectable(object: CFTypeRef) -> CFTypeRef {
+    object
+}
+
 pub unsafe extern "C" fn CFGetRetainCount(object: CFTypeRef) -> CFIndex {
     if crate::base::is_opaque(object) {
         return 1;
@@ -136,6 +144,26 @@ pub unsafe extern "C" fn CFGetTypeID(object: CFTypeRef) -> CFTypeID {
     }
     // SAFETY: an object this runtime allocated.
     unsafe { crate::base::class_of(object) }.map_or(0, crate::base::type_id_of)
+}
+
+/// `CFStringRef CFCopyDescription(CFTypeRef)`: NULL for NULL, as CFRuntime.c
+/// answers, and otherwise the object's `-description`, retained - the
+/// `_copyDescription` CF sends a bridged object. A handle with no class gets
+/// CF's default form, `<CFType 0x... [allocator]>`.
+pub unsafe extern "C" fn CFCopyDescription(object: CFTypeRef) -> CFTypeRef {
+    if object.is_null() {
+        return std::ptr::null();
+    }
+    if crate::base::is_opaque(object) {
+        let text = format!("<CFType {object:p} [0x0]>");
+        let units: Vec<u16> = text.encode_utf16().collect();
+        return crate::string::from_utf16(&units);
+    }
+    // SAFETY: a live object; `-description` is `id (*)(id, SEL)`.
+    let description = unsafe {
+        crate::send::send0_usize(object as Id, objc::sel::get("description"))
+    } as Id;
+    objc::arc::retain(description) as CFTypeRef
 }
 
 /// `CFEqual`, which is `-isEqual:` and nothing more.
