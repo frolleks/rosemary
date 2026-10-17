@@ -30,12 +30,26 @@
 //! Ownership is `mi_heap_of(p)`, a page-map lookup that is defined for any
 //! address. That is what makes `zone->size` safe to call on a pointer from
 //! another allocator, which `free` does to every zone before the right one.
+//! Whether `p` is where a block starts, and not one its page shows is free, is
+//! `mi_rosemary_block_state`, which the workspace's copy of mimalloc adds
+//! (`third_party/libmimalloc-sys`), along with the fork handling that keeps a
+//! threaded program's child able to allocate, as libmalloc's does.
+//!
+//! A pointer no zone owns, an address inside a block, and a block freed twice
+//! are reported and abort the process, as libmalloc does on 64-bit Darwin.
 //!
 //! ## Differences from libmalloc
 //!
-//! * A zone's `size` answers for any address inside a live mimalloc block, not
-//!   only its first byte, and for a block already freed. libmalloc's scalable
-//!   zone answers zero for both.
+//! * A freed block is told from a live one only when mimalloc's page shows it
+//!   cheaply: it is the block freed last on its page, or its page has none in
+//!   use. Any other freed block still answers its size, and a second `free` of
+//!   one reaches mimalloc. In a page that holds aligned blocks, whose aligned
+//!   addresses mimalloc does not keep, any address inside one is taken for it.
+//! * A block handed to a zone that did not make it is freed, or moved into the
+//!   zone asked to resize it, where libmalloc's scalable zone aborts.
+//! * `malloc_set_zone_name` always copies the name. libmalloc keeps one that is
+//!   in an image's read-only memory by reference (`_dyld_is_memory_immutable`),
+//!   which needs the loader this crate does not see.
 //! * The purgeable zone never discards memory. `malloc_make_purgeable` changes
 //!   nothing, and `malloc_make_nonpurgeable` reports the contents intact, which
 //!   is always true.
@@ -309,8 +323,6 @@ impl MallocZone {
             Self::introspect(zone).and_then(field)
         }
     }
-    // SAFETY: the caller's writable structure.
-    unsafe { *stats = total };
 }
 
 /// Call a zone function the way a guest would, entering the Darwin thread
@@ -392,6 +404,56 @@ unsafe extern "C" {
     // bindings.
     fn mi_heap_of(p: *const c_void) -> *mut mi::mi_heap_t;
     fn mi_heap_main() -> *mut mi::mi_heap_t;
+    // Added by the workspace's copy of mimalloc (third_party/libmimalloc-sys).
+    fn mi_rosemary_block_state(p: *const c_void, info: *mut BlockInfo) -> c_int;
+}
+
+/// What an address is to mimalloc, as `mi_rosemary_block_state` tells it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Block {
+    /// In no mimalloc page.
+    Foreign,
+    /// The start of a block that may be live. In a page of aligned blocks,
+    /// whose aligned addresses mimalloc does not keep, any address in one.
+    Live,
+    /// In a mimalloc page, but not where a block starts.
+    Interior,
+    /// A block freed last on its page: one freed twice.
+    Freed,
+    /// A block its page shows is not in use, or was never handed out.
+    Unused,
+}
+
+/// What `mi_rosemary_block_state` finds beside the state, from the same page
+/// lookup, so that `free` need not look the page up again.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct BlockInfo {
+    /// The heap whose page the address is in; null when it is in none.
+    heap: *mut mi::mi_heap_t,
+    /// `mi_usable_size` of a live block; zero otherwise.
+    usable: usize,
+}
+
+fn lookup(ptr: *const c_void) -> (Block, BlockInfo) {
+    let mut info = BlockInfo {
+        heap: std::ptr::null_mut(),
+        usable: 0,
+    };
+    // SAFETY: a page-map lookup and reads of the page's own bookkeeping,
+    // defined for any address.
+    let state = match unsafe { mi_rosemary_block_state(ptr, &mut info) } {
+        1 => Block::Live,
+        2 => Block::Interior,
+        3 => Block::Freed,
+        4 => Block::Unused,
+        _ => Block::Foreign,
+    };
+    (state, info)
+}
+
+fn block_state(ptr: *const c_void) -> Block {
+    lookup(ptr).0
 }
 
 /// mimalloc's main heap, the one the host's own `malloc` uses.
@@ -422,9 +484,13 @@ fn heap_of(ptr: *const c_void) -> *mut mi::mi_heap_t {
     unsafe { mi_heap_of(ptr) }
 }
 
-/// Whether any mimalloc heap made the block at `ptr`.
-fn mimalloc_owns(ptr: *const c_void) -> bool {
-    !heap_of(ptr).is_null()
+/// The block at `ptr` if mimalloc may be handed it back: the start of one
+/// that is not known to be free.
+fn live_block(ptr: *const c_void) -> Option<BlockInfo> {
+    match lookup(ptr) {
+        (Block::Live, block) => Some(block),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -507,7 +573,11 @@ impl HostZone {
     /// Whether this zone answers for the block at `ptr`: one its heap made,
     /// and for the default zone also one of mimalloc's main heap.
     fn claims(&self, ptr: *const c_void) -> bool {
-        let heap = heap_of(ptr);
+        self.owns(heap_of(ptr))
+    }
+
+    /// Whether a block of `heap` is one this zone answers for.
+    fn owns(&self, heap: *mut mi::mi_heap_t) -> bool {
         if heap.is_null() {
             return false;
         }
@@ -519,13 +589,12 @@ impl HostZone {
         heap == own || (std::ptr::eq(self, &raw const DEFAULT_ZONE) && heap == main_heap())
     }
 
-    /// The zone whose totals hold `block`: the one whose heap made it, if that
-    /// is this zone, the default zone or the purgeable one. A block of the main
-    /// heap is the host's and is counted nowhere. One of another created zone,
-    /// handed to the wrong zone, is not looked for and stays in its own zone's
-    /// totals; libmalloc's scalable zone would not survive that call.
-    fn counter_of(&self, block: *const c_void) -> Option<&HostZone> {
-        let heap = heap_of(block);
+    /// The zone whose totals hold `block`: the one whose heap made it. A block
+    /// of the main heap is the host's and is counted nowhere. One of another
+    /// created zone, handed to the wrong zone, is looked for among the
+    /// registered zones, a walk only that mistake pays for; libmalloc's
+    /// scalable zone would not survive the call at all.
+    fn counter_of(&self, heap: *mut mi::mi_heap_t) -> Option<&HostZone> {
         if heap.is_null() {
             return None;
         }
@@ -541,13 +610,17 @@ impl HostZone {
                 return Some(HostZone::of((&raw mut PURGEABLE_ZONE).cast()));
             }
         }
-        None
+        if heap == main_heap() {
+            return None;
+        }
+        // SAFETY: the zone that made a live block is live while it is.
+        unsafe { registered_host_zone(heap).as_ref() }
     }
 
     /// Count `block`, which mimalloc just returned, in the zone whose heap it
     /// is in.
     fn allocated(&self, block: *mut c_void) -> *mut c_void {
-        if let Some(zone) = self.counter_of(block) {
+        if let Some(zone) = self.counter_of(heap_of(block)) {
             // SAFETY: a live block mimalloc just returned.
             zone.count_in(unsafe { mi::mi_usable_size(block) });
         }
@@ -556,10 +629,9 @@ impl HostZone {
 
     /// Take `block`, which is about to be freed or moved, out of its zone's
     /// totals.
-    fn releasing(&self, block: *const c_void) {
-        if let Some(zone) = self.counter_of(block) {
-            // SAFETY: a live mimalloc block.
-            zone.count_out(unsafe { mi::mi_usable_size(block) });
+    fn releasing(&self, block: BlockInfo) {
+        if let Some(zone) = self.counter_of(block.heap) {
+            zone.count_out(block.usable);
         }
     }
 
@@ -751,15 +823,13 @@ unsafe fn host_heap(zone: *mut MallocZone) -> *mut mi::mi_heap_t {
     unsafe { HostZone::of(zone) }.heap
 }
 
-/// `size`: the block's usable size if this zone made it, else zero.
+/// `size`: the block's usable size if this zone made it, else zero - also for
+/// an address inside a block, and for a block mimalloc's page shows is free.
 unsafe extern "C" fn host_size(zone: *mut MallocZone, ptr: *const c_void) -> usize {
-    // SAFETY: the zone is one of ours; a block it claims is a live one.
-    unsafe {
-        if HostZone::of(zone).claims(ptr) {
-            mi::mi_usable_size(ptr)
-        } else {
-            0
-        }
+    // SAFETY: the zone is one of ours.
+    match live_block(ptr) {
+        Some(block) if unsafe { HostZone::of(zone) }.owns(block.heap) => block.usable,
+        _ => 0,
     }
 }
 
@@ -824,21 +894,22 @@ unsafe extern "C" fn host_memalign(
     host.allocated(unsafe { heap_memalign(host.heap, alignment, size) })
 }
 
-/// `free`. A block of another mimalloc heap is freed all the same, which costs
-/// nothing and is what a program that passes the wrong zone meant. One that is
-/// not mimalloc's at all goes to the zone that owns it, rather than into
-/// mimalloc's free list.
+/// `free`. A block of another mimalloc heap is freed all the same, and comes
+/// off its own zone's totals, which is what a program that passes the wrong
+/// zone meant. Anything else - an address that is no mimalloc block's start,
+/// or a block already free - goes to the registry, which finds the zone that
+/// owns it or reports the error, rather than into mimalloc's free lists.
 unsafe extern "C" fn host_free(zone: *mut MallocZone, ptr: *mut c_void) {
     if ptr.is_null() {
         return;
     }
-    if mimalloc_owns(ptr) {
-        unsafe { HostZone::of(zone) }.releasing(ptr);
+    if let Some(block) = live_block(ptr) {
+        unsafe { HostZone::of(zone) }.releasing(block);
         // SAFETY: a live mimalloc block.
         unsafe { mi::mi_free(ptr) };
         return;
     }
-    // SAFETY: an address no mimalloc heap owns, offered to the registry.
+    // SAFETY: an address no mimalloc block starts at, offered to the registry.
     unsafe { find_zone_and_free(ptr, false) };
 }
 
@@ -852,14 +923,15 @@ unsafe extern "C" fn host_try_free_default(zone: *mut MallocZone, ptr: *mut c_vo
     if ptr.is_null() {
         return;
     }
-    // SAFETY: our zone; a live block if the heap claims it.
+    // SAFETY: our zone; a live block if the heap is its own.
     unsafe {
         let host = HostZone::of(zone);
-        if host.claims(ptr) {
-            host.releasing(ptr);
-            mi::mi_free(ptr);
-        } else {
-            find_zone_and_free(ptr, true);
+        match live_block(ptr) {
+            Some(block) if host.owns(block.heap) => {
+                host.releasing(block);
+                mi::mi_free(ptr);
+            }
+            _ => find_zone_and_free(ptr, true),
         }
     }
 }
@@ -873,8 +945,8 @@ unsafe extern "C" fn host_realloc(
     if ptr.is_null() {
         return unsafe { host_malloc(zone, size) };
     }
-    if mimalloc_owns(ptr) {
-        host.releasing(ptr);
+    if let Some(block) = live_block(ptr) {
+        host.releasing(block);
         // SAFETY: a live mimalloc block, resized by mimalloc.
         let grown = unsafe {
             if host.heap.is_null() {
@@ -892,12 +964,13 @@ unsafe extern "C" fn host_realloc(
     }
     // Another zone's block: move it into this one. libmalloc's scalable zone
     // would refuse; the caller asked for this zone, and the data survives.
-    // SAFETY: the registry's answer for an address mimalloc does not own.
+    // SAFETY: the registry's answer for an address no mimalloc block starts at.
     unsafe {
         let (owner, old) = find_registered_zone(ptr, false);
         if owner.is_null() {
-            report_not_allocated(ptr, "pointer being reallocated was not allocated");
-            return std::ptr::null_mut();
+            corruption(&format!(
+                "pointer {ptr:p} being reallocated was not allocated"
+            ));
         }
         let fresh = host_malloc(zone, size);
         if !fresh.is_null() {
@@ -1622,6 +1695,48 @@ unsafe fn find_registered_zone(
     found
 }
 
+/// The registered zone of this module's whose heap is `heap`, or null: the
+/// owner of a created zone's block that another zone was handed.
+///
+/// # Safety
+///
+/// As [`find_registered_zone`].
+unsafe fn registered_host_zone(heap: *mut mi::mi_heap_t) -> *const HostZone {
+    let has_heap = |zone: *mut MallocZone| {
+        // SAFETY: a registered zone; only one whose introspection is ours is
+        // a `HostZone`.
+        unsafe {
+            std::ptr::eq((*zone).introspect, &raw const HOST_INTROSPECT)
+                && HostZone::of(zone).heap == heap
+        }
+    };
+    let (zones, count) = zones();
+    let initial = INITIAL_NUM_ZONES.load(Ordering::Acquire).min(count);
+    for i in 0..initial {
+        // SAFETY: as in [`find_registered_zone`].
+        let zone = unsafe { *zones.add(i as usize) };
+        if has_heap(zone) {
+            return zone.cast();
+        }
+    }
+
+    let live = FRZ_LIVE.load(Ordering::SeqCst);
+    FRZ[live].fetch_add(1, Ordering::SeqCst);
+    let zones = ZONES.load(Ordering::Acquire);
+    let limit = NUM_ZONES.load(Ordering::Acquire);
+    let mut found = std::ptr::null();
+    for i in initial..limit {
+        // SAFETY: as in [`find_registered_zone`].
+        let zone = unsafe { *zones.add(i as usize) };
+        if has_heap(zone) {
+            found = zone.cast_const().cast();
+            break;
+        }
+    }
+    FRZ[live].fetch_sub(1, Ordering::SeqCst);
+    found
+}
+
 /// `find_zone_and_free`.
 unsafe fn find_zone_and_free(ptr: *mut c_void, known_non_default: bool) {
     if ptr.is_null() {
@@ -1629,7 +1744,7 @@ unsafe fn find_zone_and_free(ptr: *mut c_void, known_non_default: bool) {
     }
     let (zone, size) = unsafe { find_registered_zone(ptr, known_non_default) };
     if zone.is_null() {
-        report_not_allocated(ptr, "pointer being freed was not allocated");
+        bad_free(ptr);
     } else {
         unsafe { zone_free_definite_size(zone, ptr, size) };
     }
@@ -1666,32 +1781,35 @@ fn report(message: &str) {
     );
 }
 
-/// `MallocErrorAbort` in the guest's environment: an error is fatal rather
-/// than reported.
-fn abort_on_error() -> bool {
-    static ABORT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ABORT.get_or_init(|| {
-        ["MallocErrorAbort", "MallocCorruptionAbort"]
-            .iter()
-            .any(|name| crate::guest_env_var(name).is_some())
-    })
-}
-
 /// `malloc_error_break`: where libmalloc tells a developer to stop.
 #[inline(never)]
 pub extern "C" fn malloc_error_break() {
     std::hint::black_box(());
 }
 
-/// The report for a pointer no zone owns.
-fn report_not_allocated(ptr: *const c_void, what: &str) {
+/// A memory error in the program, reported and fatal: on 64-bit Darwin
+/// libmalloc always sets `MALLOC_ABORT_ON_CORRUPTION`
+/// (`set_flags_from_environment`), so `MallocErrorAbort` changes nothing here.
+fn corruption(message: &str) -> ! {
     report(&format!(
-        "*** error for object {ptr:p}: {what}\n*** set a breakpoint in malloc_error_break to debug\n"
+        "{message}\n*** set a breakpoint in malloc_error_break to debug\n"
     ));
     malloc_error_break();
-    if abort_on_error() {
-        // SAFETY: ends the process.
-        unsafe { libc::abort() };
+    // SAFETY: ends the process.
+    unsafe { libc::abort() }
+}
+
+/// `free` of a pointer no zone owns, in the words libmalloc's allocators use
+/// for what mimalloc's page shows it to be.
+fn bad_free(ptr: *const c_void) -> ! {
+    match block_state(ptr) {
+        Block::Freed => corruption(&format!("Double free of object {ptr:p}")),
+        Block::Interior if !(ptr as usize).is_multiple_of(QUANTUM) => {
+            corruption(&format!("Non-aligned pointer {ptr:p} being freed"))
+        }
+        _ => corruption(&format!(
+            "*** error for object {ptr:p}: pointer being freed was not allocated"
+        )),
     }
 }
 
@@ -1868,11 +1986,11 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     } else {
         let (zone, _) = unsafe { find_registered_zone(ptr, false) };
         if zone.is_null() {
-            report_not_allocated(ptr, "pointer being realloc'd was not allocated");
-            std::ptr::null_mut()
-        } else {
-            unsafe { zone_realloc(zone, ptr, size) }
+            corruption(&format!(
+                "*** error for object {ptr:p}: pointer being realloc'd was not allocated"
+            ));
         }
+        unsafe { zone_realloc(zone, ptr, size) }
     };
     if resized.is_null() {
         crate::errno::set(libc::ENOMEM);
@@ -2746,6 +2864,28 @@ mod tests {
         std::env::var(CHILD).is_ok_and(|name| name == test)
     }
 
+    /// Run `test` in a child process, which libmalloc's report of a memory
+    /// error must end.
+    fn aborts_in_child(test: &str, report: &str) {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("malloc::tests::{test}"), "--nocapture"])
+            .env(CHILD, test)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.signal(),
+            Some(libc::SIGABRT),
+            "{test} was not aborted:\n{}\n{stderr}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            stderr.contains(report) && stderr.contains("malloc_error_break"),
+            "{test} did not report {report:?}:\n{stderr}"
+        );
+    }
+
     fn registered() -> Vec<*mut MallocZone> {
         let mut zones: *mut usize = std::ptr::null_mut();
         let mut count = 0;
@@ -2880,9 +3020,144 @@ mod tests {
             assert_eq!(malloc_size((&raw const local).cast()), 0);
             assert_eq!(malloc_size((&raw const STATIC).cast()), 0);
             assert!(malloc_zone_from_ptr((&raw const local).cast()).is_null());
-            // Reported on standard error and otherwise ignored, as libmalloc does
-            // without `MallocErrorAbort`.
-            free((&raw const STATIC).cast_mut().cast());
+        }
+    }
+
+    /// Only a block's first byte is the block, as in libmalloc's allocators,
+    /// and a block just freed is no longer one.
+    #[test]
+    fn an_address_inside_a_block_or_a_freed_one_has_no_size() {
+        in_child("no_size_inside_or_freed_child");
+    }
+
+    /// In a process of its own, as a freed block's memory may go to another
+    /// thread's next block at once.
+    #[test]
+    fn no_size_inside_or_freed_child() {
+        if !is_child("no_size_inside_or_freed_child") {
+            return;
+        }
+        // SAFETY: blocks allocated, asked about and freed here.
+        unsafe {
+            for size in [16, 100, 4096, 70_000, 3 << 20] {
+                let block = malloc(size);
+                assert!(malloc_size(block) >= size);
+                for offset in [1, 8, 16, size / 2] {
+                    let inside = block.cast::<u8>().add(offset).cast();
+                    assert_eq!(malloc_size(inside), 0, "malloc({size}) + {offset}");
+                    assert!(malloc_zone_from_ptr(inside).is_null());
+                    assert!(
+                        malloc_claimed_address(inside) != 0,
+                        "the zone still claims the memory"
+                    );
+                }
+                free(block);
+                assert_eq!(malloc_size(block), 0, "malloc({size}), freed");
+            }
+        }
+    }
+
+    #[test]
+    fn freeing_a_pointer_no_zone_owns_aborts() {
+        aborts_in_child(
+            "free_unowned_child",
+            "pointer being freed was not allocated",
+        );
+    }
+
+    #[test]
+    fn free_unowned_child() {
+        if !is_child("free_unowned_child") {
+            return;
+        }
+        static STATIC: u64 = 0;
+        // SAFETY: an address no zone owns, which libmalloc refuses to free.
+        unsafe { free((&raw const STATIC).cast_mut().cast()) };
+    }
+
+    #[test]
+    fn reallocating_a_pointer_no_zone_owns_aborts() {
+        aborts_in_child(
+            "realloc_unowned_child",
+            "pointer being realloc'd was not allocated",
+        );
+    }
+
+    #[test]
+    fn realloc_unowned_child() {
+        if !is_child("realloc_unowned_child") {
+            return;
+        }
+        let mut local = [0u64; 4];
+        // SAFETY: an address no zone owns, which libmalloc refuses to resize.
+        unsafe { realloc(local.as_mut_ptr().cast(), 64) };
+    }
+
+    #[test]
+    fn freeing_inside_a_block_aborts() {
+        aborts_in_child("free_inside_child", "pointer being freed was not allocated");
+    }
+
+    #[test]
+    fn free_inside_child() {
+        if !is_child("free_inside_child") {
+            return;
+        }
+        // SAFETY: an address inside a live block, which libmalloc refuses.
+        unsafe { free(malloc(64).cast::<u8>().add(16).cast()) };
+    }
+
+    #[test]
+    fn freeing_a_misaligned_pointer_aborts() {
+        aborts_in_child("free_misaligned_child", "Non-aligned pointer");
+    }
+
+    #[test]
+    fn free_misaligned_child() {
+        if !is_child("free_misaligned_child") {
+            return;
+        }
+        // SAFETY: as in `free_inside_child`.
+        unsafe { free(malloc(64).cast::<u8>().add(1).cast()) };
+    }
+
+    #[test]
+    fn freeing_a_block_twice_aborts() {
+        aborts_in_child("double_free_child", "Double free of object");
+    }
+
+    #[test]
+    fn double_free_child() {
+        if !is_child("double_free_child") {
+            return;
+        }
+        // SAFETY: a block freed twice, which libmalloc refuses.
+        unsafe {
+            let block = malloc(64);
+            free(block);
+            free(block);
+        }
+    }
+
+    #[test]
+    fn freeing_a_block_twice_from_another_thread_aborts() {
+        aborts_in_child("double_free_across_threads_child", "Double free of object");
+    }
+
+    #[test]
+    fn double_free_across_threads_child() {
+        if !is_child("double_free_across_threads_child") {
+            return;
+        }
+        // SAFETY: a block freed twice from a thread that did not make it.
+        unsafe {
+            let block = malloc(64) as usize;
+            std::thread::spawn(move || {
+                free(block as *mut c_void);
+                free(block as *mut c_void);
+            })
+            .join()
+            .unwrap();
         }
     }
 
@@ -3123,6 +3398,14 @@ mod tests {
             assert_eq!(stats_of(default).blocks_in_use, d0.blocks_in_use);
             assert_eq!(stats_of(zone).blocks_in_use, z0.blocks_in_use);
 
+            // So does a created zone's, freed through the default zone.
+            let block = malloc_zone_malloc(zone, 100);
+            assert_eq!(stats_of(zone).blocks_in_use, z0.blocks_in_use + 1);
+            malloc_zone_free(default, block);
+            assert_eq!(stats_of(zone).blocks_in_use, z0.blocks_in_use);
+            assert_eq!(stats_of(zone).size_in_use, z0.size_in_use);
+            assert_eq!(stats_of(default).blocks_in_use, d0.blocks_in_use);
+
             // Resized through another zone, it moves there, and so does its count.
             let block = malloc(32);
             let moved = malloc_zone_realloc(zone, block, 1 << 16);
@@ -3204,6 +3487,16 @@ mod tests {
 
     #[test]
     fn unregistering_a_zone_that_is_not_registered_changes_nothing() {
+        in_child("unregister_stray_child");
+    }
+
+    /// In a process of its own: other tests register and destroy zones while
+    /// this one compares the whole array.
+    #[test]
+    fn unregister_stray_child() {
+        if !is_child("unregister_stray_child") {
+            return;
+        }
         let before = registered();
         let mut stray = HostZone::new(c"Stray".as_ptr(), Count::Shared);
         // SAFETY: a zone that is not in the array, which is only compared against.
