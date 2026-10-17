@@ -828,37 +828,82 @@ impl Target {
     /// Make the changes, in xnu's order: Finder info first when the new mode
     /// takes away the owner's write permission, so that it can still be
     /// written, and last otherwise, so that a mode that grants it comes first.
-    fn apply(self, changes: Changes) -> c_int {
+    ///
+    /// xnu makes them in one `vnode_setattr`; here each is its own call, so
+    /// one that fails puts back the owner, mode and times already changed,
+    /// as `before` had them, and the guest's -1 means nothing changed.
+    fn apply(self, changes: Changes, before: &Stat) -> c_int {
+        let mut done = Done::default();
+        if self.try_apply(&changes, &mut done) {
+            return 0;
+        }
+        self.undo(done, before);
+        -1
+    }
+
+    fn try_apply(self, changes: &Changes, done: &mut Done) -> bool {
         let finder_first = changes.mode.is_some_and(|mode| mode & 0o200 == 0);
         if finder_first
             && let Some(info) = &changes.finder_info
             && self.set_finder_info(info) != 0
         {
-            return -1;
+            return false;
         }
-        if (changes.owner.is_some() || changes.group.is_some())
-            && self.set_owner(changes.owner, changes.group) != 0
-        {
-            return -1;
+        if changes.owner.is_some() || changes.group.is_some() {
+            if self.set_owner(changes.owner, changes.group) != 0 {
+                return false;
+            }
+            done.owner = true;
         }
-        if let Some(mode) = changes.mode
-            && self.set_mode(mode) != 0
-        {
-            return -1;
+        if let Some(mode) = changes.mode {
+            if self.set_mode(mode) != 0 {
+                return false;
+            }
+            done.mode = true;
         }
-        if (changes.modified.is_some() || changes.accessed.is_some())
-            && self.set_times(changes.modified, changes.accessed) != 0
-        {
-            return -1;
+        if changes.modified.is_some() || changes.accessed.is_some() {
+            if self.set_times(changes.modified, changes.accessed) != 0 {
+                return false;
+            }
+            done.times = true;
         }
+        // FIXME (ACCURACY): Finder info written first is not put back if a
+        // later change fails; nothing after it is expected to.
         if !finder_first
             && let Some(info) = &changes.finder_info
             && self.set_finder_info(info) != 0
         {
-            return -1;
+            return false;
         }
-        0
+        true
     }
+
+    /// Put back what `done` says was changed, latest first, leaving `errno`
+    /// as the failure that made it necessary.
+    fn undo(self, done: Done, before: &Stat) {
+        let _errno = crate::errno::Held::now();
+        let time = |t: crate::stat::Timespec| libc::timespec {
+            tv_sec: t.sec as libc::time_t,
+            tv_nsec: t.nsec as _,
+        };
+        if done.times {
+            self.set_times(Some(time(before.mtime)), Some(time(before.atime)));
+        }
+        if done.mode {
+            self.set_mode(u32::from(before.mode));
+        }
+        if done.owner {
+            self.set_owner(Some(before.uid), Some(before.gid));
+        }
+    }
+}
+
+/// Which of [`Target::apply`]'s changes have been made.
+#[derive(Default)]
+struct Done {
+    owner: bool,
+    mode: bool,
+    times: bool,
 }
 
 /// The shared body of [`setattrlist`] and [`fsetattrlist`].
@@ -896,17 +941,17 @@ unsafe fn set(target: Target, list: *const AttrList, buf: *const c_void, size: u
         Ok(changes) => changes,
         Err(errno) => return fail(errno),
     };
+    // What a failed change is put back to, and the lookup that fails before
+    // anything is changed.
+    let Some(before) = target.stat() else {
+        return -1;
+    };
     // Volume attributes, the common ones among them, are the volume's, and
     // xnu refuses them on anything but its root.
-    if list.volattr != 0 {
-        let Some(st) = target.stat() else {
-            return -1;
-        };
-        if !is_volume_root(&st) {
-            return fail(libc::EINVAL);
-        }
+    if list.volattr != 0 && !is_volume_root(&before) {
+        return fail(libc::EINVAL);
     }
-    target.apply(changes)
+    target.apply(changes, &before)
 }
 
 /// `int setattrlist(const char *path, struct attrlist *attrList, void
@@ -1139,6 +1184,45 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         assert_eq!((got, read), (32, info));
         assert_eq!((cleared, after), (0, -1));
+    }
+
+    /// A change that fails puts back the ones made before it: a link's new
+    /// time is undone when the Finder info after it cannot be written, which
+    /// Linux refuses on a symlink.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn setattrlist_puts_back_what_it_changed_when_a_later_change_fails() {
+        use std::os::unix::fs::MetadataExt;
+        let (file, _) = scratch_file("setattrlist-undo-target");
+        let link = file.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let before = std::fs::symlink_metadata(&link).unwrap();
+        let path = std::ffi::CString::new(link.to_str().unwrap()).unwrap();
+        let mut buf = times(&[(1_000_000_000, 0)]);
+        buf.extend_from_slice(b"TEXTttxt");
+        buf.extend_from_slice(&[0; 24]);
+        let l = list(ATTR_CMN_MODTIME | ATTR_CMN_FNDRINFO, 0, 0);
+        // SAFETY: live locals of the sizes passed.
+        let rc = unsafe {
+            setattrlist(
+                path.as_ptr(),
+                &l,
+                buf.as_ptr().cast(),
+                buf.len(),
+                FSOPT_NOFOLLOW,
+            )
+        };
+        let errno = crate::errno::get();
+        let after = std::fs::symlink_metadata(&link).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(rc, -1, "Linux keeps no user attribute on a symlink");
+        assert_eq!(errno, libc::EPERM);
+        assert_eq!(
+            (after.mtime(), after.mtime_nsec()),
+            (before.mtime(), before.mtime_nsec())
+        );
     }
 
     /// Volume attributes, common ones included, are refused on a file that
