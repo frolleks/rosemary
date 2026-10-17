@@ -341,6 +341,13 @@ pub(crate) fn begin_offscreen(key: usize, width: u32, height: u32, density: f64,
 /// The premultiplied B, G, R, A pixels, top row first, drawn since
 /// [`begin_offscreen`], and that focus undone.
 pub(crate) fn end_offscreen(key: usize) -> Option<Store> {
+    let store = pop_offscreen(key);
+    release_context_override_above(focus_depth());
+    store
+}
+
+/// [`end_offscreen`], leaving the selected context alone.
+fn pop_offscreen(key: usize) -> Option<Store> {
     FOCUS.with(|stack| {
         let mut stack = stack.borrow_mut();
         if let Some(at) = stack
@@ -350,7 +357,6 @@ pub(crate) fn end_offscreen(key: usize) -> Option<Store> {
             stack.truncate(at);
         }
     });
-    release_context_override_above(focus_depth());
     OFFSCREEN
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1816,6 +1822,17 @@ fn focus_depth() -> usize {
 }
 
 fn set_thread_current_context(context: Id) {
+    let previous = CURRENT_GRAPHICS_CONTEXT
+        .try_with(|current| current.0.get())
+        .ok()
+        .flatten();
+    let same = previous.is_some_and(|previous| previous.context == context);
+    if !same {
+        if let Some(previous) = previous {
+            finish_bitmap(previous.context);
+        }
+        begin_bitmap(context);
+    }
     let depth = focus_depth();
     let _ = CURRENT_GRAPHICS_CONTEXT.try_with(|current| {
         let retained = if context.is_null() {
@@ -1839,11 +1856,272 @@ fn release_context_override_above(depth: usize) {
     let _ = CURRENT_GRAPHICS_CONTEXT.try_with(|current| {
         if let Some(held) = current.0.get().filter(|held| held.depth > depth) {
             current.0.set(None);
+            finish_bitmap(held.context);
             if !held.context.is_null() {
                 objc::arc::release(held.context);
             }
         }
     });
+}
+
+thread_local! {
+    /// What each `+saveGraphicsState` found current, retained, for the
+    /// `+restoreGraphicsState` that makes it current again.
+    static SAVED_CONTEXTS: RefCell<Vec<Option<ContextOverride>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// `+[NSGraphicsContext saveGraphicsState]`'s half of the context stack:
+/// Apple's pushes the current context on a stack of the thread's, which
+/// `+restoreGraphicsState` pops.
+pub(crate) fn save_current_context() {
+    let held = CURRENT_GRAPHICS_CONTEXT
+        .try_with(|current| current.0.get())
+        .ok()
+        .flatten();
+    if let Some(held) = held.filter(|held| !held.context.is_null()) {
+        objc::arc::retain(held.context);
+    }
+    let _ = SAVED_CONTEXTS.try_with(|saved| saved.borrow_mut().push(held));
+}
+
+/// `+[NSGraphicsContext restoreGraphicsState]`'s half: "pops a graphics
+/// context from the per-thread stack, makes it current". Nothing saved is
+/// nothing to restore.
+pub(crate) fn restore_saved_context() {
+    let Some(saved) = SAVED_CONTEXTS
+        .try_with(|saved| saved.borrow_mut().pop())
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
+    let current = CURRENT_GRAPHICS_CONTEXT
+        .try_with(|current| current.0.get())
+        .ok()
+        .flatten();
+    let mut saved = saved;
+    if current.map(|c| c.context) != saved.map(|s| s.context) {
+        if let Some(current) = current {
+            finish_bitmap(current.context);
+        }
+        if let Some(saved) = saved.as_mut()
+            && begin_bitmap(saved.context)
+        {
+            saved.depth = focus_depth();
+        }
+    }
+    let _ = CURRENT_GRAPHICS_CONTEXT.try_with(|current| {
+        // The saved one's retain passes to the selection; the one replaced
+        // gives its up.
+        if let Some(previous) = current.0.replace(saved).filter(|p| !p.context.is_null()) {
+            objc::arc::release(previous.context);
+        }
+    });
+}
+
+/// `NSBitmapGraphicsContext`, which `+graphicsContextWithBitmapImageRep:`
+/// makes: a context whose drawing lands in a bitmap rep's own pixels.
+#[repr(C)]
+struct BitmapContext {
+    isa: *const c_void,
+    /// The rep, retained.
+    rep: Id,
+}
+
+fn bitmap_context_class() -> &'static objc::class::Class {
+    let parent = objc::class::lookup(c"NSGraphicsContext").expect("declared");
+    corefoundation::base::register(
+        c"NSBitmapGraphicsContext",
+        Some(parent),
+        size_of::<BitmapContext>(),
+        false,
+    )
+}
+
+/// The rep a bitmap context draws into, or `None` for any other context.
+fn bitmap_rep_of(context: Id) -> Option<Id> {
+    if context.is_null() {
+        return None;
+    }
+    let class = bitmap_context_class();
+    // SAFETY: an object this runtime allocated.
+    let is_bitmap = unsafe { objc::object::class_of(context) }
+        .is_some_and(|c| c.chain().any(|x| std::ptr::eq(x, class)));
+    // SAFETY: a `BitmapContext`, checked above.
+    is_bitmap.then(|| unsafe { (*(context as *const BitmapContext)).rep })
+}
+
+/// `+graphicsContextWithBitmapImageRep:`. Nil for a rep it cannot draw into,
+/// as Apple's is for a rep of a layout it does not support: here, anything
+/// but eight-bit, interleaved RGB or RGBA.
+unsafe extern "C" fn context_with_bitmap_rep(_class: Id, _sel: Sel, rep: Id) -> Id {
+    if crate::image::bitmap::layout(rep).is_none() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: `BitmapContext` is the registered layout.
+    let context: *mut BitmapContext =
+        unsafe { corefoundation::base::allocate(bitmap_context_class()) };
+    // SAFETY: a fresh allocation.
+    unsafe { (*context).rep = objc::arc::retain(rep) };
+    objc::arc::autorelease(context as Id)
+}
+
+unsafe extern "C" fn bitmap_context_dealloc(receiver: Id, _sel: Sel) {
+    finish_bitmap(receiver);
+    // SAFETY: `-dealloc` of a `BitmapContext`.
+    let rep = unsafe {
+        std::mem::replace(
+            &mut (*(receiver as *mut BitmapContext)).rep,
+            std::ptr::null_mut(),
+        )
+    };
+    if !rep.is_null() {
+        objc::arc::release(rep);
+    }
+    objc::arc::finalize(receiver);
+}
+
+/// `-flushGraphics` on a bitmap context: the rep holds what was drawn.
+unsafe extern "C" fn bitmap_context_flush(receiver: Id, _sel: Sel) {
+    let Some(layout) = bitmap_rep_of(receiver).and_then(crate::image::bitmap::layout) else {
+        return;
+    };
+    let offscreen = OFFSCREEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(store) = offscreen
+        .as_ref()
+        .and_then(|stores| stores.get(&(receiver as usize)))
+    {
+        write_rep(&layout, store);
+    }
+}
+
+/// Start sending drawing to a bitmap context's rep: a focus the rep's size,
+/// over a store holding what the rep holds, so drawing composites over it.
+/// Whether `context` is a bitmap context that now draws.
+fn begin_bitmap(context: Id) -> bool {
+    let Some(layout) = bitmap_rep_of(context).and_then(crate::image::bitmap::layout) else {
+        return false;
+    };
+    let density = match layout.points.width > 0.0 {
+        true => layout.width as f64 / layout.points.width,
+        false => 1.0,
+    };
+    begin_offscreen(
+        context as usize,
+        layout.width as u32,
+        layout.height as u32,
+        density,
+        false,
+    );
+    let mut offscreen = OFFSCREEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(store) = offscreen
+        .as_mut()
+        .and_then(|stores| stores.get_mut(&(context as usize)))
+    {
+        read_rep(&layout, store);
+    }
+    true
+}
+
+/// Stop a bitmap context's drawing, if it was drawing, and leave what it drew
+/// in its rep.
+fn finish_bitmap(context: Id) {
+    let Some(layout) = bitmap_rep_of(context).and_then(crate::image::bitmap::layout) else {
+        return;
+    };
+    if let Some(store) = pop_offscreen(context as usize) {
+        write_rep(&layout, &store);
+    }
+}
+
+/// One rep pixel's R, G, B and A.
+///
+/// # Safety
+///
+/// `pixel` is `layout.bytes_per_pixel` readable bytes.
+unsafe fn rep_pixel(layout: &crate::image::bitmap::Layout, pixel: *const u8) -> [u8; 4] {
+    use crate::image::bitmap::ALPHA_FIRST;
+    // SAFETY: within the pixel.
+    let at = |i: usize| unsafe { *pixel.add(i) };
+    match (layout.has_alpha, layout.format & ALPHA_FIRST != 0) {
+        (true, true) => [at(1), at(2), at(3), at(0)],
+        (true, false) => [at(0), at(1), at(2), at(3)],
+        (false, _) => [at(0), at(1), at(2), 255],
+    }
+}
+
+/// A rep's pixels into a store's premultiplied B, G, R, A.
+fn read_rep(layout: &crate::image::bitmap::Layout, store: &mut Store) {
+    use crate::image::bitmap::ALPHA_NONPREMULTIPLIED;
+    let width = layout.width.min(store.width as usize);
+    let height = layout.height.min(store.height as usize);
+    let straight = layout.format & ALPHA_NONPREMULTIPLIED != 0;
+    for y in 0..height {
+        for x in 0..width {
+            // SAFETY: inside the rep's `bytes_per_row * height` bytes.
+            let [r, g, b, a] = unsafe {
+                rep_pixel(
+                    layout,
+                    layout
+                        .data
+                        .add(y * layout.bytes_per_row + x * layout.bytes_per_pixel),
+                )
+            };
+            let premultiply = |c: u8| match straight {
+                true => ((u32::from(c) * u32::from(a) + 127) / 255) as u8,
+                false => c,
+            };
+            let at = (y * store.width as usize + x) * 4;
+            store.pixels[at..at + 4].copy_from_slice(&[
+                premultiply(b),
+                premultiply(g),
+                premultiply(r),
+                a,
+            ]);
+        }
+    }
+}
+
+/// A store's premultiplied B, G, R, A into a rep, in the rep's own layout: a
+/// rep without alpha takes the colours as drawn over black, and one with
+/// unpremultiplied samples has them divided out again.
+fn write_rep(layout: &crate::image::bitmap::Layout, store: &Store) {
+    use crate::image::bitmap::{ALPHA_FIRST, ALPHA_NONPREMULTIPLIED};
+    let width = layout.width.min(store.width as usize);
+    let height = layout.height.min(store.height as usize);
+    let straight = layout.format & ALPHA_NONPREMULTIPLIED != 0;
+    for y in 0..height {
+        for x in 0..width {
+            let at = (y * store.width as usize + x) * 4;
+            let [b, g, r, a] = [
+                store.pixels[at],
+                store.pixels[at + 1],
+                store.pixels[at + 2],
+                store.pixels[at + 3],
+            ];
+            let unpremultiply = |c: u8| match (straight && layout.has_alpha, a) {
+                (false, _) => c,
+                (true, 0) => 0,
+                (true, a) => {
+                    ((u32::from(c) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8
+                }
+            };
+            let (r, g, b) = (unpremultiply(r), unpremultiply(g), unpremultiply(b));
+            let samples = match (layout.has_alpha, layout.format & ALPHA_FIRST != 0) {
+                (true, true) => vec![a, r, g, b],
+                (true, false) => vec![r, g, b, a],
+                (false, _) => vec![r, g, b],
+            };
+            // SAFETY: inside the rep's `bytes_per_row * height` bytes; a pixel
+            // is at least as many bytes as it has samples.
+            unsafe {
+                let pixel = layout
+                    .data
+                    .add(y * layout.bytes_per_row + x * layout.bytes_per_pixel);
+                std::ptr::copy_nonoverlapping(samples.as_ptr(), pixel, samples.len());
+            }
+        }
+    }
 }
 
 unsafe extern "C" fn set_current_context(_class: Id, _sel: Sel, context: Id) {
@@ -1924,6 +2202,12 @@ pub(crate) fn install() {
     class_methods!(context, {
         "currentContext" => current_context, c"@16@0:8";
         "setCurrentContext:" => set_current_context, c"v24@0:8@16";
+        "graphicsContextWithBitmapImageRep:" => context_with_bitmap_rep, c"@24@0:8@16";
+    });
+    let bitmap = bitmap_context_class();
+    methods!(bitmap, {
+        "flushGraphics" => bitmap_context_flush, c"v16@0:8";
+        "dealloc" => bitmap_context_dealloc, c"v16@0:8";
     });
     methods!(context, {
         "isFlipped" => context_is_flipped, c"c16@0:8";
