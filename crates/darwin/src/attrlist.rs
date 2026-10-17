@@ -700,6 +700,9 @@ impl Target {
             |rc: c_int| rc != 0 && value.is_none() && crate::xattr::is_absent(crate::errno::get());
         match self {
             Target::Path(path, follow) => crate::stat::with_fallback(path, |host| {
+                if !crate::stat::may_write(host) {
+                    return (-1, false);
+                }
                 // SAFETY: the path `with_fallback` translated, and a name this
                 // module owns.
                 let rc = unsafe {
