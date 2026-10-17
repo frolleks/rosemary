@@ -24,6 +24,23 @@ unsafe extern "C" fn snprintf_l(
     unsafe { vsnprintf(buffer, size, format, args) }
 }
 
+/// `int vsnprintf_l(char *, size_t, locale_t, const char *, va_list)`
+///
+/// # Safety
+///
+/// As [`snprintf_l`], with `args` the caller's `va_list` over them.
+unsafe extern "C" fn vsnprintf_l(
+    buffer: *mut c_char,
+    size: usize,
+    locale: libc::locale_t,
+    format: *const c_char,
+    args: VaList,
+) -> c_int {
+    let _switched = crate::xlocale::switch(locale);
+    // SAFETY: the caller's buffer, format and argument list.
+    unsafe { vsnprintf(buffer, size, format, args) }
+}
+
 /// `int sscanf_l(const char *, locale_t, const char *, ...)`
 ///
 /// # Safety
@@ -89,6 +106,7 @@ unsafe extern "C" fn asprintf_l(
 exports::exports! {
     functions {
         "snprintf_l" => snprintf_l,
+        "vsnprintf_l" => vsnprintf_l,
         "sscanf_l" => sscanf_l,
         "asprintf_l" => asprintf_l,
     }
@@ -150,6 +168,42 @@ mod tests {
             );
             assert_eq!(CStr::from_ptr(buffer.as_ptr()).to_bytes(), b"x=9.25");
         }
+    }
+
+    /// A guest's own variadic wrapper hands `vsnprintf_l` the `va_list` it
+    /// started, and the arguments are read out of it.
+    #[test]
+    fn a_va_list_is_formatted_through_vsnprintf_l() {
+        unsafe extern "C" fn wrapper(buffer: *mut c_char, size: usize, args: ...) -> c_int {
+            // SAFETY: the export is a function of this shape.
+            let vsnprintf_l: unsafe extern "C" fn(
+                *mut c_char,
+                usize,
+                libc::locale_t,
+                *const c_char,
+                VaList,
+            ) -> c_int = unsafe { std::mem::transmute(symbol("vsnprintf_l").expect("published")) };
+            // SAFETY: the caller's buffer, and arguments matching the format.
+            unsafe {
+                vsnprintf_l(
+                    buffer,
+                    size,
+                    std::ptr::null_mut(),
+                    c"%s %d %.1f".as_ptr(),
+                    args,
+                )
+            }
+        }
+        let mut buffer = [0i8; 32];
+        // SAFETY: a buffer this test sized, and the arguments the format reads.
+        let written =
+            unsafe { wrapper(buffer.as_mut_ptr(), buffer.len(), c"n".as_ptr(), 7, 2.5f64) };
+        assert_eq!(written, 7);
+        // SAFETY: `vsnprintf` terminated it.
+        assert_eq!(
+            unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_bytes(),
+            b"n 7 2.5"
+        );
     }
 
     /// The locale is switched for the call and put back after it, which is what
