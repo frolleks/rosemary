@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use foundation::unarchiver::{Archive, Uid};
 use objc::object::Id;
@@ -37,21 +37,28 @@ unsafe extern "C" fn load_named(
     };
     loaded.report(&path);
     if !top_level.is_null() {
-        let objects: Vec<_> = loaded
-            .objects
-            .values()
-            .filter(|object| !object.is_null() && **object != owner)
-            .map(|object| *object as corefoundation::base::CFTypeRef)
-            .collect();
-        let array = corefoundation::collections::new_array(
-            &objects,
-            corefoundation::callbacks::Policy::from_type_callbacks(),
-            false,
-        );
-        // SAFETY: a fresh array and a writable output slot.
-        unsafe { *top_level = corefoundation::api::CFAutorelease(array) as Id };
+        // SAFETY: the caller's writable output slot.
+        unsafe { *top_level = top_level_array(&loaded, owner) };
     }
     1
+}
+
+/// The objects a load built, less File's Owner, as an autoreleased `NSArray`:
+/// what `topLevelObjects:` hands back.
+fn top_level_array(loaded: &Loaded, owner: Id) -> Id {
+    let objects: Vec<_> = loaded
+        .objects
+        .values()
+        .filter(|object| !object.is_null() && **object != owner)
+        .map(|object| *object as corefoundation::base::CFTypeRef)
+        .collect();
+    let array = corefoundation::collections::new_array(
+        &objects,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    // SAFETY: a fresh array.
+    unsafe { corefoundation::api::CFAutorelease(array) as Id }
 }
 
 /// `+[NSBundle loadNibNamed:owner:]`, the pre-10.8 spelling. It searches the
@@ -71,7 +78,205 @@ unsafe extern "C" fn load_named_class(class: Id, _sel: objc::sel::Sel, name: Id,
     unsafe { load_named(bundle, _sel, name, owner, std::ptr::null_mut()) }
 }
 
+/// An `NSNib`: a nib read into memory once, to be instantiated any number of
+/// times.
+///
+/// The archive is kept as bytes rather than parsed, because each
+/// `-instantiateWithOwner:topLevelObjects:` builds a fresh object graph from it
+/// and a parsed archive is only the first step of that.
+#[repr(C)]
+pub struct Nib {
+    isa: *const std::ffi::c_void,
+    /// The archive, from `Box::into_raw`; null until an initializer succeeds.
+    bytes: *mut Vec<u8>,
+    /// The bundle the nib's resources are looked up in, retained.
+    bundle: Id,
+    /// Where the archive came from, for reporting; from `Box::into_raw`, or null
+    /// for a nib made from data.
+    path: *mut std::path::PathBuf,
+}
+
+pub const NIB_INSTANCE_SIZE: usize = size_of::<Nib>();
+
+fn nib_of<'a>(receiver: Id) -> &'a mut Nib {
+    // SAFETY: an `NSNib`, which `classes` declared with room for a `Nib`.
+    unsafe { &mut *(receiver as *mut Nib) }
+}
+
+/// `+[NSBundle mainBundle]`, the bundle a nil `bundle:` argument means.
+fn main_bundle() -> Id {
+    let Some(class) = objc::class::lookup(c"NSBundle") else {
+        return std::ptr::null_mut();
+    };
+    // SAFETY: `+mainBundle` is `id (Class, SEL)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, objc::sel::Sel) -> Id =
+            std::mem::transmute(objc::msg::entry());
+        f(objc::class::ptr(class) as Id, objc::sel::get("mainBundle"))
+    }
+}
+
+/// Give `receiver` its archive and bundle, or release it and answer nil, as an
+/// initializer that fails does.
+fn initialized(receiver: Id, bytes: Option<Vec<u8>>, bundle: Id, path: Option<PathBuf>) -> Id {
+    let Some(bytes) = bytes else {
+        objc::arc::release(receiver);
+        return std::ptr::null_mut();
+    };
+    let nib = nib_of(receiver);
+    nib.bytes = Box::into_raw(Box::new(bytes));
+    nib.bundle = objc::arc::retain(bundle);
+    nib.path = path.map_or(std::ptr::null_mut(), |p| Box::into_raw(Box::new(p)));
+    receiver
+}
+
+/// `-[NSNib initWithNibNamed:bundle:]`.
+///
+/// `name` is the nib's name with or without its `.nib` extension; a nil
+/// `bundle` is the main bundle. A nib that cannot be found is nil, as Apple
+/// documents, rather than an exception.
+unsafe extern "C" fn init_with_nib_named(
+    receiver: Id,
+    _sel: objc::sel::Sel,
+    name: Id,
+    bundle: Id,
+) -> Id {
+    let bundle = match bundle.is_null() {
+        true => main_bundle(),
+        false => bundle,
+    };
+    // SAFETY: the name is an NSString or nil.
+    let name = String::from_utf8(unsafe { foundation::string::bytes(name) }).unwrap_or_default();
+    let name = name.strip_suffix(".nib").unwrap_or(&name);
+    let path = match name.is_empty() || bundle.is_null() {
+        true => None,
+        // SAFETY: an `NSBundle`.
+        false => unsafe { foundation::bundle::resource_for_object(bundle, name, "nib") },
+    };
+    let bytes = path.as_deref().and_then(|p| read(p).ok());
+    initialized(receiver, bytes, bundle, path)
+}
+
+/// `-[NSNib initWithNibData:bundle:]`: the archive is the data's bytes,
+/// copied, so the caller's object can change or go away.
+unsafe extern "C" fn init_with_nib_data(
+    receiver: Id,
+    _sel: objc::sel::Sel,
+    data: Id,
+    bundle: Id,
+) -> Id {
+    let bundle = match bundle.is_null() {
+        true => main_bundle(),
+        false => bundle,
+    };
+    let bytes = match data.is_null() {
+        true => None,
+        // SAFETY: an `NSData`, which is a CFData.
+        false => unsafe {
+            let data = data as corefoundation::base::CFTypeRef;
+            let length = usize::try_from(corefoundation::api::CFDataGetLength(data)).ok();
+            let start = corefoundation::api::CFDataGetBytePtr(data);
+            match (length, start.is_null()) {
+                (Some(0), _) => Some(Vec::new()),
+                (Some(length), false) => Some(std::slice::from_raw_parts(start, length).to_vec()),
+                _ => None,
+            }
+        },
+    };
+    initialized(receiver, bytes, bundle, None)
+}
+
+/// Build the receiver's nib with `owner` as File's Owner. `retained` keeps
+/// the top-level objects at the extra reference the pre-10.8 method left for
+/// the caller to release; the current method hands them over in the array.
+fn instantiate(receiver: Id, owner: Id, top_level: *mut Id, retained: bool) -> u8 {
+    if !top_level.is_null() {
+        // SAFETY: the caller passed a writable `NSArray **`.
+        unsafe { *top_level = std::ptr::null_mut() };
+    }
+    let nib = nib_of(receiver);
+    if nib.bytes.is_null() {
+        return 0;
+    }
+    // SAFETY: from `Box::into_raw`, and alive as long as the receiver is.
+    let bytes = unsafe { &*nib.bytes };
+    let shown = match nib.path.is_null() {
+        true => PathBuf::from("<nib data>"),
+        // SAFETY: as above.
+        false => unsafe { (*nib.path).clone() },
+    };
+    let loaded = match load_bytes(bytes, owner) {
+        Ok(loaded) => loaded,
+        Err(why) => {
+            eprintln!("rosemary: appkit: {}: {why}", shown.display());
+            return 0;
+        }
+    };
+    loaded.report(&shown);
+    if !top_level.is_null() {
+        // SAFETY: as above.
+        unsafe { *top_level = top_level_array(&loaded, owner) };
+    }
+    if !retained {
+        // The load retains each object it records, File's Owner aside; the
+        // current method gives that reference up, so what the caller keeps is
+        // what the array and the graph's own connections hold.
+        for object in loaded.objects.values() {
+            if !object.is_null() && *object != owner {
+                objc::arc::release(*object);
+            }
+        }
+    }
+    1
+}
+
+/// `-[NSNib instantiateWithOwner:topLevelObjects:]`.
+unsafe extern "C" fn instantiate_with_owner(
+    receiver: Id,
+    _sel: objc::sel::Sel,
+    owner: Id,
+    top_level: *mut Id,
+) -> u8 {
+    instantiate(receiver, owner, top_level, false)
+}
+
+/// `-[NSNib instantiateNibWithOwner:topLevelObjects:]`, the pre-10.8 spelling,
+/// which leaves each top-level object retained for the caller.
+unsafe extern "C" fn instantiate_nib_with_owner(
+    receiver: Id,
+    _sel: objc::sel::Sel,
+    owner: Id,
+    top_level: *mut Id,
+) -> u8 {
+    instantiate(receiver, owner, top_level, true)
+}
+
+unsafe extern "C" fn nib_dealloc(receiver: Id, _sel: objc::sel::Sel) {
+    let nib = nib_of(receiver);
+    if !nib.bytes.is_null() {
+        // SAFETY: from `Box::into_raw`, and this is the last reference.
+        drop(unsafe { Box::from_raw(nib.bytes) });
+        nib.bytes = std::ptr::null_mut();
+    }
+    if !nib.path.is_null() {
+        // SAFETY: as above.
+        drop(unsafe { Box::from_raw(nib.path) });
+        nib.path = std::ptr::null_mut();
+    }
+    objc::arc::release(nib.bundle);
+    nib.bundle = std::ptr::null_mut();
+    objc::arc::finalize(receiver);
+}
+
 pub(crate) fn install() {
+    let nib = objc::class::lookup(c"NSNib").expect("declared in `classes`");
+    methods!(nib, {
+        "initWithNibNamed:bundle:" => init_with_nib_named, c"@32@0:8@16@24";
+        "initWithNibData:bundle:" => init_with_nib_data, c"@32@0:8@16@24";
+        "instantiateWithOwner:topLevelObjects:" => instantiate_with_owner, c"B32@0:8@16^@24";
+        "instantiateNibWithOwner:topLevelObjects:" => instantiate_nib_with_owner, c"B32@0:8@16^@24";
+        "dealloc" => nib_dealloc, c"v16@0:8";
+    });
     let bundle = objc::class::lookup(c"NSBundle").expect("Foundation registered NSBundle");
     methods!(bundle, {
         "loadNibNamed:owner:topLevelObjects:" => load_named, c"B40@0:8@16@24^@32";
@@ -118,12 +323,22 @@ impl Loaded {
 /// `NIBArchive` format, which is a different format entirely and is not read
 /// here.
 pub fn load(path: &Path, owner: Id) -> Result<Loaded, String> {
+    load_bytes(&read(path)?, owner)
+}
+
+/// The archive bytes of the nib at `path`, a file or a `.nib` directory.
+fn read(path: &Path) -> Result<Vec<u8>, String> {
     let file = match path.is_dir() {
         true => path.join("keyedobjects.nib"),
         false => path.to_path_buf(),
     };
-    let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-    let archive = Archive::parse(&bytes).map_err(|e| e.to_string())?;
+    std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))
+}
+
+/// Build and wire the nib whose archive is `bytes`, with `owner` standing in
+/// for File's Owner - [`load`] for a nib already in memory.
+pub fn load_bytes(bytes: &[u8], owner: Id) -> Result<Loaded, String> {
+    let archive = Archive::parse(bytes).map_err(|e| e.to_string())?;
 
     // `IB.objectdata` is where Interface Builder files the object data; `root`
     // is what an archive made any other way calls its top object. Both, because
@@ -863,6 +1078,67 @@ mod tests {
                 target(quit, objc::sel::get("target")).is_null(),
                 "the first responder is a nil target"
             );
+        }
+    }
+
+    /// `NSNib` holds an archive to instantiate later, as Electron loads its
+    /// main menu: `-initWithNibData:bundle:` then
+    /// `-instantiateWithOwner:topLevelObjects:`, which wires the owner and hands
+    /// back the objects built. No data is no nib.
+    #[test]
+    fn an_nsnib_instantiates_the_archive_it_was_given() {
+        delegate_class();
+        let class = objc::class::lookup(c"NSNib").expect("NSNib");
+        // SAFETY: `-initWithNibData:bundle:` is `id (id, SEL, id, id)`, and
+        // `-instantiateWithOwner:topLevelObjects:` `BOOL (id, SEL, id, id *)`.
+        unsafe {
+            let init: unsafe extern "C" fn(Id, objc::sel::Sel, Id, Id) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            let instantiate: unsafe extern "C" fn(Id, objc::sel::Sel, Id, *mut Id) -> u8 =
+                std::mem::transmute(objc::msg::entry());
+            let get: unsafe extern "C" fn(Id, objc::sel::Sel) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            let selector = objc::sel::get("initWithNibData:bundle:");
+
+            let empty = objc::object::create_instance(class, 0);
+            assert!(init(empty, selector, std::ptr::null_mut(), std::ptr::null_mut()).is_null());
+
+            let data = corefoundation::api::CFDataCreate(
+                std::ptr::null(),
+                NIB.as_ptr(),
+                NIB.len() as isize,
+            ) as Id;
+            let nib = init(
+                objc::object::create_instance(class, 0),
+                selector,
+                data,
+                std::ptr::null_mut(),
+            );
+            assert!(!nib.is_null(), "a nib made from data");
+            objc::arc::release(data);
+
+            let owner = objc::object::create_instance(
+                objc::class::lookup(c"NSApplication").expect("NSApplication"),
+                0,
+            );
+            let mut top_level: Id = std::ptr::null_mut();
+            let built = instantiate(
+                nib,
+                objc::sel::get("instantiateWithOwner:topLevelObjects:"),
+                owner,
+                &mut top_level,
+            );
+            assert_eq!(built, 1);
+            assert!(!top_level.is_null(), "the top-level objects come back");
+            let delegate = get(owner, objc::sel::get("delegate"));
+            assert!(!delegate.is_null(), "the owner's outlet was wired");
+            assert_eq!(
+                objc::object::class_of(delegate)
+                    .expect("a class")
+                    .name_str(),
+                "RosemaryTestNibDelegate"
+            );
+            objc::arc::release(nib);
         }
     }
 
