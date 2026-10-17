@@ -16,15 +16,25 @@ const REPLACE: i32 = 0x0004;
 #[cfg(target_os = "linux")]
 const ENOATTR: i32 = 93;
 
+/// Whether this host's `errno` means the attribute named is not on the file.
+///
+/// Linux has no `ENOATTR` and reports a missing attribute as `ENODATA`.
+pub(crate) fn is_absent(errno: i32) -> bool {
+    #[cfg(target_os = "linux")]
+    return errno == libc::ENODATA;
+    #[cfg(not(target_os = "linux"))]
+    return errno == libc::ENOATTR;
+}
+
 /// `rc` from one of the attribute calls, as the guest should see its failure.
 ///
-/// Linux has no `ENOATTR`: a missing attribute is `ENODATA`, which is a different
-/// error on Darwin (96, "no message available on STREAM"). From these calls it
-/// can only mean the attribute is absent, so it is reported as Darwin's number
-/// for that - the one a guest compares against.
+/// Linux's `ENODATA` is a different error on Darwin (96, "no message available
+/// on STREAM"). From these calls it can only mean the attribute is absent, so
+/// it is reported as Darwin's number for that - the one a guest compares
+/// against. The host slot keeps `ENODATA`, so [`is_absent`] still answers.
 #[cfg(target_os = "linux")]
 fn absent_as_enoattr<T: Copy + PartialOrd + From<i8>>(rc: T) -> T {
-    if rc < T::from(0) && crate::errno::get() == libc::ENODATA {
+    if rc < T::from(0) && is_absent(crate::errno::get()) {
         crate::errno::set_guest(ENOATTR);
     }
     rc
@@ -559,7 +569,7 @@ pub(crate) unsafe fn set_on_host(
         crate::errno::set(libc::EINVAL);
         return -1;
     };
-    match value {
+    let rc = match value {
         // SAFETY: the caller's path, and a buffer of the length given.
         #[cfg(target_os = "macos")]
         Some(value) => unsafe {
@@ -588,7 +598,8 @@ pub(crate) unsafe fn set_on_host(
         },
         // SAFETY: the caller's path.
         None => unsafe { host::remove(path.as_ptr(), &host, nofollow) },
-    }
+    };
+    absent_as_enoattr(rc)
 }
 
 /// Whether `name`, as the guest spells it, is the runtime's own record of who

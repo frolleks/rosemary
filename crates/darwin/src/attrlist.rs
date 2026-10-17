@@ -547,12 +547,6 @@ const ATTR_MAX_BUFFER: usize = 8192;
 /// The name Darwin keeps a file's Finder info under.
 const FINDER_INFO: &CStr = c"com.apple.FinderInfo";
 
-/// What this host's `removexattr` says of an attribute that is not there.
-#[cfg(target_os = "linux")]
-const NO_ATTRIBUTE: c_int = libc::ENODATA;
-#[cfg(not(target_os = "linux"))]
-const NO_ATTRIBUTE: c_int = libc::ENOATTR;
-
 /// What a `setattrlist` buffer asks to change, read in the order xnu's
 /// `setattrlist_internal` reads it.
 ///
@@ -704,7 +698,7 @@ impl Target {
         let set = |host: &CStr, follow: bool| {
             // SAFETY: a NUL-terminated host path and a name this module owns.
             let rc = unsafe { crate::xattr::set_on_host(host, FINDER_INFO, value, !follow) };
-            match rc != 0 && value.is_none() && crate::errno::get() == NO_ATTRIBUTE {
+            match rc != 0 && value.is_none() && crate::xattr::is_absent(crate::errno::get()) {
                 // Nothing to remove is the state asked for.
                 true => 0,
                 false => rc,
