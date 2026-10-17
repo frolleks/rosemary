@@ -114,23 +114,47 @@ impl Layout {
 
     /// The bundle *at* `root`, which is how `+bundleWithPath:` asks.
     ///
-    /// The same shape [`Layout::enclosing`] recognises, entered from the other
-    /// end: a directory whose `Contents/Info.plist` is a file. The executable is
+    /// The shapes CFBundle's `_CFBundleGetBundleVersionForURL` tells apart:
+    /// a modern bundle keeps everything under `Contents/` (version 2), and a
+    /// framework keeps `Resources/` - with `Resources/Info.plist` in it - and
+    /// its executable at the top level (version 0), usually as symlinks into
+    /// `Versions/Current`. A `.framework` that has both is read as version 0,
+    /// anything else as version 2, which is Apple's order. The executable is
     /// named by `CFBundleExecutable` rather than found by looking, because a
     /// `.bundle` with a resource beside its binary in `MacOS` has no other way
     /// to say which one it is.
     pub fn at(root: &Path) -> Option<Layout> {
         let absolute = root.canonicalize().ok();
         let root = absolute.as_deref().unwrap_or(root);
-        let contents = root.join("Contents");
-        let info_path = contents.join("Info.plist");
+        let modern = root.join("Contents");
+        let flat = root.join("Resources");
+        let framework = root
+            .extension()
+            .is_some_and(|extension| extension == "framework");
+        let version_0 = match (modern.is_dir(), flat.is_dir()) {
+            (_, true) if framework => true,
+            (true, _) => false,
+            (false, true) => true,
+            (false, false) => return None,
+        };
+        let (contents, resources, executables) = match version_0 {
+            true => (root.to_path_buf(), flat, root.to_path_buf()),
+            false => (
+                modern.clone(),
+                modern.join("Resources"),
+                modern.join("MacOS"),
+            ),
+        };
+        let info_path = match version_0 {
+            true => resources.join("Info.plist"),
+            false => contents.join("Info.plist"),
+        };
         // CFBundle takes a bundle with no `Info.plist` at all, as an empty
         // dictionary: plug-in `.bundle`s built outside Xcode are often only
         // `Contents/MacOS/<name>`, and Unity loads every native plug-in that way.
         let info = match info_path.is_file() {
             true => plist::parse(&std::fs::read(&info_path).ok()?).ok()?,
-            false if contents.is_dir() => Value::Dictionary(Default::default()),
-            false => return None,
+            false => Value::Dictionary(Default::default()),
         };
         // CFBundle's rule: an empty or missing name falls back to the bundle's
         // own, extension stripped. Roblox Studio's protocol handler ships
@@ -140,11 +164,11 @@ impl Layout {
             .find_map(|key| info.get(key)?.as_str().filter(|name| !name.is_empty()))
             .map(std::ffi::OsStr::new)
             .or_else(|| root.file_stem())
-            .map(|name| contents.join("MacOS").join(name))
+            .map(|name| executables.join(name))
             .unwrap_or_default();
         Some(Layout {
             root: root.to_path_buf(),
-            resources: contents.join("Resources"),
+            resources,
             frameworks: contents.join("Frameworks"),
             plugins: plugins_of(&contents),
             executable,
@@ -267,13 +291,33 @@ impl Layout {
     }
 
     /// `-preferredLocalizations`: the `.lproj` names strings are read from,
-    /// most preferred first, restricted to the ones that exist.
+    /// most preferred first, restricted to the bundle's own localizations -
+    /// the directories it has and the names its `CFBundleLocalizations` lists.
+    ///
+    /// Never empty, which is Apple's rule rather than this module's
+    /// (`_CFBundleCopyLocalizationsForPreferences` in CF's `CFBundle_Locale.c`):
+    /// a bundle whose localizations match nothing preferred answers its first
+    /// one, and a bundle with none at all - an app whose `Resources` holds no
+    /// `.lproj` - answers `en`. Callers index the result without checking it.
     pub fn preferred_localizations(&self) -> Vec<String> {
-        self.string_localizations()
+        let available = self.localization_names();
+        let mut preferred: Vec<String> = self
+            .string_localizations()
             .into_iter()
-            .filter(|path| path.is_dir())
-            .filter_map(|path| Some(path.file_stem()?.to_str()?.to_owned()))
-            .collect()
+            .filter_map(|path| {
+                let name = path.file_stem()?.to_str()?.to_owned();
+                (path.is_dir() || available.contains(&name)).then_some(name)
+            })
+            .collect();
+        if preferred.is_empty() {
+            preferred.push(
+                available
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "en".to_owned()),
+            );
+        }
+        preferred
     }
 
     /// `-pathsForResourcesOfType:inDirectory:`: every entry with that extension
@@ -532,13 +576,28 @@ pub mod cf {
     }
 
     /// `CFArrayRef CFBundleCopyPreferredLocalizationsFromArray(CFArrayRef)`.
+    ///
+    /// The localization of `localizations` matching this process's language,
+    /// else the first - and, for a NULL or empty array, `en`: CF never answers
+    /// an empty array here (`_CFBundleCopyLocalizationsForPreferences`).
     unsafe extern "C" fn CFBundleCopyPreferredLocalizationsFromArray(localizations: Id) -> Id {
+        let backstop = || {
+            let en = crate::notification::name_object("en") as CFTypeRef;
+            corefoundation::collections::new_array(
+                &[en],
+                corefoundation::callbacks::Policy::from_type_callbacks(),
+                false,
+            ) as Id
+        };
         // SAFETY: a CFArray or null.
         let Some(array) =
             (unsafe { corefoundation::collections::array(localizations as CFTypeRef) })
         else {
-            return std::ptr::null_mut();
+            return backstop();
         };
+        if array.values.is_empty() {
+            return backstop();
+        }
         let language = crate::locale::language();
         let preferred = array.values.iter().copied().find(|value| {
             // SAFETY: localization arrays contain CFStrings.
@@ -896,6 +955,24 @@ mod tests {
         assert_eq!(layout.localization_names(), ["English"]);
     }
 
+    /// `-preferredLocalizations` is never empty, as CF's is not: a bundle
+    /// whose localizations match nothing preferred answers its first one, and
+    /// a bundle with none answers `en`.
+    #[test]
+    fn preferred_localizations_fall_back_as_cf_does() {
+        let exe = scratch("preferred", INFO);
+        let layout = Layout::enclosing(&exe).expect("a bundle");
+        assert_eq!(layout.preferred_localizations(), ["English"]);
+
+        let resources = layout.resources.clone();
+        std::fs::remove_dir_all(resources.join("English.lproj")).unwrap();
+        std::fs::create_dir_all(resources.join("xx.lproj")).unwrap();
+        assert_eq!(layout.preferred_localizations(), ["xx"]);
+
+        std::fs::remove_dir_all(resources.join("xx.lproj")).unwrap();
+        assert_eq!(layout.preferred_localizations(), ["en"]);
+    }
+
     #[test]
     fn an_empty_executable_name_falls_back_to_the_bundle_name() {
         let exe = scratch(
@@ -951,6 +1028,51 @@ mod tests {
         std::fs::write(&loose, b"").unwrap();
         assert!(Layout::enclosing(&loose).is_none(), "Contents/Thing");
         assert!(Layout::enclosing(Path::new("/bin/ls")).is_none());
+    }
+
+    /// A framework is read the way CFBundle reads a version 0 bundle: its
+    /// `Info.plist` and resources under a top-level `Resources`, its executable
+    /// beside them, both reached through the `Versions/Current` symlinks.
+    #[test]
+    fn a_framework_is_read_through_its_top_level_resources() {
+        let root = std::env::temp_dir().join("rosemary-bundle-framework");
+        let _ = std::fs::remove_dir_all(&root);
+        let framework = root.join("Thing.framework");
+        let version = framework.join("Versions/A");
+        std::fs::create_dir_all(version.join("Resources")).unwrap();
+        std::fs::write(version.join("Resources/Info.plist"), INFO).unwrap();
+        std::fs::write(version.join("Resources/data.dat"), b"").unwrap();
+        std::fs::write(version.join("Thing"), b"").unwrap();
+        std::os::unix::fs::symlink("A", framework.join("Versions/Current")).unwrap();
+        for name in ["Resources", "Thing"] {
+            std::os::unix::fs::symlink(format!("Versions/Current/{name}"), framework.join(name))
+                .unwrap();
+        }
+
+        let layout = Layout::at(&framework).expect("a framework");
+        assert_eq!(layout.identifier(), Some("com.example.thing"));
+        assert_eq!(
+            layout.executable,
+            framework.canonicalize().unwrap().join("Thing")
+        );
+        assert!(layout.resource("data", "dat").is_some());
+    }
+
+    /// A `.framework` with both shapes is read as a framework, and anything else
+    /// with both as a modern bundle - Apple's order of precedence.
+    #[test]
+    fn contents_wins_except_in_a_framework() {
+        let root = std::env::temp_dir().join("rosemary-bundle-both");
+        let _ = std::fs::remove_dir_all(&root);
+        for name in ["Both.framework", "Both.bundle"] {
+            let bundle = root.join(name);
+            std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+            std::fs::create_dir_all(bundle.join("Resources")).unwrap();
+            let layout = Layout::at(&bundle).expect("a bundle");
+            let flat = name.ends_with(".framework");
+            assert_eq!(layout.contents.ends_with("Contents"), !flat, "{name}");
+        }
+        assert!(Layout::at(&root).is_none(), "neither shape");
     }
 
     /// An `Info.plist` that cannot be read is a bundle this runtime declines to
