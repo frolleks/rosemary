@@ -229,11 +229,15 @@ pub fn bind<M: machish::memory::Regions>(
     // The type records this runtime publishes, and out of `missing` rather than `bindings`: a
     // symbol no provider answered leaves no binding record at all, only the slot
     // it did not write. That slot is precisely the zero the LSDA reads as
-    // `catch (...)`.
+    // `catch (...)`. The personality routine too, when nothing answered it: the
+    // synthetic libobjc does not, and a CIE that names a zero personality is an
+    // unwind that jumps to zero the first time a frame of it is searched.
     for image in &mut report.images {
         let mut satisfied = Vec::new();
         for (i, missing) in image.missing.iter().enumerate() {
-            let record = if missing.symbol == "_OBJC_EHTYPE_id" {
+            let record = if missing.symbol == "___objc_personality_v0" {
+                Some(personality)
+            } else if missing.symbol == "_OBJC_EHTYPE_id" {
                 id_record()
             } else if let Some(class) = missing.symbol.strip_prefix("_OBJC_EHTYPE_$_") {
                 std::ffi::CString::new(class)
