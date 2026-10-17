@@ -47,11 +47,63 @@ pub const PSET_CONTROL: Name = 0x703;
 /// not a small integer is not surprised.
 const FIRST_DYNAMIC: Name = 0x1003;
 
+/// A receive right, and what Mach keeps beside it under the same name.
+///
+/// A space has one name per port: a send right to a port whose receive right
+/// is here is the receive right's own name, which is `MACH_PORT_TYPE_SEND_RECEIVE`
+/// in `mach_port_type`. That is what `mach_port_insert_right(task, port, port,
+/// MACH_MSG_TYPE_MAKE_SEND)` - the commonest line in any Mach program - makes,
+/// and what a caller then sends to and deallocates.
+pub struct Owned {
+    /// Held by `Arc` because a port set names its members and a receive in
+    /// progress must keep the socket alive.
+    port: Arc<Receiver>,
+    /// The user references of the send right under this name; zero for none.
+    sends: u32,
+    /// What makes that send right count as a sender, as [`Right::Send`]'s does.
+    claim: Option<OwnedFd>,
+    /// `ip_context`: the caller's word, or the guard when `guarded`.
+    context: u64,
+    guarded: bool,
+    /// `MPG_STRICT`: the context is the guard and cannot be read or replaced.
+    strict: bool,
+    /// `MPO_IMMOVABLE_RECEIVE`: the right cannot be sent anywhere.
+    immovable: bool,
+}
+
+impl Owned {
+    fn new(port: Arc<Receiver>) -> Owned {
+        Owned {
+            port,
+            sends: 0,
+            claim: None,
+            context: 0,
+            guarded: false,
+            strict: false,
+            immovable: false,
+        }
+    }
+
+    /// One more user reference on the send right under this name.
+    fn add_send(&mut self, carried: Option<OwnedFd>) {
+        if self.sends == 0 {
+            self.claim = carried.or_else(|| super::wire::claim(self.port.address()));
+        }
+        self.sends = self.sends.saturating_add(1);
+    }
+
+    /// What is left under the name once the receive right is gone: the send
+    /// rights, if there were any, as dead names - the port went with the
+    /// receive right, as `ipc_right_destruct` leaves it.
+    fn remainder(&self) -> Option<Right> {
+        (self.sends > 0).then_some(Right::Dead { refs: self.sends })
+    }
+}
+
 /// What a name refers to.
 pub enum Right {
-    /// The receiving end. Held by `Arc` because a port set names its members and
-    /// a receive in progress must keep the socket alive.
-    Receive(Arc<Receiver>),
+    /// The receiving end, and any send right held under the same name.
+    Receive(Owned),
     /// A send right: the address of somebody else's receive right, and the user
     /// reference count Mach makes the caller balance.
     ///
@@ -86,7 +138,10 @@ pub enum Right {
 impl Right {
     fn type_bits(&self) -> u32 {
         match self {
-            Right::Receive(_) => type_of(RIGHT_RECEIVE),
+            Right::Receive(owned) => match owned.sends {
+                0 => type_of(RIGHT_RECEIVE),
+                _ => type_of(RIGHT_RECEIVE) | type_of(RIGHT_SEND),
+            },
             Right::Send { .. } => type_of(RIGHT_SEND),
             Right::SendOnce { .. } => type_of(RIGHT_SEND_ONCE),
             Right::Set(_) => type_of(RIGHT_PORT_SET),
@@ -149,7 +204,7 @@ pub fn destination(name: Name) -> Result<(Address, bool), i32> {
         Some(Right::Send { address, .. }) => Ok((*address, false)),
         Some(Right::SendOnce { address }) => Ok((*address, true)),
         // A receive right is a legal destination: a task can send to itself.
-        Some(Right::Receive(port)) => Ok((port.address(), false)),
+        Some(Right::Receive(owned)) => Ok((owned.port.address(), false)),
         Some(Right::Dead { .. }) => Err(MACH_SEND_INVALID_DEST),
         Some(_) => Err(MACH_SEND_INVALID_RIGHT),
         None => Err(MACH_SEND_INVALID_DEST),
@@ -160,7 +215,7 @@ pub fn destination(name: Name) -> Result<(Address, bool), i32> {
 pub fn receiver(name: Name) -> Option<Arc<Receiver>> {
     let guard = space().read().unwrap_or_else(|e| e.into_inner());
     match guard.names.get(&name) {
-        Some(Right::Receive(port)) => Some(port.clone()),
+        Some(Right::Receive(owned)) => Some(owned.port.clone()),
         _ => None,
     }
 }
@@ -185,7 +240,7 @@ pub fn members(name: Name) -> Option<Vec<Name>> {
 pub fn address_of(name: Name) -> Option<Address> {
     let guard = space().read().unwrap_or_else(|e| e.into_inner());
     match guard.names.get(&name) {
-        Some(Right::Receive(port)) => Some(port.address()),
+        Some(Right::Receive(owned)) => Some(owned.port.address()),
         Some(Right::Send { address, .. }) | Some(Right::SendOnce { address }) => Some(*address),
         _ => None,
     }
@@ -197,21 +252,59 @@ pub fn address_of(name: Name) -> Option<Address> {
 /// Fails when something else still holds the port: a member of a port set, or a
 /// receive in progress on another thread. Mach would refuse the same move for
 /// the same reason, and moving it anyway would leave this process reading a
-/// socket another process now owns.
+/// socket another process now owns. An immovable right is refused as
+/// `ipc_move_receive_allowed` refuses it; a guarded one moves, and its guard
+/// stays behind, as `ipc_port_mark_in_limbo` drops it.
+///
+/// A send right under the same name stays, as Mach's entry keeps
+/// `MACH_PORT_TYPE_SEND` when the receive bit is cleared from it.
 pub fn move_receive(name: Name) -> Result<Receiver, i32> {
     let taken = with(|space| match space.names.get(&name) {
-        Some(Right::Receive(_)) => space.names.remove(&name),
+        Some(Right::Receive(owned)) if !owned.immovable => space.names.remove(&name),
         Some(_) => None,
         None => None,
     });
-    let Some(Right::Receive(port)) = taken else {
+    let Some(Right::Receive(owned)) = taken else {
         return Err(MACH_SEND_INVALID_RIGHT);
     };
+    let Owned {
+        port,
+        sends,
+        claim,
+        context,
+        guarded,
+        strict,
+        immovable,
+    } = owned;
+    let address = port.address();
     match Arc::try_unwrap(port) {
-        Ok(port) => Ok(port),
-        Err(shared) => {
+        Ok(port) => {
+            if sends > 0 {
+                with(|space| {
+                    space.names.insert(
+                        name,
+                        Right::Send {
+                            address,
+                            refs: sends,
+                            claim,
+                        },
+                    )
+                });
+            }
+            Ok(port)
+        }
+        Err(port) => {
             // Put it back: the caller still holds the right it asked to move.
-            with(|space| space.names.insert(name, Right::Receive(shared)));
+            let owned = Owned {
+                port,
+                sends,
+                claim,
+                context,
+                guarded,
+                strict,
+                immovable,
+            };
+            with(|space| space.names.insert(name, Right::Receive(owned)));
             Err(MACH_SEND_INVALID_RIGHT)
         }
     }
@@ -233,6 +326,12 @@ pub fn insert_send(address: Address) -> Name {
 pub fn insert_send_with(address: Address, carried: Option<OwnedFd>) -> Name {
     with(|space| {
         for (name, right) in space.names.iter_mut() {
+            if let Right::Receive(owned) = right
+                && owned.port.address() == address
+            {
+                owned.add_send(carried);
+                return *name;
+            }
             if let Right::Send {
                 address: existing,
                 refs,
@@ -371,7 +470,7 @@ pub fn insert_send_once(address: Address) -> Name {
 
 /// Add a receive right this process has just acquired.
 pub fn insert_receive(port: Receiver) -> Name {
-    insert(Right::Receive(Arc::new(port)))
+    insert(Right::Receive(Owned::new(Arc::new(port))))
 }
 
 /// Drop one user reference to `name`, removing it when the last one goes.
@@ -397,6 +496,14 @@ fn release(space: &mut Space, name: Name) -> i32 {
             space.names.remove(&name);
             KERN_SUCCESS
         }
+        // The send right under a receive right's name is the one released.
+        Right::Receive(owned) if owned.sends > 0 => {
+            owned.sends -= 1;
+            if owned.sends == 0 {
+                owned.claim = None;
+            }
+            KERN_SUCCESS
+        }
         // `mach_port_deallocate` on a receive right is an error on a real
         // system, and the mistake it catches - deallocating the port you are
         // about to listen on - is one worth still catching here.
@@ -406,14 +513,21 @@ fn release(space: &mut Space, name: Name) -> i32 {
 }
 
 /// Remove `name` and everything behind it, whatever kind of right it is.
+///
+/// Except a guarded receive right, which `ipc_right_destroy` refuses to destroy
+/// by any route but `mach_port_destruct` with its guard.
 pub fn destroy(name: Name) -> i32 {
-    with(|space| match space.names.remove(&name) {
-        Some(Right::Set(members)) => {
-            let _ = members;
-            KERN_SUCCESS
+    with(|space| {
+        if let Some(Right::Receive(owned)) = space.names.get(&name)
+            && owned.guarded
+            && owned.context != 0
+        {
+            return KERN_INVALID_RIGHT;
         }
-        Some(_) => KERN_SUCCESS,
-        None => KERN_INVALID_NAME,
+        match space.names.remove(&name) {
+            Some(_) => KERN_SUCCESS,
+            None => KERN_INVALID_NAME,
+        }
     })
 }
 
@@ -476,8 +590,40 @@ pub extern "C" fn mach_port_mod_refs(task: Name, name: Name, right: u32, delta: 
         let Some(held) = space.names.get_mut(&name) else {
             return KERN_INVALID_NAME;
         };
-        if held.type_bits() != type_of(right) {
+        if held.type_bits() & type_of(right) == 0 {
             return KERN_INVALID_RIGHT;
+        }
+        if let Right::Receive(owned) = held {
+            return match right {
+                RIGHT_SEND => {
+                    let updated = owned.sends as i64 + delta as i64;
+                    if updated < 0 {
+                        return KERN_INVALID_VALUE;
+                    }
+                    if updated > u32::MAX as i64 {
+                        return KERN_UREFS_OVERFLOW;
+                    }
+                    owned.sends = updated as u32;
+                    if updated == 0 {
+                        owned.claim = None;
+                    }
+                    KERN_SUCCESS
+                }
+                // A receive right has one reference, and dropping it is
+                // destroying the port: what is left is the send rights, dead.
+                _ => match delta {
+                    0 => KERN_SUCCESS,
+                    -1 if owned.guarded => KERN_INVALID_RIGHT,
+                    -1 => {
+                        match owned.remainder() {
+                            Some(dead) => space.names.insert(name, dead),
+                            None => space.names.remove(&name),
+                        };
+                        KERN_SUCCESS
+                    }
+                    _ => KERN_INVALID_VALUE,
+                },
+            };
         }
         match held {
             Right::Send { refs, .. }
@@ -533,9 +679,10 @@ pub unsafe extern "C" fn mach_port_get_refs(
     let Some(held) = guard.names.get(&name) else {
         return KERN_INVALID_NAME;
     };
-    let refs = match (held, held.type_bits() == type_of(right)) {
+    let refs = match (held, held.type_bits() & type_of(right) != 0) {
         (_, false) => 0,
         (Right::Send { refs, .. } | Right::Dead { refs }, true) => *refs,
+        (Right::Receive(owned), true) if right == RIGHT_SEND => owned.sends,
         (_, true) => 1,
     };
     // SAFETY: the caller's `mach_port_urefs_t`.
@@ -563,6 +710,25 @@ pub extern "C" fn mach_port_insert_right(
     with(|space| {
         if space.names.contains_key(&name) && name != right {
             return KERN_RIGHT_EXISTS;
+        }
+        // A send right made from a receive right, under its own name: the two
+        // share the entry. Copying or moving a send right needs one there.
+        if let Some(Right::Receive(owned)) = space.names.get_mut(&name) {
+            return match disposition {
+                super::msg::MAKE_SEND => {
+                    owned.add_send(None);
+                    KERN_SUCCESS
+                }
+                super::msg::COPY_SEND if owned.sends > 0 => {
+                    owned.add_send(None);
+                    KERN_SUCCESS
+                }
+                // The right moves onto the name it is already under.
+                super::msg::MOVE_SEND if owned.sends > 0 => KERN_SUCCESS,
+                super::msg::COPY_SEND | super::msg::MOVE_SEND => KERN_INVALID_RIGHT,
+                // A send-once right never shares a name.
+                _ => KERN_RIGHT_EXISTS,
+            };
         }
         let inserted = match disposition {
             super::msg::MAKE_SEND | super::msg::COPY_SEND | super::msg::MOVE_SEND => Right::Send {
@@ -717,6 +883,272 @@ pub extern "C" fn mach_port_set_attributes(
     }
 }
 
+/// `MPO_*`, the `mach_port_options_t` flags from `<mach/port.h>`.
+mod mpo {
+    pub const CONTEXT_AS_GUARD: u32 = 0x01;
+    pub const QLIMIT: u32 = 0x02;
+    pub const TEMPOWNER: u32 = 0x04;
+    pub const IMPORTANCE_RECEIVER: u32 = 0x08;
+    pub const INSERT_SEND_RIGHT: u32 = 0x10;
+    pub const STRICT: u32 = 0x20;
+    pub const DENAP_RECEIVER: u32 = 0x40;
+    pub const IMMOVABLE_RECEIVE: u32 = 0x80;
+    pub const FILTER_MSG: u32 = 0x100;
+    pub const TG_BLOCK_TRACKING: u32 = 0x200;
+    pub const ENFORCE_REPLY_PORT_SEMANTICS: u32 = 0x2000;
+    pub const OPTIONS_MASK: u32 = CONTEXT_AS_GUARD
+        | QLIMIT
+        | TEMPOWNER
+        | IMPORTANCE_RECEIVER
+        | INSERT_SEND_RIGHT
+        | STRICT
+        | DENAP_RECEIVER
+        | IMMOVABLE_RECEIVE
+        | FILTER_MSG
+        | TG_BLOCK_TRACKING
+        | ENFORCE_REPLY_PORT_SEMANTICS;
+    /// `MPO_PORT_TYPE_MASK`: `MPO_MAKE_PORT_TYPE(7, 7)`.
+    pub const PORT_TYPE_MASK: u32 = (7 << 14) | (7 << 10);
+    /// The port types: a plain port, a service port, a connection port, a
+    /// reply port, a provisional reply port, an exception port, and a
+    /// connection port with a port array.
+    pub const PORT_TYPES: [u32; 7] = [0, 0x400, 0x800, 0x1000, 0x4000, 0x8000, 0x10000];
+    pub const SERVICE_PORT: u32 = 0x400;
+    pub const CONNECTION_PORT: u32 = 0x800;
+}
+
+/// `MACH_PORT_QLIMIT_MAX`, which is `MACH_PORT_QLIMIT_LARGE`.
+const QLIMIT_MAX: u32 = 1024;
+
+/// `mach_port_options_t`: the flags, `mach_port_limits_t`, then a sixteen-byte
+/// union whose first word is a port name for the types that take one.
+#[repr(C)]
+pub struct Options {
+    flags: u32,
+    qlimit: u32,
+    union: [u64; 2],
+}
+
+/// `kern_return_t mach_port_construct(ipc_space_t, mach_port_options_t *,
+/// uint64_t context, mach_port_name_t *)`
+///
+/// `mach_port_construct` in `osfmk/ipc/mach_port.c`: a receive right with the
+/// options applied - a send right under the same name, a guard, a context, an
+/// immovable receive right. The scheduling hints (importance, de-nap,
+/// thread-group tracking, temporary ownership) and the queue limit change how
+/// the kernel schedules and buffers, which nothing here models; they are
+/// validated as XNU validates them and otherwise accepted.
+///
+/// # Safety
+///
+/// `options` is a readable `mach_port_options_t` and `out` a writable name.
+pub unsafe extern "C" fn mach_port_construct(
+    task: Name,
+    options: *const Options,
+    context: u64,
+    out: *mut Name,
+) -> i32 {
+    if task != TASK_SELF {
+        return KERN_INVALID_TASK;
+    }
+    if options.is_null() || out.is_null() {
+        return KERN_INVALID_ADDRESS;
+    }
+    // SAFETY: the caller's options.
+    let options = unsafe { &*options };
+    let flags = options.flags;
+    if flags & !(mpo::OPTIONS_MASK | mpo::PORT_TYPE_MASK) != 0 {
+        return KERN_INVALID_ARGUMENT;
+    }
+    let port_type = flags & mpo::PORT_TYPE_MASK;
+    if !mpo::PORT_TYPES.contains(&port_type) {
+        return KERN_INVALID_ARGUMENT;
+    }
+    // A service port is launchd's to make, and a connection port names the
+    // service port it connects to - `mach_port_construct_check_service_port`
+    // and the `service_port_name` check.
+    match port_type {
+        mpo::SERVICE_PORT => return KERN_DENIED,
+        mpo::CONNECTION_PORT if options.union[0] as u32 == MACH_PORT_NULL => {
+            return KERN_INVALID_ARGUMENT;
+        }
+        _ => {}
+    }
+    if flags & mpo::QLIMIT != 0 && options.qlimit > QLIMIT_MAX {
+        return KERN_INVALID_VALUE;
+    }
+    // Only the window server may track thread-group blocking.
+    if flags & mpo::TG_BLOCK_TRACKING != 0 {
+        return KERN_DENIED;
+    }
+    let Ok(port) = Receiver::bind() else {
+        return KERN_RESOURCE_SHORTAGE;
+    };
+    let mut owned = Owned::new(Arc::new(port));
+    owned.immovable = flags & mpo::IMMOVABLE_RECEIVE != 0;
+    if flags & mpo::INSERT_SEND_RIGHT != 0 {
+        owned.add_send(None);
+    }
+    owned.context = context;
+    if flags & mpo::CONTEXT_AS_GUARD != 0 {
+        owned.guarded = true;
+        owned.strict = flags & mpo::STRICT != 0;
+    }
+    let name = insert(Right::Receive(owned));
+    // SAFETY: the caller's `mach_port_name_t`.
+    unsafe { out.write(name) };
+    KERN_SUCCESS
+}
+
+/// Whether `name` is a name rather than `MACH_PORT_NULL` or `MACH_PORT_DEAD`:
+/// `MACH_PORT_VALID`.
+fn valid(name: Name) -> bool {
+    name != MACH_PORT_NULL && name != MACH_PORT_DEAD
+}
+
+/// Run `f` on the receive right `name`, or answer as
+/// `ipc_port_translate_receive` does for a name that is not one.
+fn with_receive(name: Name, f: impl FnOnce(&mut Owned) -> i32) -> i32 {
+    with(|space| match space.names.get_mut(&name) {
+        Some(Right::Receive(owned)) => f(owned),
+        Some(_) => KERN_INVALID_RIGHT,
+        None => KERN_INVALID_NAME,
+    })
+}
+
+/// `kern_return_t mach_port_destruct(ipc_space_t, mach_port_name_t,
+/// mach_port_delta_t srdelta, uint64_t guard)`
+///
+/// `ipc_right_destruct`: drop `-srdelta` user references from the send right
+/// under the name, then destroy the receive right - which must be given its
+/// guard if it has one. Send references left over become a dead name.
+pub extern "C" fn mach_port_destruct(task: Name, name: Name, srdelta: i32, guard: u64) -> i32 {
+    if task != TASK_SELF {
+        return KERN_INVALID_TASK;
+    }
+    if !valid(name) {
+        return KERN_INVALID_NAME;
+    }
+    with(|space| {
+        let Some(held) = space.names.get_mut(&name) else {
+            return KERN_INVALID_NAME;
+        };
+        let Right::Receive(owned) = held else {
+            return KERN_INVALID_RIGHT;
+        };
+        if srdelta != 0 && owned.sends == 0 {
+            return KERN_INVALID_RIGHT;
+        }
+        if srdelta > 0 {
+            return KERN_INVALID_VALUE;
+        }
+        if owned.guarded && guard != owned.context {
+            return KERN_INVALID_ARGUMENT;
+        }
+        let remaining = owned.sends as i64 + srdelta as i64;
+        if remaining < 0 {
+            return KERN_INVALID_VALUE;
+        }
+        owned.sends = remaining as u32;
+        match owned.remainder() {
+            Some(dead) => space.names.insert(name, dead),
+            None => space.names.remove(&name),
+        };
+        KERN_SUCCESS
+    })
+}
+
+/// `kern_return_t mach_port_guard(ipc_space_t, mach_port_name_t,
+/// mach_port_context_t guard, boolean_t strict)`
+///
+/// `mach_port_guard_locked`: a port that already carries a context, guard or
+/// not, cannot be guarded.
+pub extern "C" fn mach_port_guard(task: Name, name: Name, guard: u64, strict: i32) -> i32 {
+    if task != TASK_SELF {
+        return KERN_INVALID_TASK;
+    }
+    if !valid(name) {
+        return KERN_INVALID_NAME;
+    }
+    with_receive(name, |owned| {
+        if owned.context != 0 {
+            return KERN_INVALID_ARGUMENT;
+        }
+        owned.context = guard;
+        owned.guarded = true;
+        owned.strict = strict != 0;
+        KERN_SUCCESS
+    })
+}
+
+/// `kern_return_t mach_port_unguard(ipc_space_t, mach_port_name_t,
+/// mach_port_context_t guard)`
+pub extern "C" fn mach_port_unguard(task: Name, name: Name, guard: u64) -> i32 {
+    if task != TASK_SELF {
+        return KERN_INVALID_TASK;
+    }
+    if !valid(name) {
+        return KERN_INVALID_NAME;
+    }
+    with_receive(name, |owned| {
+        if !owned.guarded || owned.context != guard {
+            return KERN_INVALID_ARGUMENT;
+        }
+        owned.context = 0;
+        owned.guarded = false;
+        owned.strict = false;
+        KERN_SUCCESS
+    })
+}
+
+/// `kern_return_t mach_port_get_context(ipc_space_t, mach_port_name_t,
+/// mach_port_context_t *)`
+///
+/// A strict guard is not given away: the context reads as zero.
+///
+/// # Safety
+///
+/// `out` is a writable `mach_port_context_t`.
+pub unsafe extern "C" fn mach_port_get_context(task: Name, name: Name, out: *mut u64) -> i32 {
+    if task != TASK_SELF {
+        return KERN_INVALID_TASK;
+    }
+    if !valid(name) {
+        return KERN_INVALID_RIGHT;
+    }
+    if out.is_null() {
+        return KERN_INVALID_ADDRESS;
+    }
+    with_receive(name, |owned| {
+        let context = if owned.strict { 0 } else { owned.context };
+        // SAFETY: the caller's word.
+        unsafe { out.write(context) };
+        KERN_SUCCESS
+    })
+}
+
+/// `kern_return_t mach_port_set_context(ipc_space_t, mach_port_name_t,
+/// mach_port_context_t)`
+///
+/// A strictly guarded port's context is its guard and cannot be replaced; a
+/// loosely guarded one's can, and the guard is then the new value, as XNU
+/// stores both in the one `ip_context`.
+pub extern "C" fn mach_port_set_context(task: Name, name: Name, context: u64) -> i32 {
+    if task != TASK_SELF {
+        return KERN_INVALID_TASK;
+    }
+    if !valid(name) {
+        return KERN_INVALID_RIGHT;
+    }
+    with_receive(name, |owned| {
+        if owned.strict {
+            return KERN_INVALID_ARGUMENT;
+        }
+        owned.context = context;
+        KERN_SUCCESS
+    })
+}
+
 /// `MACH_NOTIFY_NO_SENDERS`, from `<mach/notify.h>`: `MACH_NOTIFY_FIRST + 6`.
 pub const NOTIFY_NO_SENDERS: i32 = 0o106;
 
@@ -748,7 +1180,7 @@ pub unsafe extern "C" fn mach_port_request_notification(
     if task != TASK_SELF {
         return KERN_INVALID_TASK;
     }
-    let held = with_right(name, |right| matches!(right, Right::Receive(_)));
+    let held = with_right(name, |right| matches!(right, Right::Receive(..)));
     let Some(is_receive) = held else {
         return KERN_INVALID_NAME;
     };
@@ -837,7 +1269,8 @@ mod tests {
     }
 
     /// Crashpad's sequence: allocate a receive right, extract a send right to
-    /// keep, hand the receive right away.
+    /// keep, hand the receive right away. A space names a port once, so the
+    /// send right is the receive right's own name.
     #[test]
     fn a_send_right_extracted_from_a_receive_right_names_the_same_port() {
         let mut receive = MACH_PORT_NULL;
@@ -857,20 +1290,205 @@ mod tests {
         };
         assert_eq!(rc, KERN_SUCCESS);
         assert_eq!(kind, super::super::msg::MOVE_SEND);
-        assert_ne!(send, receive);
-        assert_eq!(address_of(send), address_of(receive));
+        assert_eq!(send, receive);
         assert_eq!(destination(send).unwrap().1, false, "not send-once");
 
-        mach_port_destroy(TASK_SELF, receive);
-        mach_port_deallocate(TASK_SELF, send);
+        // Moving the receive right away leaves the send right behind.
+        let moved = move_receive(receive).expect("a movable receive right");
+        assert_eq!(address_of(send), Some(moved.address()));
+        assert!(receiver(send).is_none());
+        assert_eq!(mach_port_deallocate(TASK_SELF, send), KERN_SUCCESS);
+        assert!(address_of(send).is_none());
+    }
+
+    fn port_type(name: Name) -> u32 {
+        let mut bits = 0;
+        // SAFETY: a live local for the out-parameter.
+        assert_eq!(
+            unsafe { mach_port_type(TASK_SELF, name, &mut bits) },
+            KERN_SUCCESS
+        );
+        bits
+    }
+
+    fn refs(name: Name, right: u32) -> u32 {
+        let mut count = 0;
+        // SAFETY: a live local for the out-parameter.
+        assert_eq!(
+            unsafe { mach_port_get_refs(TASK_SELF, name, right, &mut count) },
+            KERN_SUCCESS
+        );
+        count
+    }
+
+    const SEND_RECEIVE: u32 = type_of(RIGHT_SEND) | type_of(RIGHT_RECEIVE);
+
+    /// `mach_port_insert_right(task, port, port, MAKE_SEND)`: the send right
+    /// joins the receive right under its name, and releasing it leaves the
+    /// receive right alone.
+    #[test]
+    fn a_send_right_made_under_the_receive_rights_name_shares_it() {
+        let mut name = MACH_PORT_NULL;
+        // SAFETY: a live local for the out-parameter.
+        unsafe { mach_port_allocate(TASK_SELF, RIGHT_RECEIVE, &mut name) };
+        assert_eq!(
+            mach_port_insert_right(TASK_SELF, name, name, super::super::msg::COPY_SEND),
+            KERN_INVALID_RIGHT,
+            "nothing to copy yet"
+        );
+        assert_eq!(
+            mach_port_insert_right(TASK_SELF, name, name, super::super::msg::MAKE_SEND),
+            KERN_SUCCESS
+        );
+        assert_eq!(port_type(name), SEND_RECEIVE);
+        assert!(receiver(name).is_some(), "the receive right is still there");
+        assert_eq!(refs(name, RIGHT_SEND), 1);
+        assert_eq!(
+            insert_send(address_of(name).unwrap()),
+            name,
+            "one name per port"
+        );
+        assert_eq!(refs(name, RIGHT_SEND), 2);
+
+        assert_eq!(mach_port_deallocate(TASK_SELF, name), KERN_SUCCESS);
+        assert_eq!(
+            mach_port_mod_refs(TASK_SELF, name, RIGHT_SEND, -1),
+            KERN_SUCCESS
+        );
+        assert_eq!(port_type(name), type_of(RIGHT_RECEIVE));
+        assert_eq!(mach_port_deallocate(TASK_SELF, name), KERN_INVALID_RIGHT);
+
+        // Dropping the receive right with a send right still under the name
+        // leaves a dead name, as the port is gone.
+        mach_port_insert_right(TASK_SELF, name, name, super::super::msg::MAKE_SEND);
+        assert_eq!(
+            mach_port_mod_refs(TASK_SELF, name, RIGHT_RECEIVE, -1),
+            KERN_SUCCESS
+        );
+        assert_eq!(port_type(name), type_of(RIGHT_DEAD_NAME));
+        assert_eq!(mach_port_deallocate(TASK_SELF, name), KERN_SUCCESS);
+        assert_eq!(mach_port_destroy(TASK_SELF, name), KERN_INVALID_NAME);
+    }
+
+    fn options(flags: u32) -> Options {
+        Options {
+            flags,
+            qlimit: 0,
+            union: [0; 2],
+        }
+    }
+
+    fn construct(flags: u32, context: u64) -> Result<Name, i32> {
+        let mut name = MACH_PORT_NULL;
+        // SAFETY: live locals for the options and the out-parameter.
+        match unsafe { mach_port_construct(TASK_SELF, &options(flags), context, &mut name) } {
+            KERN_SUCCESS => Ok(name),
+            error => Err(error),
+        }
+    }
+
+    /// `mach_port_construct`'s options, as `osfmk/ipc/mach_port.c` reads them.
+    #[test]
+    fn a_constructed_port_has_the_options_it_was_asked_for() {
+        let plain = construct(0, 0x1234).unwrap();
+        assert_eq!(port_type(plain), type_of(RIGHT_RECEIVE));
+        let mut context = 0;
+        // SAFETY: a live local for the out-parameter.
+        unsafe { mach_port_get_context(TASK_SELF, plain, &mut context) };
+        assert_eq!(context, 0x1234, "an unguarded port keeps the context");
+        assert_eq!(mach_port_destruct(TASK_SELF, plain, 0, 0), KERN_SUCCESS);
+
+        let with_send = construct(mpo::INSERT_SEND_RIGHT | mpo::QLIMIT, 0).unwrap();
+        assert_eq!(port_type(with_send), SEND_RECEIVE);
+        assert_eq!(
+            mach_port_destruct(TASK_SELF, with_send, 1, 0),
+            KERN_INVALID_VALUE,
+            "srdelta only ever removes"
+        );
+        assert_eq!(
+            mach_port_destruct(TASK_SELF, with_send, -1, 0),
+            KERN_SUCCESS
+        );
+        assert_eq!(mach_port_destroy(TASK_SELF, with_send), KERN_INVALID_NAME);
+
+        assert_eq!(
+            construct(0x8000_0000, 0),
+            Err(KERN_INVALID_ARGUMENT),
+            "an unknown bit"
+        );
+        assert_eq!(
+            construct(0x400 | 0x800, 0),
+            Err(KERN_INVALID_ARGUMENT),
+            "two port types"
+        );
+        let mut too_deep = options(mpo::QLIMIT);
+        too_deep.qlimit = QLIMIT_MAX + 1;
+        let mut name = MACH_PORT_NULL;
+        // SAFETY: live locals.
+        assert_eq!(
+            unsafe { mach_port_construct(TASK_SELF, &too_deep, 0, &mut name) },
+            KERN_INVALID_VALUE
+        );
+    }
+
+    /// A guarded port can be destroyed only by `mach_port_destruct` with its
+    /// guard, and a strict guard is not given away by `mach_port_get_context`.
+    #[test]
+    fn a_guarded_port_is_destroyed_only_with_its_guard() {
+        let guard = 0xfeed_f00d;
+        let name = construct(mpo::CONTEXT_AS_GUARD | mpo::STRICT, guard).unwrap();
+        let mut context = 1;
+        // SAFETY: a live local for the out-parameter.
+        unsafe { mach_port_get_context(TASK_SELF, name, &mut context) };
+        assert_eq!(context, 0);
+        assert_eq!(
+            mach_port_set_context(TASK_SELF, name, 7),
+            KERN_INVALID_ARGUMENT
+        );
+        assert_eq!(mach_port_destroy(TASK_SELF, name), KERN_INVALID_RIGHT);
+        assert_eq!(
+            mach_port_mod_refs(TASK_SELF, name, RIGHT_RECEIVE, -1),
+            KERN_INVALID_RIGHT
+        );
+        assert_eq!(
+            mach_port_destruct(TASK_SELF, name, 0, guard + 1),
+            KERN_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            mach_port_unguard(TASK_SELF, name, guard + 1),
+            KERN_INVALID_ARGUMENT
+        );
+        assert_eq!(mach_port_destruct(TASK_SELF, name, 0, guard), KERN_SUCCESS);
+
+        // Guarding after the fact, and a context already set is refused.
+        let later = construct(0, 0).unwrap();
+        assert_eq!(mach_port_guard(TASK_SELF, later, guard, 0), KERN_SUCCESS);
+        assert_eq!(
+            mach_port_guard(TASK_SELF, later, guard, 0),
+            KERN_INVALID_ARGUMENT
+        );
+        assert_eq!(mach_port_unguard(TASK_SELF, later, guard), KERN_SUCCESS);
+        assert_eq!(mach_port_destroy(TASK_SELF, later), KERN_SUCCESS);
+    }
+
+    /// `MPO_IMMOVABLE_RECEIVE`: the right stays in this space.
+    #[test]
+    fn an_immovable_receive_right_is_not_moved() {
+        let name = construct(mpo::IMMOVABLE_RECEIVE, 0).unwrap();
+        assert_eq!(move_receive(name).err(), Some(MACH_SEND_INVALID_RIGHT));
+        assert!(receiver(name).is_some());
+        assert_eq!(mach_port_destruct(TASK_SELF, name, 0, 0), KERN_SUCCESS);
     }
 
     #[test]
     fn a_send_right_is_reference_counted_and_the_name_survives_until_the_last_one() {
+        // The receive right goes elsewhere first, so the send rights are a
+        // name of their own rather than the receive right's.
         let mut receive = MACH_PORT_NULL;
         // SAFETY: a live local for the out-parameter.
         unsafe { mach_port_allocate(TASK_SELF, RIGHT_RECEIVE, &mut receive) };
-        let address = address_of(receive).unwrap();
+        let elsewhere = move_receive(receive).expect("a movable receive right");
+        let address = elsewhere.address();
 
         let first = insert_send(address);
         let second = insert_send(address);
@@ -880,7 +1498,6 @@ mod tests {
         assert!(address_of(first).is_some(), "one reference is still held");
         assert_eq!(mach_port_deallocate(TASK_SELF, first), KERN_SUCCESS);
         assert!(address_of(first).is_none());
-        mach_port_destroy(TASK_SELF, receive);
     }
 
     #[test]

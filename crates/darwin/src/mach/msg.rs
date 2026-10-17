@@ -689,6 +689,45 @@ unsafe fn write_header(msg: *mut u8, bits: u32, size: u32, remote: Name, local: 
     }
 }
 
+/// `mach_msg_return_t mach_msg_send(mach_msg_header_t *msg)`: libsyscall's
+/// `mach_msg(msg, MACH_SEND_MSG, msg->msgh_size, 0, MACH_PORT_NULL,
+/// MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL)`.
+///
+/// # Safety
+///
+/// `msg` is a whole message of the size its header states.
+pub unsafe extern "C" fn mach_msg_send(msg: *mut c_void) -> i32 {
+    if msg.is_null() {
+        return MACH_SEND_INVALID_DATA;
+    }
+    // SAFETY: the caller's header.
+    let size = unsafe { msg.cast::<u8>().add(4).cast::<u32>().read_unaligned() };
+    // SAFETY: as above.
+    unsafe { mach_msg(msg, SEND_MSG, size, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL) }
+}
+
+/// `mach_msg_return_t mach_msg_receive(mach_msg_header_t *msg)`: a receive on
+/// the header's `msgh_local_port` into a buffer of its `msgh_size`.
+///
+/// # Safety
+///
+/// `msg` addresses `msgh_size` writable bytes.
+pub unsafe extern "C" fn mach_msg_receive(msg: *mut c_void) -> i32 {
+    if msg.is_null() {
+        return MACH_RCV_INVALID_NAME;
+    }
+    // SAFETY: the caller's header.
+    let (size, local) = unsafe {
+        let bytes = msg.cast::<u8>();
+        (
+            bytes.add(4).cast::<u32>().read_unaligned(),
+            bytes.add(12).cast::<u32>().read_unaligned(),
+        )
+    };
+    // SAFETY: as above.
+    unsafe { mach_msg(msg, RCV_MSG, 0, size, local, 0, MACH_PORT_NULL) }
+}
+
 /// `mach_msg_return_t mach_msg(mach_msg_header_t *msg, mach_msg_option_t option,
 /// mach_msg_size_t send_size, mach_msg_size_t rcv_size, mach_port_name_t
 /// rcv_name, mach_msg_timeout_t timeout, mach_port_name_t notify)`
@@ -1411,6 +1450,10 @@ mod tests {
         let notify = allocate_receive();
         let mailbox = allocate_receive();
         let held = space::insert_send(space::address_of(port).unwrap());
+        assert_eq!(
+            held, port,
+            "the send right is under the receive right's name"
+        );
         request_no_senders(port, notify);
 
         let mut descriptor = Vec::new();
@@ -1432,9 +1475,13 @@ mod tests {
             )
         };
         assert_eq!(rc, MACH_MSG_SUCCESS);
-        assert!(
-            space::address_of(held).is_none(),
-            "the sender gave its right away"
+        let mut bits = 0;
+        // SAFETY: a live local for the out-parameter.
+        unsafe { space::mach_port_type(space::TASK_SELF, held, &mut bits) };
+        assert_eq!(
+            bits,
+            space::type_of(space::RIGHT_RECEIVE),
+            "the sender gave its send right away"
         );
         assert!(
             take(notify, 300).is_none(),
@@ -1443,11 +1490,7 @@ mod tests {
 
         let arrived = take(mailbox, 1000).expect("the message");
         let received = word(&arrived, HEADER + BODY);
-        assert_eq!(
-            space::address_of(received),
-            space::address_of(port),
-            "it names the same port"
-        );
+        assert_eq!(received, port, "it arrives under the port's one name");
         assert!(take(notify, 300).is_none(), "now the receiver holds it");
 
         space::mach_port_deallocate(space::TASK_SELF, received);

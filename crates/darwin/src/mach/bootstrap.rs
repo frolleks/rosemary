@@ -258,11 +258,16 @@ mod tests {
         let mut client = MACH_PORT_NULL;
         let rc = unsafe { bootstrap_look_up(BOOTSTRAP, service.as_ptr(), &mut client) };
         assert_eq!(rc, BOOTSTRAP_SUCCESS);
-        assert!(
-            space::receiver(client).is_none(),
-            "and the client only a send right"
+        // One task holding both ends names the port once, as Mach's space
+        // does: the send right joins the receive right under its name.
+        assert_eq!(client, server, "a space names a port once");
+        let mut bits = 0;
+        // SAFETY: a live local for the out-parameter.
+        unsafe { space::mach_port_type(space::TASK_SELF, client, &mut bits) };
+        assert_eq!(
+            bits,
+            space::type_of(space::RIGHT_SEND) | space::type_of(space::RIGHT_RECEIVE)
         );
-        assert_eq!(space::address_of(client), space::address_of(server));
 
         // A second check-in while the first holder is alive is refused.
         let mut again = MACH_PORT_NULL;
