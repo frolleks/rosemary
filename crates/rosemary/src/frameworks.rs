@@ -112,7 +112,7 @@ static FRAMEWORKS: &[Framework] = &[
         version: 'A',
         umbrellas: &[],
         provide: Some(applicationservices::provide),
-        data: None,
+        data: Some(applicationservices::data_symbols),
         symbol: Some(applicationservices::symbol),
     },
     Framework {
