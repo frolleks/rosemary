@@ -419,6 +419,7 @@ pub fn announce_unbound_imports<'r>(
     report: &'r LinkReport,
     what: &str,
 ) -> Vec<(&'r str, &'r machish::report::MissingSymbol)> {
+    announce_unbound_weak_imports(report, what);
     let unbound = unbound_imports(report);
     if unbound.is_empty() {
         return unbound;
@@ -455,6 +456,40 @@ pub fn announce_unbound_imports<'r>(
     fill_unbound_data(&unbound);
     name_missing_classes(&unbound);
     unbound
+}
+
+/// Weak imports nothing answered: noted so a fault at zero can name one, and
+/// listed under `ROSEMARY_UNBOUND_WEAK`.
+///
+/// Not announced by default, since a null weak slot is what an image asked
+/// for. But an image tests it only where its own availability checks say to,
+/// and this runtime reports a recent macOS: a weak import of an API that
+/// version has is called as if it were bound, which is a fault at zero that
+/// names no import unless it was noted here.
+fn announce_unbound_weak_imports(report: &LinkReport, what: &str) {
+    let weak: Vec<_> = report
+        .images
+        .iter()
+        .flat_map(|image| {
+            image
+                .missing
+                .iter()
+                .filter(|m| m.weak_import)
+                .map(move |m| (image.name.as_str(), m))
+        })
+        .collect();
+    crate::fault::note_unbound(&weak);
+    if weak.is_empty() || std::env::var_os("ROSEMARY_UNBOUND_WEAK").is_none() {
+        return;
+    }
+    eprintln!("rosemary: {what}: {} weak import(s) unbound", weak.len());
+    for (image, m) in &weak {
+        eprintln!(
+            "rosemary:   (weak) {} from {} in {image}",
+            m.symbol,
+            m.library.as_deref().unwrap_or("<no library>"),
+        );
+    }
 }
 
 /// List every import that resolved to this host's own libc rather than to
