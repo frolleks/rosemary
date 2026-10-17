@@ -676,8 +676,13 @@ const KEY_STRINGS: &[(&str, &str)] = &[
 /// The `kSC*` globals, as `(Mach-O name, address)`.
 pub fn data_symbols() -> Vec<(String, u64)> {
     crate::bootstrap();
+    // The schema's keys, less any this module already lists.
+    let schema = crate::sysconfig_schema::SCHEMA
+        .iter()
+        .filter(|(symbol, _)| !KEY_STRINGS.iter().any(|(s, _)| s == symbol));
     KEY_STRINGS
         .iter()
+        .chain(schema)
         .map(|(symbol, text)| {
             (
                 (*symbol).to_string(),
