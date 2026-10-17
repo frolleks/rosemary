@@ -194,6 +194,50 @@ pub unsafe extern "C" fn CGDataProviderCreateWithData(
     provider as CFTypeRef
 }
 
+/// `CGDataProviderRef CGDataProviderCreateWithCFData(CFDataRef data)`: a
+/// provider of the data's bytes, which holds the data until it is released.
+/// Null for null, or for anything that is not a `CFData`.
+pub unsafe extern "C" fn CGDataProviderCreateWithCFData(data: CFTypeRef) -> CFTypeRef {
+    // SAFETY: null or an object a guest received from this runtime; anything
+    // but a `CFData` answers null.
+    let bytes = unsafe { corefoundation::api::CFDataGetBytePtr(data) };
+    if bytes.is_null() {
+        return std::ptr::null();
+    }
+    // SAFETY: a live `CFData`, checked above.
+    let size = unsafe { corefoundation::api::CFDataGetLength(data) }.max(0) as usize;
+    // SAFETY: the data's own bytes, which the retain below keeps alive until
+    // `release_retained_data` lets it go.
+    unsafe {
+        let info = corefoundation::api::CFRetain(data) as *mut c_void;
+        CGDataProviderCreateWithData(info, bytes.cast(), size, Some(release_retained_data))
+    }
+}
+
+/// The release callback of a [`CGDataProviderCreateWithCFData`] provider,
+/// whose `info` is the data it retained.
+unsafe extern "C" fn release_retained_data(info: *mut c_void, _data: *const c_void, _size: usize) {
+    // SAFETY: the retain `CGDataProviderCreateWithCFData` took.
+    unsafe { corefoundation::api::CFRelease(info as CFTypeRef) };
+}
+
+/// The bytes a data provider holds, or `None` for anything else.
+pub(crate) fn provider_bytes<'a>(provider: CFTypeRef) -> Option<&'a [u8]> {
+    let class = objc::class::lookup(c"__CGDataProvider").expect("installed during bootstrap");
+    // SAFETY: null or an object a guest received from this runtime.
+    if provider.is_null() || !unsafe { corefoundation::base::is_kind_of(provider, class) } {
+        return None;
+    }
+    // SAFETY: checked to be a `__CGDataProvider`, whose body is `DataProvider`
+    // and whose bytes live as long as it does.
+    let provider = unsafe { &*(provider as *const DataProvider) };
+    match provider.data.is_null() {
+        true => Some(&[]),
+        // SAFETY: as above.
+        false => Some(unsafe { std::slice::from_raw_parts(provider.data, provider.size) }),
+    }
+}
+
 pub unsafe extern "C" fn CGDataProviderRelease(provider: CFTypeRef) {
     if !provider.is_null() {
         unsafe { corefoundation::api::CFRelease(provider) };
@@ -262,13 +306,26 @@ pub unsafe extern "C" fn CGImageCreate(
 /// Unpremultiplied RGBA with alpha last, big-endian component order - the
 /// layout [`crate::raster::Bitmap`] already is, so nothing is converted.
 pub(crate) fn image_from_bitmap(bitmap: crate::raster::Bitmap) -> CFTypeRef {
-    unsafe extern "C" fn release(info: *mut c_void, _data: *const c_void, _size: usize) {
-        // SAFETY: the box `image_from_bitmap` leaked into `info`.
-        drop(unsafe { Box::from_raw(info as *mut Vec<u8>) });
-    }
     const ALPHA_LAST: u32 = 3;
     let (width, height) = (bitmap.width as usize, bitmap.height as usize);
-    let pixels = Box::new(bitmap.pixels);
+    image_from_pixels(width, height, 32, width * 4, ALPHA_LAST, bitmap.pixels)
+}
+
+/// A device-RGB `CGImage` of eight-bit samples that owns `pixels`, laid out
+/// as `bits_per_pixel`, `bytes_per_row` and `bitmap_info` say.
+pub(crate) fn image_from_pixels(
+    width: usize,
+    height: usize,
+    bits_per_pixel: usize,
+    bytes_per_row: usize,
+    bitmap_info: u32,
+    pixels: Vec<u8>,
+) -> CFTypeRef {
+    unsafe extern "C" fn release(info: *mut c_void, _data: *const c_void, _size: usize) {
+        // SAFETY: the box `image_from_pixels` leaked into `info`.
+        drop(unsafe { Box::from_raw(info as *mut Vec<u8>) });
+    }
+    let pixels = Box::new(pixels);
     let (data, size) = (pixels.as_ptr(), pixels.len());
     // SAFETY: the provider owns the box until its release callback frees it,
     // and the vector's buffer does not move while boxed.
@@ -284,10 +341,10 @@ pub(crate) fn image_from_bitmap(bitmap: crate::raster::Bitmap) -> CFTypeRef {
             width,
             height,
             8,
-            32,
-            width * 4,
+            bits_per_pixel,
+            bytes_per_row,
             space,
-            ALPHA_LAST,
+            bitmap_info,
             provider,
             std::ptr::null(),
             0,
@@ -470,6 +527,38 @@ pub unsafe extern "C" fn CGColorSpaceCopyPropertyList(space: CFTypeRef) -> CFTyp
 
 pub unsafe extern "C" fn CGColorSpaceCreateDeviceRGB() -> CFTypeRef {
     unsafe { CGColorSpaceCreateWithName(std::ptr::null()) }
+}
+
+/// `CGColorSpaceModel CGColorSpaceGetModel(CGColorSpaceRef)`: what a named
+/// space's name says it is - gray, CMYK, or RGB, which the device space and
+/// every other name here are. `kCGColorSpaceModelUnknown` for anything that is
+/// not a colour space.
+pub unsafe extern "C" fn CGColorSpaceGetModel(space: CFTypeRef) -> i32 {
+    const UNKNOWN: i32 = -1;
+    const MONOCHROME: i32 = 0;
+    const RGB: i32 = 1;
+    const CMYK: i32 = 2;
+    let Some(space) = color_space_of(space) else {
+        return UNKNOWN;
+    };
+    // SAFETY: null or a string the space retains.
+    let name = unsafe { corefoundation::string::as_string(space.name) }
+        .map(|s| String::from_utf16_lossy(&s.utf16()))
+        .unwrap_or_default();
+    if name.contains("Gray") {
+        MONOCHROME
+    } else if name.contains("CMYK") {
+        CMYK
+    } else {
+        RGB
+    }
+}
+
+/// `CFDataRef CGColorSpaceCopyICCData(CGColorSpaceRef)`: NULL, which is
+/// Quartz's answer for a space with no ICC profile behind it. The spaces here
+/// are names, and inventing a profile's bytes would be inventing a calibration.
+pub unsafe extern "C" fn CGColorSpaceCopyICCData(_space: CFTypeRef) -> CFTypeRef {
+    std::ptr::null()
 }
 
 pub unsafe extern "C" fn CGColorSpaceRelease(space: CFTypeRef) {
