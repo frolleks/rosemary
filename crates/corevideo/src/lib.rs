@@ -31,6 +31,20 @@ pub struct TimeStamp {
     pub reserved: u64,
 }
 
+/// `CVTimeStampFlags`: which of a timestamp's fields mean something.
+mod stamp {
+    pub const VIDEO_TIME_VALID: u64 = 1 << 0;
+    pub const HOST_TIME_VALID: u64 = 1 << 1;
+    pub const VIDEO_REFRESH_PERIOD_VALID: u64 = 1 << 3;
+    pub const RATE_SCALAR_VALID: u64 = 1 << 4;
+    /// What every stamp a link makes carries.
+    pub const LINK: u64 =
+        VIDEO_TIME_VALID | HOST_TIME_VALID | VIDEO_REFRESH_PERIOD_VALID | RATE_SCALAR_VALID;
+}
+
+/// The scale a link's video times are counted in, nanoseconds.
+const VIDEO_SCALE: i32 = 1_000_000_000;
+
 const _: () = {
     assert!(size_of::<TimeStamp>() == 80);
     assert!(std::mem::offset_of!(TimeStamp, video_time) == 8);
@@ -52,6 +66,11 @@ type OutputCallback = unsafe extern "C" fn(
 
 /// One display link.
 struct Link {
+    /// References the guest holds. `CVDisplayLinkRef` is a CF type: the create
+    /// returns one, and the last release stops and frees the link.
+    refs: usize,
+    /// The display the link follows, `CVDisplayLinkGetCurrentCGDisplay`.
+    display: u32,
     callback: Option<OutputCallback>,
     context: *mut c_void,
     /// Set while the link's thread should keep calling back. Cleared by
@@ -91,12 +110,17 @@ fn link_for(handle: *mut c_void) -> Option<Arc<Mutex<Link>>> {
 /// Sixty hertz is only a fallback for a host with no SDL video subsystem or no
 /// desktop mode; a real display link follows the mode SDL reports.
 fn display_period(display: u32) -> f64 {
-    let display = match display {
-        0 => sdl3::video::primary_display(),
-        display => display,
-    };
+    let display = resolve(display);
     let refresh_rate = sdl3::video::display_refresh_rate(display).unwrap_or(60.0);
     1.0 / f64::from(refresh_rate)
+}
+
+/// A zero display, which the active-displays spelling passes, as the main one.
+fn resolve(display: u32) -> u32 {
+    match display {
+        0 => sdl3::video::primary_display(),
+        display => display,
+    }
 }
 
 /// `CVReturn CVDisplayLinkCreateWithCGDisplay(CGDirectDisplayID, CVDisplayLinkRef *)`.
@@ -112,6 +136,8 @@ pub unsafe extern "C" fn CVDisplayLinkCreateWithCGDisplay(
         return INVALID_ARGUMENT;
     }
     let link = Arc::new(Mutex::new(Link {
+        refs: 1,
+        display: resolve(display),
         callback: None,
         context: std::ptr::null_mut(),
         running: None,
@@ -138,6 +164,33 @@ pub unsafe extern "C" fn CVDisplayLinkCreateWithCGDisplay(
 /// As [`CVDisplayLinkCreateWithCGDisplay`].
 pub unsafe extern "C" fn CVDisplayLinkCreateWithActiveCGDisplays(out: *mut *mut c_void) -> i32 {
     unsafe { CVDisplayLinkCreateWithCGDisplay(0, out) }
+}
+
+/// `CVReturn CVDisplayLinkCreateWithCGDisplays(CGDirectDisplayID *, CFIndex,
+/// CVDisplayLinkRef *)`: a link that can follow any of the displays, and
+/// starts on the first.
+///
+/// # Safety
+///
+/// `displays` must hold `count` display IDs; `out` as above.
+pub unsafe extern "C" fn CVDisplayLinkCreateWithCGDisplays(
+    displays: *const u32,
+    count: isize,
+    out: *mut *mut c_void,
+) -> i32 {
+    if displays.is_null() || count < 1 {
+        return INVALID_ARGUMENT;
+    }
+    // SAFETY: at least one display, by the check above.
+    unsafe { CVDisplayLinkCreateWithCGDisplay(*displays, out) }
+}
+
+/// `CGDirectDisplayID CVDisplayLinkGetCurrentCGDisplay(CVDisplayLinkRef)`, or
+/// `kCGNullDirectDisplay` for a handle that names no link.
+pub unsafe extern "C" fn CVDisplayLinkGetCurrentCGDisplay(handle: *mut c_void) -> u32 {
+    link_for(handle).map_or(0, |link| {
+        link.lock().unwrap_or_else(|e| e.into_inner()).display
+    })
 }
 
 /// # Safety
@@ -167,7 +220,9 @@ pub unsafe extern "C" fn CVDisplayLinkSetCurrentCGDisplay(
     let Some(link) = link_for(handle) else {
         return INVALID_ARGUMENT;
     };
-    link.lock().unwrap_or_else(|e| e.into_inner()).period = display_period(display);
+    let mut link = link.lock().unwrap_or_else(|e| e.into_inner());
+    link.display = resolve(display);
+    link.period = display_period(display);
     SUCCESS
 }
 
@@ -225,6 +280,81 @@ pub unsafe extern "C" fn CVDisplayLinkGetNominalOutputVideoRefreshPeriod(
             time_scale: 0,
             flags: TIME_IS_INDEFINITE,
         },
+    }
+}
+
+/// `CVTime CVDisplayLinkGetOutputVideoLatency(CVDisplayLinkRef)`: zero, in
+/// the nominal period's scale - a frame drawn is a frame shown, as far as
+/// anything here can tell - or indefinite for a handle that names no link.
+pub unsafe extern "C" fn CVDisplayLinkGetOutputVideoLatency(handle: *mut c_void) -> Time {
+    match link_for(handle) {
+        Some(_) => Time {
+            time_value: 0,
+            time_scale: NOMINAL_SCALE,
+            flags: 0,
+        },
+        None => Time {
+            time_value: 0,
+            time_scale: 0,
+            flags: TIME_IS_INDEFINITE,
+        },
+    }
+}
+
+/// `CVReturn CVDisplayLinkGetCurrentTime(CVDisplayLinkRef, CVTimeStamp *)`:
+/// the link's "now". The caller sets `version` to zero, as for every
+/// `CVTimeStamp` it hands CoreVideo.
+///
+/// # Safety
+///
+/// `out` must be null or a writable `CVTimeStamp`.
+pub unsafe extern "C" fn CVDisplayLinkGetCurrentTime(
+    handle: *mut c_void,
+    out: *mut TimeStamp,
+) -> i32 {
+    let Some(link) = link_for(handle) else {
+        return INVALID_ARGUMENT;
+    };
+    if out.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    let now = stamp_now(&link.lock().unwrap_or_else(|e| e.into_inner()));
+    // SAFETY: the caller's stamp.
+    unsafe { *out = now };
+    SUCCESS
+}
+
+/// `uint64_t CVGetCurrentHostTime(void)`: `mach_absolute_time`.
+pub unsafe extern "C" fn CVGetCurrentHostTime() -> u64 {
+    darwin::mach::absolute()
+}
+
+/// `double CVGetHostClockFrequency(void)`: host ticks per second, which with a
+/// one-to-one timebase are nanoseconds.
+pub unsafe extern "C" fn CVGetHostClockFrequency() -> f64 {
+    1e9
+}
+
+/// `uint32_t CVGetHostClockMinimumTimeDelta(void)`: the smallest step the host
+/// clock takes, one tick.
+pub unsafe extern "C" fn CVGetHostClockMinimumTimeDelta() -> u32 {
+    1
+}
+
+/// A link's "now": video time counted from its start, host time on the
+/// guest's `mach_absolute_time` line.
+fn stamp_now(link: &Link) -> TimeStamp {
+    let elapsed = link.started.elapsed().as_secs_f64();
+    TimeStamp {
+        version: 0,
+        video_time_scale: VIDEO_SCALE,
+        video_time: (elapsed * f64::from(VIDEO_SCALE)) as i64,
+        host_time: darwin::mach::absolute(),
+        rate_scalar: 1.0,
+        video_refresh_period: (link.period * f64::from(VIDEO_SCALE)) as i64,
+        smpte_time: [0; 24],
+        flags: stamp::LINK,
+        reserved: 0,
     }
 }
 
@@ -291,11 +421,37 @@ pub unsafe extern "C" fn CVDisplayLinkStop(handle: *mut c_void) -> i32 {
     SUCCESS
 }
 
+/// `CVDisplayLinkRef CVDisplayLinkRetain(CVDisplayLinkRef)`: the link, with
+/// one more reference. NULL in, NULL out.
 pub unsafe extern "C" fn CVDisplayLinkRetain(handle: *mut c_void) -> *mut c_void {
+    if let Some(link) = link_for(handle) {
+        link.lock().unwrap_or_else(|e| e.into_inner()).refs += 1;
+    }
     handle
 }
 
-pub unsafe extern "C" fn CVDisplayLinkRelease(_handle: *mut c_void) {}
+/// `void CVDisplayLinkRelease(CVDisplayLinkRef)`. The last reference stops the
+/// link, so its thread calls back no more, and forgets it. NULL is ignored.
+pub unsafe extern "C" fn CVDisplayLinkRelease(handle: *mut c_void) {
+    let Some(link) = link_for(handle) else {
+        return;
+    };
+    let last = {
+        let mut link = link.lock().unwrap_or_else(|e| e.into_inner());
+        link.refs = link.refs.saturating_sub(1);
+        if link.refs > 0 {
+            return;
+        }
+        link.running.take()
+    };
+    if let Some(running) = last {
+        running.store(false, Ordering::Release);
+    }
+    LINKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|(h, _)| *h != handle as usize);
+}
 
 pub unsafe extern "C" fn CVDisplayLinkIsRunning(handle: *mut c_void) -> u8 {
     link_for(handle).is_some_and(|link| {
@@ -319,22 +475,12 @@ unsafe extern "C" fn fire(_timer: *const c_void, info: *mut c_void) {
             return;
         };
         guard.frame += 1;
-        let scale = 1_000_000_000i32;
-        let elapsed = guard.started.elapsed().as_secs_f64();
-        let now = TimeStamp {
-            version: 0,
-            video_time_scale: scale,
-            video_time: (elapsed * scale as f64) as i64,
-            host_time: elapsed.to_bits(),
-            rate_scalar: 1.0,
-            video_refresh_period: (guard.period * scale as f64) as i64,
-            smpte_time: [0; 24],
-            flags: 0,
-            reserved: 0,
-        };
-        // The frame after this one, which is what "output time" means.
+        let now = stamp_now(&guard);
+        // The frame after this one, which is what "output time" means: one
+        // period later on both clocks.
         let output = TimeStamp {
             video_time: now.video_time + now.video_refresh_period,
+            host_time: now.host_time + now.video_refresh_period as u64,
             ..now
         };
         (callback, guard.context, now, output)
@@ -361,6 +507,13 @@ exports::exports! {
         "CVDisplayLinkRetain" => CVDisplayLinkRetain,
         "CVDisplayLinkRelease" => CVDisplayLinkRelease,
         "CVDisplayLinkIsRunning" => CVDisplayLinkIsRunning,
+        "CVDisplayLinkCreateWithCGDisplays" => CVDisplayLinkCreateWithCGDisplays,
+        "CVDisplayLinkGetCurrentCGDisplay" => CVDisplayLinkGetCurrentCGDisplay,
+        "CVDisplayLinkGetOutputVideoLatency" => CVDisplayLinkGetOutputVideoLatency,
+        "CVDisplayLinkGetCurrentTime" => CVDisplayLinkGetCurrentTime,
+        "CVGetCurrentHostTime" => CVGetCurrentHostTime,
+        "CVGetHostClockFrequency" => CVGetHostClockFrequency,
+        "CVGetHostClockMinimumTimeDelta" => CVGetHostClockMinimumTimeDelta,
     }
 }
 
@@ -461,6 +614,39 @@ mod tests {
             assert_eq!(
                 CVDisplayLinkGetNominalOutputVideoRefreshPeriod(0x1 as *mut c_void).flags,
                 TIME_IS_INDEFINITE
+            );
+        }
+    }
+
+    /// A link stamps its times on the guest's `mach_absolute_time` line, says
+    /// which fields are valid, and follows the display it was made for.
+    #[test]
+    fn a_link_reports_its_display_and_host_times() {
+        let mut handle = std::ptr::null_mut();
+        // SAFETY: a writable slot, then the handle it was given.
+        unsafe {
+            assert_eq!(CVDisplayLinkCreateWithCGDisplay(7, &mut handle), SUCCESS);
+            assert_eq!(CVDisplayLinkGetCurrentCGDisplay(handle), 7);
+            assert_eq!(CVDisplayLinkSetCurrentCGDisplay(handle, 9), SUCCESS);
+            assert_eq!(CVDisplayLinkGetCurrentCGDisplay(handle), 9);
+
+            let before = CVGetCurrentHostTime();
+            let mut now = TimeStamp::default();
+            assert_eq!(CVDisplayLinkGetCurrentTime(handle, &mut now), SUCCESS);
+            let after = CVGetCurrentHostTime();
+            assert!(before <= now.host_time && now.host_time <= after);
+            assert_eq!(now.flags & stamp::LINK, stamp::LINK);
+            assert!(now.video_refresh_period > 0 && now.video_time_scale > 0);
+
+            // A retain is a second reference: one release leaves the link.
+            assert_eq!(CVDisplayLinkRetain(handle), handle);
+            CVDisplayLinkRelease(handle);
+            assert_eq!(CVDisplayLinkGetCurrentCGDisplay(handle), 9);
+            CVDisplayLinkRelease(handle);
+            assert_eq!(CVDisplayLinkGetCurrentCGDisplay(handle), 0);
+            assert_eq!(
+                CVDisplayLinkGetCurrentTime(handle, &mut now),
+                INVALID_ARGUMENT
             );
         }
     }
