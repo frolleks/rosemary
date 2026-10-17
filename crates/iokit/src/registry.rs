@@ -661,6 +661,113 @@ pub unsafe extern "C" fn IOAllowPowerChange(
     SUCCESS
 }
 
+/// `IOReturn IODeregisterForSystemPower(io_object_t *notifier)`: the
+/// registration above, which delivers nothing, withdrawn.
+pub unsafe extern "C" fn IODeregisterForSystemPower(notifier: *mut IoObject) -> IOReturn {
+    if notifier.is_null() {
+        return BAD_ARGUMENT;
+    }
+    SUCCESS
+}
+
+/// `kIOReturnBadArgument`.
+const BAD_ARGUMENT: IOReturn = 0xe000_02c2u32 as i32;
+/// `MACH_SEND_INVALID_DEST`: what a call through an `io_connect_t` that names
+/// no connection gets back from the message it would have sent.
+const INVALID_CONNECTION: KernReturn = 0x1000_0003;
+
+/// `void IONotificationPortSetDispatchQueue(IONotificationPortRef,
+/// dispatch_queue_t)`: where notifications would be delivered, and nothing
+/// here posts one - see [`IOServiceAddMatchingNotification`].
+pub unsafe extern "C" fn IONotificationPortSetDispatchQueue(
+    _port: *mut c_void,
+    _queue: *mut c_void,
+) {
+}
+
+/// `kern_return_t IOServiceAddInterestNotification(IONotificationPortRef,
+/// io_service_t, const io_name_t interestType, IOServiceInterestCallback,
+/// void *refCon, io_object_t *notification)`.
+///
+/// Registered for a service this registry has, and never called back: the
+/// services here are the host's game controllers, whose state changes reach a
+/// guest through HID callbacks rather than as IOKit messages.
+pub unsafe extern "C" fn IOServiceAddInterestNotification(
+    _port: *mut c_void,
+    service: IoObject,
+    _interest: *const c_char,
+    _callback: *const c_void,
+    _refcon: *mut c_void,
+    notification: *mut IoObject,
+) -> KernReturn {
+    if notification.is_null() {
+        return BAD_ARGUMENT;
+    }
+    if service != ROOT_POWER_DOMAIN && crate::api::device_for_service(service).is_none() {
+        return INVALID_CONNECTION;
+    }
+    let handle = NEXT_ITERATOR.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: the caller's out-parameter.
+    unsafe { notification.write(handle) };
+    SUCCESS
+}
+
+/// `kern_return_t IORegistryEntryGetName(io_registry_entry_t, io_name_t name)`.
+///
+/// A controller's name is its product name, as the HID family names the
+/// entry; the root power domain is `IOPMrootDomain`. `io_name_t` is 128 bytes.
+pub unsafe extern "C" fn IORegistryEntryGetName(entry: IoObject, name: *mut c_char) -> KernReturn {
+    if name.is_null() {
+        return BAD_ARGUMENT;
+    }
+    let text = match entry {
+        ROOT_POWER_DOMAIN => "IOPMrootDomain".to_string(),
+        _ => match crate::api::device_for_service(entry) {
+            Some(device) => device.name.clone(),
+            None => return INVALID_CONNECTION,
+        },
+    };
+    let bytes = text.as_bytes();
+    let len = bytes.len().min(127);
+    // SAFETY: an `io_name_t` the caller supplied, 128 bytes.
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), name.cast::<u8>(), len);
+        name.add(len).write(0);
+    }
+    SUCCESS
+}
+
+/// `kern_return_t IOServiceOpen(io_service_t, task_port_t, uint32_t type,
+/// io_connect_t *connect)`.
+///
+/// `kIOReturnUnsupported`, which is `IOService::newUserClient`'s answer for a
+/// service with no user client: nothing here is a kernel driver a process can
+/// open a connection to.
+pub unsafe extern "C" fn IOServiceOpen(
+    _service: IoObject,
+    _task: u32,
+    _kind: u32,
+    connect: *mut IoObject,
+) -> KernReturn {
+    if !connect.is_null() {
+        // SAFETY: the caller's out-parameter.
+        unsafe { connect.write(0) };
+    }
+    UNSUPPORTED
+}
+
+/// `kern_return_t IOServiceClose(io_connect_t)`.
+pub unsafe extern "C" fn IOServiceClose(_connect: IoObject) -> KernReturn {
+    SUCCESS
+}
+
+/// `kern_return_t IOConnectCallMethod(io_connect_t, uint32_t selector, ...)`
+/// and `IOConnectCallStructMethod`: there is no connection for either to be
+/// made through, since [`IOServiceOpen`] makes none.
+pub unsafe extern "C" fn IOConnectCallMethod(_connect: IoObject) -> KernReturn {
+    INVALID_CONNECTION
+}
+
 /// `mach_port_t IONotificationPortGetMachPort(IONotificationPortRef)`.
 ///
 /// `MACH_PORT_NULL`. A port from `darwin::mach` would be one nothing ever sends
@@ -764,5 +871,14 @@ exports::exports! {
         "IODestroyPlugInInterface" => IODestroyPlugInInterface,
         "IORegisterForSystemPower" => IORegisterForSystemPower,
         "IOAllowPowerChange" | "IOCancelPowerChange" => IOAllowPowerChange,
+        "IODeregisterForSystemPower" => IODeregisterForSystemPower,
+        "IONotificationPortSetDispatchQueue" => IONotificationPortSetDispatchQueue,
+        "IOServiceAddInterestNotification" => IOServiceAddInterestNotification,
+        "IORegistryEntryGetName" => IORegistryEntryGetName,
+        "IOServiceOpen" => IOServiceOpen,
+        "IOServiceClose" => IOServiceClose,
+        "IOConnectCallMethod"
+            | "IOConnectCallStructMethod"
+            | "IOConnectCallScalarMethod" => IOConnectCallMethod,
     }
 }
