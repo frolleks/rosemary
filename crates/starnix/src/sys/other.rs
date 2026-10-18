@@ -21,6 +21,10 @@ fn unsupported() -> io::Error {
     io::Error::from(io::ErrorKind::Unsupported)
 }
 
+pub fn allow_debugger_attach() -> io::Result<()> {
+    Ok(())
+}
+
 pub fn identity(pid: i32) -> Option<Identity> {
     exists(pid).then(Identity::default)
 }
