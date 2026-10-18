@@ -3722,6 +3722,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CMBlockBufferGetDataPointer", I32, P, U64, P, P, P),
     sig!("CMCopyDictionaryOfAttachments", P, P, P, U32),
     sig!("CMFormatDescriptionGetMediaSubType", U32, P),
+    sig!("CMFormatDescriptionGetMediaType", U32, P),
+    sig!("CMFormatDescriptionGetTypeID", U64),
+    sig!("CMFormatDescriptionGetExtensions", P, P),
+    sig!("CMFormatDescriptionGetExtension", P, P, P),
+    sig!("CMFormatDescriptionEqual", BOOL, P, P),
     // Twelve parameters, four past AAPCS64's eighth, and the fourth is guest
     // code.
     cbsig!(
@@ -4257,6 +4262,8 @@ pub static REFUSED: &[(&str, &str)] = &[
     // native backend calls both directly, with no marshaller in the way.
     ("CFAbsoluteTimeGetGregorianDate", AGGREGATE),
     ("CFGregorianDateGetAbsoluteTime", AGGREGATE),
+    // `CGRect` is returned in memory the caller provides.
+    ("CMVideoFormatDescriptionGetCleanAperture", AGGREGATE),
     ("CGRectContainsPoint", AGGREGATE),
     ("CGRectIsNull", AGGREGATE),
     ("CATransform3DMakeTranslation", AGGREGATE),
