@@ -1,6 +1,7 @@
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use corefoundation::runloop::{self, RunLoop};
 use objc::object::Id;
 use objc::sel::Sel;
 
@@ -145,22 +146,67 @@ unsafe extern "C" fn fire(_timer: *const c_void, info: *mut c_void) {
     objc::arc::release(object);
 }
 
-/// Put the link on the main loop at its current interval.
+/// The run loops and modes each scheduled link was added to.
+///
+/// A link is in every mode of every loop it was added for, and its timer is
+/// rebuilt in all of them when its rate changes.
+static PLACES: Mutex<Vec<Place>> = Mutex::new(Vec::new());
+
+struct Place {
+    object: usize,
+    run_loop: Arc<RunLoop>,
+    mode: String,
+}
+
+fn places() -> std::sync::MutexGuard<'static, Vec<Place>> {
+    PLACES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Where `object` is to be: the places it was added to, or the main loop's
+/// default mode for a link nothing has named a loop for.
+fn places_of(object: Id) -> Vec<(Arc<RunLoop>, String)> {
+    let mine: Vec<(Arc<RunLoop>, String)> = places()
+        .iter()
+        .filter(|p| p.object == object as usize)
+        .map(|p| (Arc::clone(&p.run_loop), p.mode.clone()))
+        .collect();
+    match mine.is_empty() {
+        true => vec![(runloop::main(), runloop::DEFAULT_MODE.to_string())],
+        false => mine,
+    }
+}
+
+/// The link's run loop timer, as a reference of the caller's.
+fn timer_of(link: &DisplayLink) -> Option<Arc<runloop::Timer>> {
+    let raw = link.timer as *const runloop::Timer;
+    (!raw.is_null()).then(|| {
+        // SAFETY: an `Arc` `schedule` leaked into the object; this takes a
+        // count of its own.
+        unsafe {
+            Arc::increment_strong_count(raw);
+            Arc::from_raw(raw)
+        }
+    })
+}
+
+/// Put the link at its current interval in every place it belongs.
 fn schedule(object: Id) {
     let link = link_of(object);
     if !link.timer.is_null() || link.invalidated != 0 {
         return;
     }
     let interval = std::time::Duration::from_secs_f64(interval_of(link));
-    let timer =
-        corefoundation::runloop::new_timer(interval, Some(interval), Some(fire), object as usize);
-    corefoundation::runloop::main().add_timer(&timer, corefoundation::runloop::DEFAULT_MODE);
+    let timer = runloop::new_timer(interval, Some(interval), Some(fire), object as usize);
+    for (run_loop, mode) in places_of(object) {
+        run_loop.add_timer(&timer, &mode);
+    }
     // The run loop's own reference, given back by `unschedule`.
     objc::arc::retain(object);
     link.timer = Arc::into_raw(timer) as *const c_void;
 }
 
-/// Take the link off the loop; true if it was on one.
+/// Take the link out of every place it is in; true if it was scheduled. The
+/// places are kept, for `reschedule`.
 fn unschedule(object: Id) -> bool {
     let link = link_of(object);
     if link.timer.is_null() {
@@ -168,9 +214,11 @@ fn unschedule(object: Id) -> bool {
     }
     // SAFETY: an `Arc` `schedule` leaked into the object, taken back once
     // because the pointer is cleared here.
-    let timer = unsafe { Arc::from_raw(link.timer as *const corefoundation::runloop::Timer) };
+    let timer = unsafe { Arc::from_raw(link.timer as *const runloop::Timer) };
     link.timer = std::ptr::null();
-    corefoundation::runloop::main().remove_timer(&timer, corefoundation::runloop::DEFAULT_MODE);
+    for (run_loop, mode) in places_of(object) {
+        run_loop.remove_timer(&timer, &mode);
+    }
     timer.invalidate();
     objc::arc::release(object);
     true
@@ -234,13 +282,62 @@ unsafe extern "C" fn dealloc(receiver: Id, _sel: Sel) {
     objc::arc::finalize(receiver);
 }
 
-unsafe extern "C" fn add_to_run_loop(receiver: Id, _sel: Sel, _run_loop: Id, _mode: Id) {
-    // One loop and one mode in this runtime: see `NSRunLoop`'s `addTimer:`.
-    schedule(receiver);
+/// `-addToRunLoop:forMode:`: one more place for the link; a run loop of nil
+/// is the main one.
+unsafe extern "C" fn add_to_run_loop(receiver: Id, _sel: Sel, run_loop: Id, mode: Id) {
+    if link_of(receiver).invalidated != 0 {
+        return;
+    }
+    let run_loop = foundation::timer::cf_run_loop(run_loop).unwrap_or_else(runloop::main);
+    let mode = foundation::timer::mode_name(mode);
+    {
+        let mut table = places();
+        let known = table.iter().any(|p| {
+            p.object == receiver as usize && Arc::ptr_eq(&p.run_loop, &run_loop) && p.mode == mode
+        });
+        if known {
+            return;
+        }
+        table.push(Place {
+            object: receiver as usize,
+            run_loop: Arc::clone(&run_loop),
+            mode: mode.clone(),
+        });
+    }
+    match timer_of(link_of(receiver)) {
+        Some(timer) => run_loop.add_timer(&timer, &mode),
+        None => schedule(receiver),
+    }
 }
 
-unsafe extern "C" fn remove_from_run_loop(receiver: Id, _sel: Sel, _run_loop: Id, _mode: Id) {
-    unschedule(receiver);
+/// `-removeFromRunLoop:forMode:`: one place fewer, and off the loops
+/// altogether once there are none.
+unsafe extern "C" fn remove_from_run_loop(receiver: Id, _sel: Sel, run_loop: Id, mode: Id) {
+    let run_loop = foundation::timer::cf_run_loop(run_loop).unwrap_or_else(runloop::main);
+    let mode = foundation::timer::mode_name(mode);
+    let (found, last) = {
+        let mut table = places();
+        let before = table.len();
+        table.retain(|p| {
+            p.object != receiver as usize || !Arc::ptr_eq(&p.run_loop, &run_loop) || p.mode != mode
+        });
+        let found = table.len() != before;
+        (found, found && !table.iter().any(|p| p.object == receiver as usize))
+    };
+    if !found {
+        return;
+    }
+    if last {
+        // Retained across: the loop's reference may be the only one.
+        objc::arc::retain(receiver);
+        if let Some(timer) = timer_of(link_of(receiver)) {
+            run_loop.remove_timer(&timer, &mode);
+        }
+        unschedule(receiver);
+        objc::arc::release(receiver);
+    } else if let Some(timer) = timer_of(link_of(receiver)) {
+        run_loop.remove_timer(&timer, &mode);
+    }
 }
 
 /// `-invalidate`: off every loop, and the target released. Not reversible.
@@ -254,6 +351,7 @@ unsafe extern "C" fn invalidate(receiver: Id, _sel: Sel) {
     // one of our own across the removal.
     objc::arc::retain(receiver);
     unschedule(receiver);
+    places().retain(|p| p.object != receiver as usize);
     objc::arc::release(link.target);
     link.target = std::ptr::null_mut();
     objc::arc::release(receiver);
@@ -489,6 +587,73 @@ mod tests {
             during,
             "fired after invalidate"
         );
+        objc::arc::release(link);
+    }
+
+    static WORKER_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static WORKER_THREAD: std::sync::Mutex<Option<std::thread::ThreadId>> =
+        std::sync::Mutex::new(None);
+
+    unsafe extern "C" fn tick_on_thread(_receiver: Id, _sel: Sel, _link: Id) {
+        *WORKER_THREAD.lock().unwrap() = Some(std::thread::current().id());
+        WORKER_CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A link added to a thread's own run loop fires when that thread runs
+    /// it, and there - not on the main loop.
+    #[test]
+    fn a_link_fires_on_the_run_loop_it_was_added_to() {
+        crate::bootstrap();
+        let target_class = corefoundation::base::register(
+            c"DisplayLinkThreadTarget",
+            None,
+            size_of::<usize>(),
+            false,
+        );
+        let selector = objc::sel::get("tick:");
+        target_class.replace_method(selector, tick_on_thread as *const c_void, c"v24@0:8@16");
+        let target = unsafe { corefoundation::base::allocate::<usize>(target_class) } as Id;
+        let screen = match crate::screen::screen_object(c"UIScreen", 0) {
+            s if !s.is_null() => s,
+            _ => return,
+        };
+        let make = objc::sel::get("displayLinkWithTarget:selector:");
+        let method = unsafe { objc::object::class_of(screen) }
+            .and_then(|c| c.method(make))
+            .unwrap();
+        let f: unsafe extern "C" fn(Id, Sel, Id, Sel) -> Id =
+            unsafe { std::mem::transmute(method.implementation()) };
+        let link = unsafe { f(screen, make, target, selector) };
+        objc::arc::retain(link);
+        let link_word = link as usize;
+
+        let worker = std::thread::spawn(move || {
+            let link = link_word as Id;
+            let class = objc::class::ptr(objc::class::lookup(c"NSRunLoop").unwrap()) as Id;
+            let run_loop = send(class, "currentRunLoop");
+            // SAFETY: `-addToRunLoop:forMode:` is `void (id, SEL, id, id)`.
+            unsafe {
+                add_to_run_loop(
+                    link,
+                    objc::sel::get("addToRunLoop:forMode:"),
+                    run_loop,
+                    std::ptr::null_mut(),
+                )
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while WORKER_CALLS.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+                corefoundation::runloop::current().run_in_mode(
+                    corefoundation::runloop::DEFAULT_MODE,
+                    0.05,
+                    false,
+                );
+            }
+            std::thread::current().id()
+        });
+        let worker = worker.join().unwrap();
+        assert!(WORKER_CALLS.load(Ordering::SeqCst) > 0, "the link never fired");
+        assert_eq!(*WORKER_THREAD.lock().unwrap(), Some(worker), "fired on another thread");
+        send(link, "invalidate");
         objc::arc::release(link);
     }
 
