@@ -631,6 +631,28 @@ pub fn deliver_no_senders(destination: wire::Address, count: u32) {
     let _ = wire::send(destination, &bytes, &[]);
 }
 
+/// Queue a `MACH_NOTIFY_DEAD_NAME` on the port at `destination`: the send
+/// right `name` - a name in the requesting task's space - is now dead.
+///
+/// `mach_dead_name_notification_t`: header, `NDR_record_t`, and the name.
+pub fn deliver_dead_name(destination: wire::Address, name: Name) {
+    /// `NDR_record`, as in [`deliver_no_senders`].
+    const NDR: [u8; 8] = [0, 0, 0, 0, 1, 0, 0, 0];
+    let mut payload = Vec::with_capacity(NDR.len() + 4);
+    payload.extend_from_slice(&NDR);
+    payload.extend_from_slice(&name.to_le_bytes());
+    let bytes = encode(
+        Sender::Kernel,
+        MOVE_SEND_ONCE,
+        space::NOTIFY_DEAD_NAME,
+        &Reference::NONE,
+        &[],
+        &payload,
+        &[],
+    );
+    let _ = wire::send(destination, &bytes, &[]);
+}
+
 /// Queue a `MACH_NOTIFY_SEND_ONCE` on the port at `destination`, whose
 /// send-once right was destroyed without carrying a message.
 ///
@@ -2956,5 +2978,67 @@ mod tests {
         space::mach_port_deallocate(space::TASK_SELF, arrived);
         space::mach_port_deallocate(space::TASK_SELF, entry);
         space::destroy(service);
+    }
+
+    /// Mojo's `RequestSendDeadNameNotification`: when the receive right a
+    /// send right names is destroyed, the send right becomes a dead name and
+    /// the notify port is told which, with a reference for it to drop.
+    #[test]
+    fn a_send_right_whose_port_is_destroyed_becomes_a_dead_name() {
+        let port = allocate_receive();
+        let address = space::address_of(port).unwrap();
+        // Out of this space, so the send right is a right of its own, as it
+        // is in any task but the receiver's.
+        let receiver = space::move_receive(port).expect("a receive right");
+        let send = space::insert_send(address);
+        let notify = allocate_receive();
+        let mut previous = MACH_PORT_NULL;
+        // SAFETY: a writable local for the previous right.
+        let kr = unsafe {
+            space::mach_port_request_notification(
+                space::TASK_SELF,
+                send,
+                space::NOTIFY_DEAD_NAME,
+                0,
+                notify,
+                MAKE_SEND_ONCE,
+                &mut previous,
+            )
+        };
+        assert_eq!(kr, KERN_SUCCESS);
+        assert!(take(notify, 100).is_none(), "the port is still alive");
+
+        drop(receiver);
+        let notice = take(notify, 2000).expect("a dead-name notification");
+        assert_eq!(word(&notice, 20) as i32, space::NOTIFY_DEAD_NAME);
+        assert_eq!(word(&notice, 4) as usize, HEADER + 12);
+        assert_eq!(word(&notice, HEADER + 8), send, "not_port");
+        let mut ty = 0;
+        // SAFETY: a writable local.
+        unsafe { space::mach_port_type(space::TASK_SELF, send, &mut ty) };
+        assert_eq!(ty, space::type_of(space::RIGHT_DEAD_NAME));
+        let mut refs = 0;
+        // SAFETY: as above.
+        unsafe {
+            space::mach_port_get_refs(space::TASK_SELF, send, space::RIGHT_DEAD_NAME, &mut refs)
+        };
+        assert_eq!(refs, 2, "the right's own and the notification's");
+
+        // Asking again about a name already dead is refused.
+        // SAFETY: as above.
+        let kr = unsafe {
+            space::mach_port_request_notification(
+                space::TASK_SELF,
+                send,
+                space::NOTIFY_DEAD_NAME,
+                0,
+                notify,
+                MAKE_SEND_ONCE,
+                &mut previous,
+            )
+        };
+        assert_eq!(kr, KERN_INVALID_ARGUMENT);
+        space::destroy(send);
+        space::destroy(notify);
     }
 }

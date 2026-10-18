@@ -283,7 +283,7 @@ unsafe fn accept(listener: c_int) -> Option<c_int> {
 
 /// Whether the holder end of a claim has gone. Nothing is ever written to a
 /// claim, so anything but "would block" means it closed.
-fn closed(fd: c_int) -> bool {
+pub(super) fn closed(fd: c_int) -> bool {
     let mut byte = 0u8;
     loop {
         // SAFETY: one byte into a live local, on a non-blocking descriptor.
