@@ -1733,6 +1733,15 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("crc32", U64, U64, P, U32),
     sig!("creat", I32, P, U32),
     sig!("ctime_r", P, P, P),
+    sig!(
+        "_LSSetApplicationLaunchServicesServerConnectionStatus",
+        V,
+        U64,
+        P
+    ),
+    sig!("_CSCheckFixDisable", V),
+    sig!("CSBackupIsItemExcluded", BOOL, P, P),
+    sig!("CSBackupSetItemExcluded", I32, P, BOOL, BOOL),
     //
     // Passthrough to `/usr/lib/libcurl.4.dylib`, which is the library the
     // guest names in its own install path - so the host's copy *is* the one
