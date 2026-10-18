@@ -3657,6 +3657,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("zlibVersion", P),
     // Metal symbols
     sig!("MTLCopyAllDevices", P),
+    sig!("MTLCopyAllDevicesWithObserver", P, P, P),
+    sig!("MTLRemoveDeviceObserver", V, P),
     sig!("AudioConvertHostTimeToNanos", U64, U64),
     sig!("AudioGetCurrentHostTime", U64),
     // `AudioDeviceIOProcID` looks like a function pointer in the header - it is

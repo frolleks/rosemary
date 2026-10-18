@@ -1709,3 +1709,59 @@ fn recording_cost() {
         render.as_secs_f64() * 1e6 / DRAWS as f64,
     );
 }
+
+/// The observer form answers the same devices, and the observer it hands out
+/// is released once removed; removing it again, or nil, is harmless.
+#[test]
+fn a_device_observer_comes_with_the_device_list_until_removed() {
+    #[repr(C)]
+    struct Descriptor {
+        reserved: u64,
+        size: u64,
+    }
+    #[repr(C)]
+    struct Literal {
+        isa: u64,
+        flags: i32,
+        reserved: i32,
+        invoke: unsafe extern "C" fn(*mut Literal, Id, Id),
+        descriptor: &'static Descriptor,
+    }
+    unsafe extern "C" fn invoke(_block: *mut Literal, _device: Id, _name: Id) {
+        panic!("no device is added or removed");
+    }
+    static DESCRIPTOR: Descriptor = Descriptor {
+        reserved: 0,
+        size: size_of::<Literal>() as u64,
+    };
+    bootstrap();
+    let isa = objc::block::data_symbols()
+        .into_iter()
+        .find(|(name, _)| name == "__NSConcreteGlobalBlock")
+        .map_or(0, |(_, address)| address);
+    // A global block, as a literal capturing nothing is.
+    let handler = Box::leak(Box::new(Literal {
+        isa,
+        flags: 1 << 28,
+        reserved: 0,
+        invoke,
+        descriptor: &DESCRIPTOR,
+    })) as *mut Literal as Id;
+    let mut observer: Id = std::ptr::null_mut();
+    // SAFETY: the framework ABI, with a writable out-parameter.
+    unsafe {
+        let devices = MTLCopyAllDevicesWithObserver(&mut observer, handler);
+        let plain = MTLCopyAllDevices();
+        assert_eq!(
+            corefoundation::api::CFArrayGetCount(devices),
+            corefoundation::api::CFArrayGetCount(plain)
+        );
+        assert!(!observer.is_null());
+        assert!(object::is_kind(observer, c"RosemaryMTLDeviceObserver"));
+        MTLRemoveDeviceObserver(observer);
+        MTLRemoveDeviceObserver(observer);
+        MTLRemoveDeviceObserver(std::ptr::null_mut());
+        corefoundation::api::CFRelease(devices);
+        corefoundation::api::CFRelease(plain);
+    }
+}
