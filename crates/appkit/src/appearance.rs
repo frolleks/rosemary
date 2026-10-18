@@ -153,6 +153,14 @@ unsafe extern "C" fn perform_current(receiver: Id, sel: Sel, block: Id) {
     }
 }
 
+/// Make Aqua this thread's current appearance, for a test whose answers must
+/// not follow the host desktop's dark mode.
+#[cfg(test)]
+pub(crate) fn use_aqua_on_this_thread() {
+    // SAFETY: a live appearance; the class and selector are unused.
+    unsafe { set_current(std::ptr::null_mut(), objc::sel::get("setCurrentAppearance:"), aqua()) };
+}
+
 pub fn is_dark() -> bool {
     let appearance = unsafe {
         current(
