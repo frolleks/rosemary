@@ -389,7 +389,7 @@ pub unsafe extern "C" fn vm_region_recurse_64(
 
 /// `VM_FLAGS_*` that `vm_allocate` answers. `FIXED` is zero: the absence of
 /// `ANYWHERE`.
-const VM_FLAGS_ANYWHERE: i32 = 0x0001;
+pub(super) const VM_FLAGS_ANYWHERE: i32 = 0x0001;
 const VM_FLAGS_RANDOM_ADDR: i32 = 0x0008;
 const VM_FLAGS_OVERWRITE: i32 = 0x4000;
 /// `VM_FLAGS_ALIAS_MASK`: the `VM_MAKE_TAG` label, which only feeds `vmmap`'s

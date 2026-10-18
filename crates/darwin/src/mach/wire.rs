@@ -175,6 +175,8 @@ pub struct Receiver {
     /// datagram socket has no way to put one back, so it is held here instead
     /// and handed to the next receive on this port.
     held: Mutex<Option<Datagram>>,
+    /// `ip_seqno`: the sequence number the next message dequeued gets.
+    seqno: std::sync::atomic::AtomicU32,
 }
 
 impl Drop for Receiver {
@@ -227,6 +229,7 @@ impl Receiver {
                     senders,
                     address,
                     held: Mutex::new(None),
+                    seqno: std::sync::atomic::AtomicU32::new(0),
                 });
             }
             let taken = std::io::Error::last_os_error();
@@ -272,6 +275,7 @@ impl Receiver {
             senders,
             address,
             held: Mutex::new(None),
+            seqno: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -301,6 +305,12 @@ impl Receiver {
         };
         core::mem::forget(self);
         moved
+    }
+
+    /// The sequence number for a message just dequeued, which a receive
+    /// reports in its trailer when asked.
+    pub fn next_seqno(&self) -> u32 {
+        self.seqno.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// A message held back because the last caller's buffer was too small.

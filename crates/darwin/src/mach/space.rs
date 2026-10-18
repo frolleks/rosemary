@@ -142,6 +142,15 @@ pub enum Right {
         entry: Arc<super::memory::Entry>,
         refs: u32,
     },
+    /// A send right to a fileport, the port `fileport_makeport` wraps an open
+    /// file in. The descriptor is this process's own reference to the file,
+    /// and `nosigpipe` the `SO_NOSIGPIPE` the socket had, which on Darwin is
+    /// the socket's and so travels with it.
+    FilePort {
+        file: Arc<OwnedFd>,
+        nosigpipe: bool,
+        refs: u32,
+    },
     /// A name this runtime answers for without a port behind it: the task, the
     /// host, the bootstrap server, a clock, the processor set.
     Special,
@@ -163,7 +172,10 @@ impl Right {
             // it as a send right because that is what the task and host ports
             // are on a real system.
             Right::Semaphore(_) | Right::Special => type_of(RIGHT_SEND),
-            Right::Task { .. } | Right::Thread { .. } | Right::Memory { .. } => type_of(RIGHT_SEND),
+            Right::Task { .. }
+            | Right::Thread { .. }
+            | Right::Memory { .. }
+            | Right::FilePort { .. } => type_of(RIGHT_SEND),
         }
     }
 }
@@ -171,6 +183,9 @@ impl Right {
 struct Space {
     names: HashMap<Name, Right>,
     next: Name,
+    /// The ports of send-once rights destroyed unused since the lock was
+    /// taken, each owed a `MACH_NOTIFY_SEND_ONCE` once it is let go.
+    unused_once: Vec<Address>,
 }
 
 fn space() -> &'static RwLock<Space> {
@@ -187,13 +202,23 @@ fn space() -> &'static RwLock<Space> {
         RwLock::new(Space {
             names,
             next: FIRST_DYNAMIC,
+            unused_once: Vec::new(),
         })
     })
 }
 
 fn with<R>(f: impl FnOnce(&mut Space) -> R) -> R {
-    let mut guard = space().write().unwrap_or_else(|e| e.into_inner());
-    f(&mut guard)
+    let (result, unused) = {
+        let mut guard = space().write().unwrap_or_else(|e| e.into_inner());
+        let result = f(&mut guard);
+        (result, std::mem::take(&mut guard.unused_once))
+    };
+    // Sent with the lock released: a notification may go to a port of this
+    // very task, and a receiver on another thread must be able to look it up.
+    for address in unused {
+        super::msg::deliver_send_once(address);
+    }
+    result
 }
 
 /// Put `right` in the table under a fresh name.
@@ -548,6 +573,30 @@ pub fn insert_memory(entry: Arc<super::memory::Entry>) -> Name {
     })
 }
 
+/// A send right to a new fileport for `file`.
+///
+/// A fresh name every time, where XNU would reuse the name of a port this
+/// space already holds: a fileport is made per call, and one that arrives in
+/// a message cannot be told from another for the same file.
+pub fn insert_fileport(file: OwnedFd, nosigpipe: bool) -> Name {
+    insert(Right::FilePort {
+        file: Arc::new(file),
+        nosigpipe,
+        refs: 1,
+    })
+}
+
+/// The file a fileport right holds, and its `SO_NOSIGPIPE`.
+pub fn fileport_of(name: Name) -> Option<(Arc<OwnedFd>, bool)> {
+    let guard = space().read().unwrap_or_else(|e| e.into_inner());
+    match guard.names.get(&name) {
+        Some(Right::FilePort {
+            file, nosigpipe, ..
+        }) => Some((file.clone(), *nosigpipe)),
+        _ => None,
+    }
+}
+
 /// The memory entry `name` is a send right to.
 pub fn memory_entry(name: Name) -> Option<Arc<super::memory::Entry>> {
     let guard = space().read().unwrap_or_else(|e| e.into_inner());
@@ -567,6 +616,37 @@ pub fn insert_receive(port: Receiver) -> Name {
     insert(Right::Receive(Owned::new(Arc::new(port))))
 }
 
+/// Put back a receive right [`move_receive`] took for a send that failed,
+/// under the name it had: the caller still holds that name, as Mach leaves a
+/// failed send's rights where they were, and the send right `move_receive`
+/// left behind folds back into it.
+pub fn return_receive(name: Name, port: Receiver) -> Name {
+    let mut owned = Owned::new(Arc::new(port));
+    with(|space| {
+        match space.names.remove(&name) {
+            Some(Right::Send {
+                address,
+                refs,
+                claim,
+            }) if address == owned.port.address() => {
+                owned.sends = refs;
+                owned.claim = claim;
+            }
+            None => {}
+            // Something else took the name while the send was failing.
+            Some(other) => {
+                space.names.insert(name, other);
+                let fresh = space.next;
+                space.next = space.next.wrapping_add(4);
+                space.names.insert(fresh, Right::Receive(owned));
+                return fresh;
+            }
+        }
+        space.names.insert(name, Right::Receive(owned));
+        name
+    })
+}
+
 /// Drop one user reference to `name`, removing it when the last one goes.
 ///
 /// This is `mach_port_deallocate`'s whole behaviour and the tail of several
@@ -580,15 +660,20 @@ fn release(space: &mut Space, name: Name) -> i32 {
         | Right::Dead { refs }
         | Right::Task { refs, .. }
         | Right::Thread { refs, .. }
-        | Right::Memory { refs, .. } => {
+        | Right::Memory { refs, .. }
+        | Right::FilePort { refs, .. } => {
             *refs -= 1;
             if *refs == 0 {
                 space.names.remove(&name);
             }
             KERN_SUCCESS
         }
-        Right::SendOnce { .. } => {
+        // Destroyed without being used, which XNU reports to the port as
+        // `MACH_NOTIFY_SEND_ONCE`: a server that drops a request is how its
+        // client stops waiting for the reply.
+        &mut Right::SendOnce { address } => {
             space.names.remove(&name);
+            space.unused_once.push(address);
             KERN_SUCCESS
         }
         // The send right under a receive right's name is the one released.
@@ -620,10 +705,37 @@ pub fn destroy(name: Name) -> i32 {
             return KERN_INVALID_RIGHT;
         }
         match space.names.remove(&name) {
+            Some(Right::SendOnce { address }) => {
+                space.unused_once.push(address);
+                KERN_SUCCESS
+            }
             Some(_) => KERN_SUCCESS,
             None => KERN_INVALID_NAME,
         }
     })
+}
+
+/// Give up one reference to `name` because a message used it: as
+/// [`release`], except that a send-once right is spent rather than
+/// destroyed, so its port is owed nothing.
+pub fn spend(name: Name) -> i32 {
+    with(|space| match space.names.get(&name) {
+        Some(Right::SendOnce { .. }) => {
+            space.names.remove(&name);
+            KERN_SUCCESS
+        }
+        _ => release(space, name),
+    })
+}
+
+/// The context a receive right's messages carry in their trailer: its
+/// `ip_context`, or zero for a strict guard, as `mach_port_get_context`.
+pub fn trailer_context(name: Name) -> u64 {
+    let guard = space().read().unwrap_or_else(|e| e.into_inner());
+    match guard.names.get(&name) {
+        Some(Right::Receive(owned)) if !owned.strict => owned.context,
+        _ => 0,
+    }
 }
 
 /// `kern_return_t mach_port_allocate(ipc_space_t, mach_port_right_t, mach_port_name_t *)`
@@ -725,7 +837,8 @@ pub extern "C" fn mach_port_mod_refs(task: Name, name: Name, right: u32, delta: 
             | Right::Dead { refs }
             | Right::Task { refs, .. }
             | Right::Thread { refs, .. }
-            | Right::Memory { refs, .. } => {
+            | Right::Memory { refs, .. }
+            | Right::FilePort { refs, .. } => {
                 let updated = *refs as i64 + delta as i64;
                 if updated < 0 {
                     return KERN_INVALID_VALUE;
@@ -782,7 +895,8 @@ pub unsafe extern "C" fn mach_port_get_refs(
             | Right::Dead { refs }
             | Right::Task { refs, .. }
             | Right::Thread { refs, .. }
-            | Right::Memory { refs, .. },
+            | Right::Memory { refs, .. }
+            | Right::FilePort { refs, .. },
             true,
         ) => *refs,
         (Right::Receive(owned), true) if right == RIGHT_SEND => owned.sends,
@@ -1303,7 +1417,8 @@ pub unsafe extern "C" fn mach_port_request_notification(
             super::msg::MOVE_SEND_ONCE | super::msg::MOVE_SEND
         )
     {
-        with(|space| release(space, notify));
+        // Held by the request from here on, so not destroyed unused.
+        spend(notify);
     }
     if !previous.is_null() {
         // SAFETY: the caller's `mach_port_name_t`.
