@@ -2272,6 +2272,16 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("glEndTransformFeedback", V),
     sig!("glFlushRenderAPPLE", V),
     sig!("glGenProgramPipelines", V, I32, P),
+    sig!("CFHostCancelInfoResolution", V, P, I32),
+    sig!("CFHostCreateWithName", P, P, P),
+    sig!("CFHostGetAddressing", P, P, P),
+    // The client callback is guest code the host calls back on the run loop;
+    // the context's `retain`, `release` and `copyDescription` are function
+    // pointers too, which a guest conventionally leaves null.
+    cbsig!([1], "CFHostSetClient", U8, P, P, P),
+    sig!("CFHostScheduleWithRunLoop", V, P, P, P),
+    sig!("CFHostStartInfoResolution", U8, P, I32, P),
+    sig!("CFHostUnscheduleFromRunLoop", V, P, P, P),
     sig!("glGenTransformFeedbacks", V, I32, P),
     sig!("glGetActiveUniformsiv", V, U32, I32, P, U32, P),
     sig!("glGetDoublev", V, U32, P),
