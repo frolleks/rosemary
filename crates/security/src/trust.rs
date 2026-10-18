@@ -1046,6 +1046,45 @@ pub unsafe extern "C" fn SecRandomCopyBytes(_rnd: CFTypeRef, count: usize, bytes
     }
 }
 
+/// `CFDataRef SecCertificateCopyNormalizedIssuerSequence(SecCertificateRef)`:
+/// the issuer, normalized as `createNormalizedX501Name` does and wrapped back
+/// in its `SEQUENCE`. What a keychain search by `kSecAttrIssuer` matches
+/// against.
+///
+/// # Safety
+///
+/// `certificate` is null or a live object.
+pub unsafe extern "C" fn SecCertificateCopyNormalizedIssuerSequence(
+    certificate: CFTypeRef,
+) -> CFTypeRef {
+    // SAFETY: the caller's guarantee.
+    let normalized = unsafe { der_of(certificate) }
+        .and_then(der::names)
+        .and_then(|(issuer, _)| der::normalized_name(issuer));
+    match normalized {
+        Some(content) => corefoundation::collections::new_data(der::sequence(&content)),
+        None => std::ptr::null(),
+    }
+}
+
+/// `CFDataRef SecCertificateCopyNormalizedSubjectSequence(SecCertificateRef)`.
+///
+/// # Safety
+///
+/// `certificate` is null or a live object.
+pub unsafe extern "C" fn SecCertificateCopyNormalizedSubjectSequence(
+    certificate: CFTypeRef,
+) -> CFTypeRef {
+    // SAFETY: the caller's guarantee.
+    let normalized = unsafe { der_of(certificate) }
+        .and_then(der::names)
+        .and_then(|(_, subject)| der::normalized_name(subject));
+    match normalized {
+        Some(content) => corefoundation::collections::new_data(der::sequence(&content)),
+        None => std::ptr::null(),
+    }
+}
+
 exports::exports! {
     functions {
         "SecCertificateCreateWithData" => SecCertificateCreateWithData,
@@ -1060,6 +1099,8 @@ exports::exports! {
         "SecTrustCopyAnchorCertificates" => SecTrustCopyAnchorCertificates,
         "SecCertificateCopyData" => SecCertificateCopyData,
         "SecCertificateGetData" => SecCertificateGetData,
+        "SecCertificateCopyNormalizedIssuerSequence" => SecCertificateCopyNormalizedIssuerSequence,
+        "SecCertificateCopyNormalizedSubjectSequence" => SecCertificateCopyNormalizedSubjectSequence,
     }
 }
 
