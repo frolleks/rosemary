@@ -1292,6 +1292,101 @@ unsafe extern "C" fn res_9_nclose(statp: *mut ResState) {
     nclose(unsafe { &mut *statp });
 }
 
+/// `int res_getservers(res_state statp, union res_sockaddr_union *set, int
+/// cnt)`: the first `cnt` of the context's name servers into `set`, from the
+/// extension where there is one - which is where an IPv6 server fits - and the
+/// number the context has, which may be more than were copied.
+///
+/// `res_init.c`: a server of any family but these two is copied as a zero
+/// family.
+///
+/// # Safety
+///
+/// `statp` is a `struct __res_state`, and `set` has room for `cnt` entries.
+unsafe extern "C" fn res_9_getservers(
+    statp: *mut ResState,
+    set: *mut SockaddrUnion,
+    cnt: c_int,
+) -> c_int {
+    // SAFETY: the caller's obligation.
+    let statp = unsafe { &*statp };
+    let count = statp.nscount.clamp(0, MAXNS as c_int).min(cnt.max(0)) as usize;
+    for i in 0..count {
+        // SAFETY: `set` has room for `cnt` entries, and `i` is below it.
+        let out = unsafe { &mut *set.add(i) };
+        let from: *const u8 = match statp.ext.is_null() {
+            // SAFETY: the extension `res_ninit` allocated.
+            false => unsafe { (&raw const (*statp.ext).nsaddrs[i]).cast() },
+            true => (&raw const statp.nsaddr_list[i]).cast(),
+        };
+        // SAFETY: both members start with the length and family bytes.
+        let family = unsafe { *from.add(1) };
+        let size = match family {
+            DARWIN_AF_INET => size_of::<SockaddrIn>(),
+            // `nsaddr_list` holds no `sockaddr_in6`: `res_setservers` stores
+            // one with a zero family there instead.
+            DARWIN_AF_INET6 => size_of::<SockaddrIn6>(),
+            _ => {
+                // SAFETY: a writable `res_sockaddr_union`.
+                out.sin.family = 0;
+                continue;
+            }
+        };
+        // SAFETY: `size` bytes of the source member, into the union.
+        unsafe { std::ptr::copy_nonoverlapping(from, (&raw mut *out).cast::<u8>(), size) };
+    }
+    statp.nscount
+}
+
+/// `void res_setservers(res_state statp, const union res_sockaddr_union *set,
+/// int cnt)`: replace the context's name servers with the IPv4 and IPv6 ones
+/// among the first `cnt` of `set`, up to `MAXNS`, closing its sockets and
+/// forgetting what it had measured of the old ones.
+///
+/// # Safety
+///
+/// `statp` is a `struct __res_state`, and `set` holds `cnt` entries.
+unsafe extern "C" fn res_9_setservers(
+    statp: *mut ResState,
+    set: *const SockaddrUnion,
+    cnt: c_int,
+) {
+    // SAFETY: the caller's obligation.
+    let statp = unsafe { &mut *statp };
+    nclose(statp);
+    statp.ext_nscount = 0;
+    let mut nserv = 0;
+    for i in 0..cnt.max(0) as usize {
+        if nserv == MAXNS {
+            break;
+        }
+        // SAFETY: `set` holds `cnt` entries.
+        let entry = unsafe { &*set.add(i) };
+        let size = match entry.family() {
+            DARWIN_AF_INET => size_of::<SockaddrIn>(),
+            DARWIN_AF_INET6 => size_of::<SockaddrIn6>(),
+            _ => continue,
+        };
+        if !statp.ext.is_null() {
+            // SAFETY: `size` bytes of the entry into the extension's slot.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    (&raw const *entry).cast::<u8>(),
+                    (&raw mut (*statp.ext).nsaddrs[nserv]).cast::<u8>(),
+                    size,
+                )
+            };
+        }
+        match size <= size_of::<SockaddrIn>() {
+            // SAFETY: the IPv4 member of the entry.
+            true => statp.nsaddr_list[nserv] = unsafe { entry.sin },
+            false => statp.nsaddr_list[nserv].family = 0,
+        }
+        nserv += 1;
+    }
+    statp.nscount = nserv as c_int;
+}
+
 /// `void res_ndestroy(res_state statp)`: close it, and free what `res_ninit`
 /// allocated.
 ///
@@ -1947,6 +2042,8 @@ exports::exports! {
         "res_9_ninit" => res_9_ninit,
         "res_9_nclose" => res_9_nclose,
         "res_9_ndestroy" => res_9_ndestroy,
+        "res_9_getservers" => res_9_getservers,
+        "res_9_setservers" => res_9_setservers,
         "res_9_nquery" => res_9_nquery,
         "res_9_nmkquery" => res_9_nmkquery,
         "res_9_nsend" => res_9_nsend,
@@ -2091,6 +2188,43 @@ mod tests {
     fn fresh_state() -> Box<ResState> {
         // SAFETY: zero is what `res_ninit` starts from.
         Box::new(unsafe { std::mem::zeroed() })
+    }
+
+    /// `res_getservers` answers from the extension, so an IPv6 server comes
+    /// back whole; `res_setservers` keeps only the families it knows.
+    #[test]
+    fn servers_are_read_back_and_replaced_as_res_init_c_does() {
+        let mut statp = fresh_state();
+        let conf = "nameserver 192.0.2.1\nnameserver 2001:db8::53\n";
+        assert_eq!(vinit(&mut statp, conf), 0);
+        let mut set = [SockaddrUnion { space: [0xee; 128] }; 3];
+        // SAFETY: a state `vinit` filled, and room for three.
+        assert_eq!(unsafe { res_9_getservers(&mut *statp, set.as_mut_ptr(), 3) }, 2);
+        // SAFETY: the members `res_getservers` wrote.
+        let (first, second) = unsafe { (set[0].sin, set[1].sin6) };
+        assert_eq!((first.family, first.addr, first.port), (2, [192, 0, 2, 1], 53u16.to_be_bytes()));
+        assert_eq!(second.family, DARWIN_AF_INET6);
+        assert_eq!(second.addr, "2001:db8::53".parse::<std::net::Ipv6Addr>().unwrap().octets());
+        // SAFETY: untouched past the servers there are.
+        assert_eq!(unsafe { set[2].space[1] }, 0xee);
+        // Fewer slots than servers: as many as fit, and the count there is.
+        let mut one = [SockaddrUnion { space: [0; 128] }; 1];
+        // SAFETY: as above.
+        assert_eq!(unsafe { res_9_getservers(&mut *statp, one.as_mut_ptr(), 1) }, 2);
+
+        let unknown = SockaddrUnion { space: [0; 128] };
+        let replacement = [unknown, set[1], set[0]];
+        // SAFETY: a state, and three entries.
+        unsafe { res_9_setservers(&mut *statp, replacement.as_ptr(), 3) };
+        assert_eq!(statp.nscount, 2, "the zero family is passed over");
+        assert_eq!(statp.nsaddr_list[0].family, 0, "an IPv6 server does not fit");
+        assert_eq!(statp.nsaddr_list[1].addr, [192, 0, 2, 1]);
+        assert_eq!(
+            socket_addr(&server_addr(&statp, 0)),
+            Some("[2001:db8::53]:53".parse().unwrap())
+        );
+        // SAFETY: a state `vinit` filled.
+        unsafe { res_9_ndestroy(&mut *statp) };
     }
 
     #[test]
