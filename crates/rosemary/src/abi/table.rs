@@ -952,6 +952,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGReleaseDisplayFadeReservation", I32, U32),
     // A `CGWindowLevel` and a `CGWindowLevelKey` are both `int32_t`.
     sig!("CGShieldingWindowLevel", I32),
+    sig!("CSBackupIsItemExcluded", BOOL, P, P),
+    sig!("CSBackupSetItemExcluded", I32, P, BOOL, BOOL),
     // `CGPoint` by value again; see `CGDisplayMoveCursorToPoint`.
     sig!("CGWarpMouseCursorPosition", I32, F64, F64),
     sig!("CGSetLocalEventsSuppressionInterval", I32, F64),
