@@ -187,6 +187,16 @@ pub fn has_thread(tid: i32) -> bool {
     sys::has_thread(tid)
 }
 
+/// Let a debugger that is not an ancestor of this process attach to it.
+///
+/// Linux's Yama module normally lets only an ancestor trace a process, which
+/// rules out attaching to a helper that was launched by another helper.
+/// Elsewhere there is no such rule this process could lift, so this does
+/// nothing.
+pub fn allow_debugger_attach() -> io::Result<()> {
+    sys::allow_debugger_attach()
+}
+
 /// `pid`'s arguments as the kernel holds them: each NUL-terminated, back to
 /// back.
 pub fn command_line(pid: i32) -> Option<Vec<u8>> {

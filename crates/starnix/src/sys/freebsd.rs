@@ -71,6 +71,10 @@ fn timeval_ns(time: libc::timeval) -> u64 {
         .saturating_add(time.tv_usec.max(0) as u64 * 1_000)
 }
 
+pub fn allow_debugger_attach() -> io::Result<()> {
+    Ok(())
+}
+
 pub fn identity(pid: i32) -> Option<Identity> {
     let proc = kinfo_proc(pid)?;
     let exe = sysctl::bytes(&proc_mib(libc::KERN_PROC_PATHNAME, pid))

@@ -167,6 +167,10 @@ fn kernel_process(pid: i32) -> Option<Process> {
     })
 }
 
+pub fn allow_debugger_attach() -> io::Result<()> {
+    Ok(())
+}
+
 pub fn identity(pid: i32) -> Option<Identity> {
     let Some(info) = bsdinfo(pid) else {
         let process = kernel_process(pid)?;
