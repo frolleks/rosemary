@@ -1825,6 +1825,20 @@ unsafe extern "C" fn is_visible(receiver: Id, _sel: Sel) -> u8 {
     (window_of(receiver).shown != 0) as u8
 }
 
+/// `-isOnActiveSpace`: there is one space, and a window is on it while it is
+/// ordered in.
+unsafe extern "C" fn is_on_active_space(receiver: Id, sel: Sel) -> u8 {
+    // SAFETY: the same receiver and prototype.
+    unsafe { is_visible(receiver, sel) }
+}
+
+/// `-keyViewSelectionDirection`: `NSDirectSelection`, as it is whenever the
+/// window is not in the middle of moving focus along its key view loop - and
+/// nothing here moves focus along one.
+unsafe extern "C" fn key_view_selection_direction(_receiver: Id, _sel: Sel) -> usize {
+    0
+}
+
 unsafe extern "C" fn screen(receiver: Id, _sel: Sel) -> Id {
     let class = objc::class::ptr(objc::class::lookup(c"NSScreen").expect("NSScreen")) as Id;
     // SAFETY: `+mainScreen` is `id (Class, SEL)`. The display a window is
@@ -2576,6 +2590,8 @@ pub(crate) fn install() {
             c"{CGRect={CGPoint=dd}{CGSize=dd}}56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
         "isMainWindow" => is_key_window, c"c16@0:8";
         "isVisible" => is_visible, c"c16@0:8";
+        "isOnActiveSpace" => is_on_active_space, c"c16@0:8";
+        "keyViewSelectionDirection" => key_view_selection_direction, c"Q16@0:8";
         "setIsVisible:" => set_is_visible, c"v20@0:8c16";
         // No window is ever attached as a sheet: nothing implements -beginSheet:.
         "isSheet" => no, c"c16@0:8";
