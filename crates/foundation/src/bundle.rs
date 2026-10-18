@@ -459,6 +459,39 @@ impl Layout {
             .find(|p| p.exists())
     }
 
+    /// `CFBundleCopyResourceURLForLocalization` and
+    /// `-pathForResource:ofType:inDirectory:forLocalization:`, by CF's rule
+    /// (`_copyResourceURLsFromBundle` in `CFBundle_Resources.c`): a
+    /// non-localized resource in `Resources/<directory>` is the answer whatever
+    /// localization is asked for, and otherwise only
+    /// `Resources/<localization>.lproj/<directory>` is searched - not the
+    /// other localizations, and with none named, no `.lproj` at all.
+    pub fn resource_for_localization(
+        &self,
+        name: &str,
+        extension: &str,
+        directory: &str,
+        localization: &str,
+    ) -> Option<PathBuf> {
+        let leaf = match extension.is_empty() {
+            true => name.to_string(),
+            false => format!("{name}.{extension}"),
+        };
+        let plain = self.resources.join(directory).join(&leaf);
+        if plain.exists() {
+            return Some(plain);
+        }
+        if localization.is_empty() {
+            return None;
+        }
+        let localized = self
+            .resources
+            .join(format!("{localization}.lproj"))
+            .join(directory)
+            .join(&leaf);
+        localized.exists().then_some(localized)
+    }
+
     /// The main nib, if the `Info.plist` names one and it is there.
     ///
     /// `.nib` and `.storyboardc` are both directories in a modern bundle and a
@@ -542,6 +575,29 @@ pub mod cf {
             return std::ptr::null_mut();
         };
         file_url(&path, false)
+    }
+
+    /// `CFURLRef CFBundleCopyResourceURLForLocalization(CFBundleRef,
+    /// CFStringRef name, CFStringRef type, CFStringRef subDir, CFStringRef
+    /// localizationName)`
+    unsafe extern "C" fn CFBundleCopyResourceURLForLocalization(
+        bundle: Id,
+        name: Id,
+        kind: Id,
+        subdirectory: Id,
+        localization: Id,
+    ) -> Id {
+        // SAFETY: each is an `NSString` or nil.
+        let strings = unsafe { super::strings([name, kind, subdirectory, localization]) };
+        let Some([name, kind, subdirectory, localization]) = strings else {
+            return std::ptr::null_mut();
+        };
+        match layout(bundle).and_then(|b| {
+            b.resource_for_localization(&name, &kind, &subdirectory, &localization)
+        }) {
+            Some(path) => file_url(&path, false),
+            None => std::ptr::null_mut(),
+        }
     }
 
     /// `CFURLRef CFBundleCopyExecutableURL(CFBundleRef)`
@@ -893,6 +949,7 @@ pub mod cf {
             "CFBundleCopyLocalizedString" => CFBundleCopyLocalizedString,
             "CFBundleGetMainBundle" => CFBundleGetMainBundle,
             "CFBundleCopyResourceURL" => CFBundleCopyResourceURL,
+            "CFBundleCopyResourceURLForLocalization" => CFBundleCopyResourceURLForLocalization,
             "CFBundleCopyExecutableURL" => CFBundleCopyExecutableURL,
             "CFBundleCopyBundleURL" => CFBundleCopyBundleURL,
             "CFBundleCopyResourcesDirectoryURL" => CFBundleCopyResourcesDirectoryURL,
@@ -954,6 +1011,22 @@ fn entries_of_type(directory: &Path, extension: &str) -> Vec<PathBuf> {
 /// The main bundle, or `None` for a program that is not in one.
 pub fn main() -> Option<&'static Layout> {
     *MAIN.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The UTF-8 of each `NSString` (nil reads as empty), or `None` if one is not
+/// UTF-8.
+///
+/// # Safety
+///
+/// Each is an `NSString` or nil.
+unsafe fn strings<const N: usize>(objects: [objc::object::Id; N]) -> Option<[String; N]> {
+    let mut out: [String; N] = std::array::from_fn(|_| String::new());
+    for (slot, object) in out.iter_mut().zip(objects) {
+        // SAFETY: the caller's `NSString` or nil.
+        let bytes = unsafe { crate::string::bytes(object) };
+        *slot = String::from_utf8(bytes).ok()?;
+    }
+    Some(out)
 }
 
 /// Resolve a resource in the bundle object the guest supplied.
@@ -1079,6 +1152,38 @@ mod tests {
 
         std::fs::remove_dir_all(resources.join("xx.lproj")).unwrap();
         assert_eq!(layout.preferred_localizations(), ["en"]);
+    }
+
+    /// `CFBundleCopyResourceURLForLocalization`'s order: the non-localized
+    /// copy whatever is asked for, then only the named `.lproj`.
+    #[test]
+    fn a_localized_resource_is_found_only_in_its_own_lproj() {
+        let exe = scratch("for-localization", INFO);
+        let layout = Layout::enclosing(&exe).expect("a bundle");
+        let resources = layout.resources.clone();
+        std::fs::create_dir_all(resources.join("fr.lproj/sub")).unwrap();
+        std::fs::write(resources.join("fr.lproj/sub/menu.json"), "fr").unwrap();
+        std::fs::write(resources.join("English.lproj/menu.json"), "en").unwrap();
+
+        let found = |name, kind, dir, loc| layout.resource_for_localization(name, kind, dir, loc);
+        assert_eq!(
+            found("menu", "json", "sub", "fr"),
+            Some(resources.join("fr.lproj/sub/menu.json"))
+        );
+        assert_eq!(found("menu", "json", "sub", "de"), None, "not another lproj");
+        assert_eq!(found("menu", "json", "", "fr"), None, "fr has it only in sub");
+        assert_eq!(found("menu", "json", "", ""), None, "no lproj without a name");
+        assert_eq!(
+            found("menu", "json", "", "English"),
+            Some(resources.join("English.lproj/menu.json"))
+        );
+
+        std::fs::write(resources.join("menu.json"), "plain").unwrap();
+        assert_eq!(
+            found("menu", "json", "", "English"),
+            Some(resources.join("menu.json")),
+            "the non-localized copy first"
+        );
     }
 
     #[test]
@@ -1751,6 +1856,50 @@ pub(crate) mod class {
         path(unsafe { layout_of(receiver) }.and_then(|b| b.resource_in(name, kind, directory)))
     }
 
+    /// `-pathForResource:ofType:inDirectory:forLocalization:`, which
+    /// Foundation answers with `CFBundleCopyResourceURLForLocalization`.
+    unsafe extern "C" fn path_for_resource_for_localization(
+        receiver: Id,
+        _sel: Sel,
+        name: Id,
+        kind: Id,
+        directory: Id,
+        localization: Id,
+    ) -> Id {
+        // SAFETY: each argument is an `NSString` or nil.
+        let Some([name, kind, directory, localization]) =
+            (unsafe { super::strings([name, kind, directory, localization]) })
+        else {
+            return std::ptr::null_mut();
+        };
+        // SAFETY: the receiver is an `NSBundle`.
+        path(unsafe { layout_of(receiver) }.and_then(|b| {
+            b.resource_for_localization(&name, &kind, &directory, &localization)
+        }))
+    }
+
+    /// `-URLForResource:withExtension:subdirectory:localization:`, the URL
+    /// form of the above.
+    unsafe extern "C" fn url_for_resource_for_localization(
+        receiver: Id,
+        _sel: Sel,
+        name: Id,
+        kind: Id,
+        directory: Id,
+        localization: Id,
+    ) -> Id {
+        // SAFETY: each argument is an `NSString` or nil.
+        let Some([name, kind, directory, localization]) =
+            (unsafe { super::strings([name, kind, directory, localization]) })
+        else {
+            return std::ptr::null_mut();
+        };
+        // SAFETY: the receiver is an `NSBundle`.
+        resource_file_url(unsafe { layout_of(receiver) }.and_then(|b| {
+            b.resource_for_localization(&name, &kind, &directory, &localization)
+        }))
+    }
+
     /// `-infoDictionary`: the whole `Info.plist` as objects.
     ///
     /// This was refused until `crate::objectify` existed, and the reason is
@@ -1787,6 +1936,8 @@ pub(crate) mod class {
             "pathForResource:ofType:" => path_for_resource, c"@32@0:8@16@24";
             "URLForResource:withExtension:" => url_for_resource, c"@32@0:8@16@24";
             "pathForResource:ofType:inDirectory:" => path_for_resource_in_directory, c"@40@0:8@16@24@32";
+            "pathForResource:ofType:inDirectory:forLocalization:" => path_for_resource_for_localization, c"@48@0:8@16@24@32@40";
+            "URLForResource:withExtension:subdirectory:localization:" => url_for_resource_for_localization, c"@48@0:8@16@24@32@40";
             "infoDictionary" => info_dictionary, c"@16@0:8";
             "executableName" => executable_name, c"*16@0:8";
             "localizedStringForKey:value:table:" => localized_string_for_key, c"@40@0:8@16@24@32";
