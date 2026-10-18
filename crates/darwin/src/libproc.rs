@@ -777,7 +777,7 @@ const PROC_LISTPIDSPATH_PATH_IS_VOLUME: u32 = 1;
 /// - and then, while there is room, those that have it mapped, which as in
 /// libproc can name a process the first pass named already. A process this
 /// one is not shown the files of is not a match, as one libproc cannot
-/// inspect is not. No descriptor here was opened `O_EVTONLY`, so
+/// inspect is not. Which descriptors were opened `O_EVTONLY` is not kept, so
 /// `PROC_LISTPIDSPATH_EXCLUDE_EVTONLY` excludes none.
 ///
 /// # Safety
