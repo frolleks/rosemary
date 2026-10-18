@@ -114,6 +114,11 @@ struct Node {
     sublayers: Vec<usize>,
     superlayer: usize,
     masks_to_bounds: bool,
+    /// `-isGeometryFlipped`: this layer's sublayers are placed from the top
+    /// of its bounds rather than the bottom.
+    geometry_flipped: bool,
+    /// `-autoresizingMask`, a `CAAutoresizingMask`.
+    autoresizing_mask: u32,
     hidden: bool,
     opacity: f64,
     animations: Vec<(String, Running)>,
@@ -136,6 +141,8 @@ impl Default for Node {
             sublayers: Vec::new(),
             superlayer: 0,
             masks_to_bounds: false,
+            geometry_flipped: false,
+            autoresizing_mask: 0,
             hidden: false,
             opacity: 1.0,
             animations: Vec::new(),
@@ -372,6 +379,128 @@ pub(crate) fn set_masks(layer: Id, masks: bool) {
 
 unsafe extern "C" fn set_masks_to_bounds(receiver: Id, _sel: Sel, value: u8) {
     set_masks(receiver, value != 0);
+}
+
+unsafe extern "C" fn is_geometry_flipped(receiver: Id, _sel: Sel) -> u8 {
+    read_node(receiver, |node| {
+        u8::from(node.is_some_and(|node| node.geometry_flipped))
+    })
+}
+
+unsafe extern "C" fn set_geometry_flipped(receiver: Id, _sel: Sel, value: u8) {
+    with_node(receiver, |node| node.geometry_flipped = value != 0);
+    changed(receiver);
+}
+
+/// `-contentsAreFlipped`: whether the layer's contents end up drawn upside
+/// down, which is an odd number of flipped layers from here to the root.
+unsafe extern "C" fn contents_are_flipped(receiver: Id, _sel: Sel) -> u8 {
+    let mut flipped = false;
+    let mut layer = receiver as usize;
+    for _ in 0..64 {
+        if layer == 0 {
+            break;
+        }
+        let (here, up) = read_node(layer as Id, |node| {
+            node.map_or((false, 0), |node| (node.geometry_flipped, node.superlayer))
+        });
+        flipped ^= here;
+        layer = up;
+    }
+    u8::from(flipped)
+}
+
+unsafe extern "C" fn autoresizing_mask(receiver: Id, _sel: Sel) -> u32 {
+    read_node(receiver, |node| node.map_or(0, |node| node.autoresizing_mask))
+}
+
+unsafe extern "C" fn set_autoresizing_mask(receiver: Id, _sel: Sel, mask: u32) {
+    with_node(receiver, |node| node.autoresizing_mask = mask);
+}
+
+/// `CAAutoresizingMask`.
+mod autoresizing {
+    pub const MIN_X_MARGIN: u32 = 1;
+    pub const WIDTH_SIZABLE: u32 = 2;
+    pub const MAX_X_MARGIN: u32 = 4;
+    pub const MIN_Y_MARGIN: u32 = 8;
+    pub const HEIGHT_SIZABLE: u32 = 16;
+    pub const MAX_Y_MARGIN: u32 = 32;
+}
+
+/// A layer's bounds went from `old` to their current size: tell it, so its
+/// sublayers follow their masks.
+///
+/// Sent, because `-resizeSublayersWithOldSize:` and
+/// `-resizeWithOldSuperlayerSize:` are the methods Core Animation documents
+/// for a subclass to override.
+pub(crate) fn bounds_resized(layer: Id, old: NSSize) {
+    if read_node(layer, |node| node.is_none_or(|node| node.sublayers.is_empty())) {
+        return;
+    }
+    // SAFETY: `-resizeSublayersWithOldSize:` is `void (id, SEL, CGSize)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, NSSize) = std::mem::transmute(objc::msg::entry());
+        f(layer, objc::sel::get("resizeSublayersWithOldSize:"), old);
+    }
+}
+
+unsafe extern "C" fn resize_sublayers_with_old_size(receiver: Id, _sel: Sel, old: NSSize) {
+    let sublayers = read_node(receiver, |node| {
+        node.map(|node| node.sublayers.clone()).unwrap_or_default()
+    });
+    let sel = objc::sel::get("resizeWithOldSuperlayerSize:");
+    for sublayer in sublayers {
+        // SAFETY: as in `bounds_resized`.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, NSSize) = std::mem::transmute(objc::msg::entry());
+            f(sublayer as Id, sel, old);
+        }
+    }
+}
+
+/// `-resizeWithOldSuperlayerSize:`: move and size this layer's frame as its
+/// mask says, now that the superlayer went from `old` to its current size.
+unsafe extern "C" fn resize_with_old_superlayer_size(receiver: Id, _sel: Sel, old: NSSize) {
+    let (mask, superlayer) = read_node(receiver, |node| {
+        node.map_or((0, 0), |node| (node.autoresizing_mask, node.superlayer))
+    });
+    if mask == 0 || superlayer == 0 {
+        return;
+    }
+    let new = crate::layer::bounds_of(superlayer as Id).size;
+    // SAFETY: a layer of this crate's.
+    let before = unsafe { frame(receiver, objc::sel::get("frame")) };
+    let (x, width) = crate::view::distribute(
+        mask & autoresizing::MIN_X_MARGIN != 0,
+        mask & autoresizing::WIDTH_SIZABLE != 0,
+        mask & autoresizing::MAX_X_MARGIN != 0,
+        before.origin.x,
+        before.size.width,
+        old.width,
+        new.width,
+    );
+    let (y, height) = crate::view::distribute(
+        mask & autoresizing::MIN_Y_MARGIN != 0,
+        mask & autoresizing::HEIGHT_SIZABLE != 0,
+        mask & autoresizing::MAX_Y_MARGIN != 0,
+        before.origin.y,
+        before.size.height,
+        old.height,
+        new.height,
+    );
+    let after = NSRect {
+        origin: NSPoint { x, y },
+        size: NSSize { width, height },
+    };
+    if after == before {
+        return;
+    }
+    // SAFETY: `-setFrame:` is `void (id, SEL, CGRect)`.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, NSRect) = std::mem::transmute(objc::msg::entry());
+        f(receiver, objc::sel::get("setFrame:"), after);
+    }
 }
 
 unsafe extern "C" fn is_hidden(receiver: Id, _sel: Sel) -> u8 {
@@ -1113,6 +1242,7 @@ struct Presented {
     opacity: f64,
     hidden: bool,
     masks_to_bounds: bool,
+    geometry_flipped: bool,
     sublayers: Vec<usize>,
 }
 
@@ -1139,9 +1269,58 @@ fn presentation(layer: Id, now: f64) -> Presented {
             opacity: presented(animations, "opacity", node.opacity, now).clamp(0.0, 1.0),
             hidden: node.hidden,
             masks_to_bounds: node.masks_to_bounds,
+            geometry_flipped: node.geometry_flipped,
             sublayers: node.sublayers.clone(),
         }
     })
+}
+
+/// A layer's space for its sublayers, in the root's: the point `p` in it is
+/// at `origin.x + p.x` and `origin.y + p.y`, or `origin.y - p.y` once an odd
+/// number of flipped layers lie between it and the root.
+#[derive(Clone, Copy)]
+struct Space {
+    origin: NSPoint,
+    down: bool,
+}
+
+impl Space {
+    /// `r`, given in this space, in the root's.
+    fn place(&self, r: NSRect) -> NSRect {
+        let y = match self.down {
+            false => self.origin.y + r.origin.y,
+            true => self.origin.y - r.origin.y - r.size.height,
+        };
+        NSRect {
+            origin: NSPoint {
+                x: self.origin.x + r.origin.x,
+                y,
+            },
+            size: r.size,
+        }
+    }
+
+    /// The space of a layer whose frame here is `frame`, whose bounds start
+    /// at `bounds_origin`, and which may itself be flipped.
+    fn inner(&self, frame: NSRect, bounds_origin: NSPoint, flipped: bool) -> Space {
+        let sign = match self.down {
+            false => 1.0,
+            true => -1.0,
+        };
+        let x = self.origin.x + frame.origin.x - bounds_origin.x;
+        // Flipped, a sublayer's y is measured down from the top of the bounds.
+        let y = match flipped {
+            false => frame.origin.y - bounds_origin.y,
+            true => frame.origin.y + bounds_origin.y + frame.size.height,
+        };
+        Space {
+            origin: NSPoint {
+                x,
+                y: self.origin.y + sign * y,
+            },
+            down: self.down ^ flipped,
+        }
+    }
 }
 
 /// How a view's layer tree lands in its window's pixels.
@@ -1302,6 +1481,20 @@ fn with_contents<T>(layer: Id, f: impl FnOnce(Source) -> T) -> Option<T> {
 }
 
 /// Where contents of `width` by `height` window pixels land in `bounds`.
+/// The gravity that lands where `gravity` names in a layer whose contents are
+/// flipped: top and bottom are the layer's own, so they trade places.
+fn flip_vertically(gravity: Gravity) -> Gravity {
+    match gravity {
+        Gravity::Top => Gravity::Bottom,
+        Gravity::Bottom => Gravity::Top,
+        Gravity::TopLeft => Gravity::BottomLeft,
+        Gravity::TopRight => Gravity::BottomRight,
+        Gravity::BottomLeft => Gravity::TopLeft,
+        Gravity::BottomRight => Gravity::TopRight,
+        other => other,
+    }
+}
+
 fn place(gravity: Gravity, bounds: Rect, width: f64, height: f64) -> (f64, f64, f64, f64) {
     let (bx, by) = (bounds.x as f64, bounds.y as f64);
     let (bw, bh) = (bounds.width as f64, bounds.height as f64);
@@ -1337,6 +1530,7 @@ fn draw_contents(
     scale: (f64, f64),
     clip: Rect,
     opacity: f64,
+    flipped: bool,
 ) {
     if opacity <= 0.0 || bounds.is_empty() {
         return;
@@ -1344,6 +1538,10 @@ fn draw_contents(
     let gravity = read_node(layer, |node| {
         node.map_or(Gravity::Resize, |node| node.gravity)
     });
+    let gravity = match flipped {
+        true => flip_vertically(gravity),
+        false => gravity,
+    };
     let contents_scale = crate::layer::contents_scale_of(layer);
     with_contents(layer, |source| {
         let (x, y, width, height) = place(
@@ -1454,6 +1652,7 @@ pub(crate) fn render(view: Id, store: &mut Store, rect: Rect, clip: Rect, pass: 
                 (mapping.scale_x, mapping.scale_y),
                 clip,
                 root_presented.opacity,
+                root_presented.geometry_flipped,
             );
             false
         }
@@ -1463,17 +1662,22 @@ pub(crate) fn render(view: Id, store: &mut Store, rect: Rect, clip: Rect, pass: 
                 false => clip,
             };
             let mut animating = retire(root, now);
-            // The root layer's space is the view's bounds.
-            let origin = NSPoint {
-                x: view_bounds.origin.x - root_presented.bounds_origin.x,
-                y: view_bounds.origin.y - root_presented.bounds_origin.y,
-            };
+            // The root layer's frame is the view's bounds.
+            let space = Space {
+                origin: NSPoint::default(),
+                down: false,
+            }
+            .inner(
+                view_bounds,
+                root_presented.bounds_origin,
+                root_presented.geometry_flipped,
+            );
             for child in root_presented.sublayers {
                 animating |= draw_layer(
                     store,
                     &mapping,
                     child as Id,
-                    origin,
+                    space,
                     clip,
                     root_presented.opacity,
                     now,
@@ -1485,14 +1689,13 @@ pub(crate) fn render(view: Id, store: &mut Store, rect: Rect, clip: Rect, pass: 
     }
 }
 
-/// Draw `layer`, whose superlayer's coordinate space starts at `origin` in the
-/// root's space, and its sublayers.
+/// Draw `layer`, whose superlayer's space is `space`, and its sublayers.
 #[allow(clippy::too_many_arguments)]
 fn draw_layer(
     store: &mut Store,
     mapping: &Mapping,
     layer: Id,
-    origin: NSPoint,
+    space: Space,
     clip: Rect,
     opacity: f64,
     now: f64,
@@ -1506,13 +1709,7 @@ fn draw_layer(
     if presented.hidden {
         return animating;
     }
-    let frame = NSRect {
-        origin: NSPoint {
-            x: origin.x + presented.frame.origin.x,
-            y: origin.y + presented.frame.origin.y,
-        },
-        size: presented.frame.size,
-    };
+    let frame = space.place(presented.frame);
     let pixels = mapping.to_pixels(frame);
     let opacity = opacity * presented.opacity;
     if let Some(color) = presented.background {
@@ -1525,15 +1722,17 @@ fn draw_layer(
         (mapping.scale_x, mapping.scale_y),
         clip,
         opacity,
+        space.down ^ presented.geometry_flipped,
     );
     let clip = match presented.masks_to_bounds {
         true => clip.intersection(&pixels),
         false => clip,
     };
-    let inner = NSPoint {
-        x: frame.origin.x - presented.bounds_origin.x,
-        y: frame.origin.y - presented.bounds_origin.y,
-    };
+    let inner = space.inner(
+        presented.frame,
+        presented.bounds_origin,
+        presented.geometry_flipped,
+    );
     for child in presented.sublayers {
         animating |= draw_layer(
             store,
@@ -1576,6 +1775,13 @@ pub(crate) fn install() {
         "removeFromSuperlayer" => remove_from_superlayer, c"v16@0:8";
         "masksToBounds" => masks_to_bounds, c"c16@0:8";
         "setMasksToBounds:" => set_masks_to_bounds, c"v20@0:8c16";
+        "isGeometryFlipped" => is_geometry_flipped, c"c16@0:8";
+        "setGeometryFlipped:" => set_geometry_flipped, c"v20@0:8c16";
+        "contentsAreFlipped" => contents_are_flipped, c"c16@0:8";
+        "autoresizingMask" => autoresizing_mask, c"I16@0:8";
+        "setAutoresizingMask:" => set_autoresizing_mask, c"v20@0:8I16";
+        "resizeSublayersWithOldSize:" => resize_sublayers_with_old_size, c"v32@0:8{CGSize=dd}16";
+        "resizeWithOldSuperlayerSize:" => resize_with_old_superlayer_size, c"v32@0:8{CGSize=dd}16";
         "isHidden" => is_hidden, c"c16@0:8";
         "setHidden:" => set_hidden, c"v20@0:8c16";
         "opacity" => opacity, c"f16@0:8";
@@ -1927,6 +2133,80 @@ mod tests {
             assert_eq!(iosurface::IOSurfaceIsInUse(surface), 0);
             corefoundation::api::CFRelease(surface);
         }
+        objc::arc::pool_pop(pool);
+    }
+
+    fn frame_of(layer: Id) -> NSRect {
+        // SAFETY: `-frame` returns a CGRect, in memory on x86_64.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, Sel) -> NSRect =
+                std::mem::transmute(objc::msg::entry_stret());
+            f(layer, objc::sel::get("frame"))
+        }
+    }
+
+    fn red_rows(store: &Store) -> Vec<usize> {
+        (0..store.height as usize)
+            .filter(|y| store.pixels[y * store.width as usize * 4 + 2] == 255)
+            .collect()
+    }
+
+    /// A sizable sublayer follows its superlayer, and a flipped one places
+    /// its own sublayers from the top: the shape of a compositor that keeps
+    /// its content at the origin.
+    #[test]
+    fn a_flipped_sizable_sublayer_puts_its_sublayers_at_the_top() {
+        crate::bootstrap();
+        let pool = objc::arc::pool_push();
+        let class = objc::class::ptr(objc::class::lookup(c"CALayer").unwrap()) as Id;
+        let background: Id = send(class, "layer", ());
+        let flipped: Id = send(class, "layer", ());
+        assert_eq!(send::<(), u8>(flipped, "isGeometryFlipped", ()), 0);
+        send::<u8, ()>(flipped, "setGeometryFlipped:", 1);
+        assert_eq!(send::<(), u8>(flipped, "isGeometryFlipped", ()), 1);
+        send::<u32, ()>(flipped, "setAutoresizingMask:", 2 | 16);
+        assert_eq!(send::<(), u32>(flipped, "autoresizingMask", ()), 18);
+        send::<NSPoint, ()>(flipped, "setAnchorPoint:", NSPoint::default());
+        send::<Id, ()>(background, "addSublayer:", flipped);
+
+        let view = objc::object::create_instance(objc::class::lookup(c"NSView").unwrap(), 0);
+        let view: Id = send(view, "initWithFrame:", rect(0.0, 0.0, 10.0, 4.0));
+        send::<Id, ()>(view, "setLayer:", background);
+        send::<u8, ()>(view, "setWantsLayer:", 1);
+        let frame = frame_of(flipped);
+        assert_eq!(frame, rect(0.0, 0.0, 10.0, 4.0));
+
+        let child: Id = send(class, "layer", ());
+        send::<NSPoint, ()>(child, "setAnchorPoint:", NSPoint::default());
+        send::<NSRect, ()>(child, "setFrame:", rect(0.0, 0.0, 10.0, 1.0));
+        // SAFETY: a fresh colour, retained by the layer below.
+        let red = unsafe { crate::cgcontext::CGColorCreateGenericRGB(1.0, 0.0, 0.0, 1.0) };
+        send::<CFTypeRef, ()>(child, "setBackgroundColor:", red);
+        send::<Id, ()>(flipped, "addSublayer:", child);
+        assert_eq!(send::<(), u8>(child, "contentsAreFlipped", ()), 1);
+        assert_eq!(send::<(), u8>(flipped, "contentsAreFlipped", ()), 1);
+        assert_eq!(send::<(), u8>(background, "contentsAreFlipped", ()), 0);
+
+        let whole = Rect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 4,
+        };
+        let mut store = Store::for_tests(10, 4);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert_eq!(red_rows(&store), [0]);
+
+        // Unflipped, the same frame is the bottom row.
+        send::<u8, ()>(flipped, "setGeometryFlipped:", 0);
+        let mut store = Store::for_tests(10, 4);
+        render(view, &mut store, whole, whole, Pass::Sublayers);
+        assert_eq!(red_rows(&store), [3]);
+
+        // Growing the view grows the sizable layer by as much.
+        send::<NSRect, ()>(view, "setFrame:", rect(0.0, 0.0, 12.0, 6.0));
+        let frame = frame_of(flipped);
+        assert_eq!(frame, rect(0.0, 0.0, 12.0, 6.0));
         objc::arc::pool_pop(pool);
     }
 
