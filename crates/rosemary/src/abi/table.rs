@@ -732,6 +732,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGDirectDisplayCopyCurrentMetalDevice", P, I32),
     sig!("MTLCreateSystemDefaultDevice", P),
     sig!("CGAssociateMouseAndMouseCursorPosition", I32, I32),
+    sig!("vm_protect", I32, U32, U64, U64, I32, I32),
+    sig!("mach_vm_protect", I32, U32, U64, U64, I32, I32),
     // `boolean_t CGCursorIsVisible(void)` - an `int`, not a `CGError`, and the
     // pair to `CGDisplayHideCursor`.
     sig!("CGCursorIsVisible", U32),
