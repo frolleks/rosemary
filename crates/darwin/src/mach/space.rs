@@ -136,6 +136,12 @@ pub enum Right {
     },
     /// A send right to a thread of some task, by its host thread id.
     Thread { pid: i32, tid: i32, refs: u32 },
+    /// A send right to a named memory entry, the port XNU makes for a range
+    /// of a VM object (see [`super::memory`]).
+    Memory {
+        entry: Arc<super::memory::Entry>,
+        refs: u32,
+    },
     /// A name this runtime answers for without a port behind it: the task, the
     /// host, the bootstrap server, a clock, the processor set.
     Special,
@@ -157,7 +163,7 @@ impl Right {
             // it as a send right because that is what the task and host ports
             // are on a real system.
             Right::Semaphore(_) | Right::Special => type_of(RIGHT_SEND),
-            Right::Task { .. } | Right::Thread { .. } => type_of(RIGHT_SEND),
+            Right::Task { .. } | Right::Thread { .. } | Right::Memory { .. } => type_of(RIGHT_SEND),
         }
     }
 }
@@ -523,6 +529,34 @@ pub fn count() -> usize {
         .len()
 }
 
+/// A send right to a memory entry, under the name already held for it if
+/// there is one, as XNU keeps one name per port.
+pub fn insert_memory(entry: Arc<super::memory::Entry>) -> Name {
+    with(|space| {
+        for (name, right) in space.names.iter_mut() {
+            if let Right::Memory { entry: held, refs } = right
+                && held.id == entry.id
+            {
+                *refs = refs.saturating_add(1);
+                return *name;
+            }
+        }
+        let name = space.next;
+        space.next = space.next.wrapping_add(4);
+        space.names.insert(name, Right::Memory { entry, refs: 1 });
+        name
+    })
+}
+
+/// The memory entry `name` is a send right to.
+pub fn memory_entry(name: Name) -> Option<Arc<super::memory::Entry>> {
+    let guard = space().read().unwrap_or_else(|e| e.into_inner());
+    match guard.names.get(&name) {
+        Some(Right::Memory { entry, .. }) => Some(entry.clone()),
+        _ => None,
+    }
+}
+
 /// Add a send-once right, which is never shared with an existing name.
 pub fn insert_send_once(address: Address) -> Name {
     insert(Right::SendOnce { address })
@@ -545,7 +579,8 @@ fn release(space: &mut Space, name: Name) -> i32 {
         Right::Send { refs, .. }
         | Right::Dead { refs }
         | Right::Task { refs, .. }
-        | Right::Thread { refs, .. } => {
+        | Right::Thread { refs, .. }
+        | Right::Memory { refs, .. } => {
             *refs -= 1;
             if *refs == 0 {
                 space.names.remove(&name);
@@ -689,7 +724,8 @@ pub extern "C" fn mach_port_mod_refs(task: Name, name: Name, right: u32, delta: 
             Right::Send { refs, .. }
             | Right::Dead { refs }
             | Right::Task { refs, .. }
-            | Right::Thread { refs, .. } => {
+            | Right::Thread { refs, .. }
+            | Right::Memory { refs, .. } => {
                 let updated = *refs as i64 + delta as i64;
                 if updated < 0 {
                     return KERN_INVALID_VALUE;
@@ -741,7 +777,14 @@ pub unsafe extern "C" fn mach_port_get_refs(
     };
     let refs = match (held, held.type_bits() & type_of(right) != 0) {
         (_, false) => 0,
-        (Right::Send { refs, .. } | Right::Dead { refs }, true) => *refs,
+        (
+            Right::Send { refs, .. }
+            | Right::Dead { refs }
+            | Right::Task { refs, .. }
+            | Right::Thread { refs, .. }
+            | Right::Memory { refs, .. },
+            true,
+        ) => *refs,
         (Right::Receive(owned), true) if right == RIGHT_SEND => owned.sends,
         (_, true) => 1,
     };

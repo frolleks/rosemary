@@ -137,6 +137,7 @@ fn query(file: &File, names: bool) -> Result<Vec<Mapping>, Errno> {
                 execute: q.vma_flags & VMA_EXECUTABLE != 0,
                 shared: q.vma_flags & VMA_SHARED != 0,
                 offset: q.vma_offset,
+                file: (q.inode != 0).then(|| (libc::makedev(q.dev_major, q.dev_minor), q.inode)),
             },
             dev: libc::makedev(q.dev_major, q.dev_minor),
             inode: q.inode,
@@ -155,6 +156,10 @@ fn parse_mapping(line: &str) -> Option<Mapping> {
     let offset = u64::from_str_radix(fields.next()?, 16).ok()?;
     let (major, minor) = fields.next()?.split_once(':')?;
     let inode = fields.next()?.parse::<u64>().ok()?;
+    let dev = libc::makedev(
+        u32::from_str_radix(major, 16).ok()?,
+        u32::from_str_radix(minor, 16).ok()?,
+    );
     let mut rest = line;
     for _ in 0..5 {
         rest = rest.trim_start();
@@ -170,11 +175,9 @@ fn parse_mapping(line: &str) -> Option<Mapping> {
             execute: perms.get(2) == Some(&b'x'),
             shared: perms.get(3) == Some(&b's'),
             offset,
+            file: (inode != 0).then_some((dev, inode)),
         },
-        dev: libc::makedev(
-            u32::from_str_radix(major, 16).ok()?,
-            u32::from_str_radix(minor, 16).ok()?,
-        ),
+        dev,
         inode,
         path: (inode != 0 && !path.is_empty()).then(|| PathBuf::from(path)),
     })
@@ -196,6 +199,9 @@ mod tests {
             (0x7f00, 0x7f80, 0x1000)
         );
         assert!(region.read && !region.write && region.execute && region.shared);
+        assert_eq!(region.file, Some((libc::makedev(8, 1), 1234)));
+        let anonymous = parse_line("7f00-7f80 rw-p 00000000 00:00 0").unwrap();
+        assert_eq!(anonymous.file, None);
     }
 
     #[test]

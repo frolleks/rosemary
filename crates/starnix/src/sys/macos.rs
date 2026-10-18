@@ -238,6 +238,7 @@ fn regions_of(pid: i32) -> Vec<Region> {
             execute: info.protection & 4 != 0,
             shared,
             offset: info.offset,
+            file: None,
         });
         address = info.address + info.size;
     }
