@@ -58,16 +58,16 @@ pub const KEYS: &[(&str, &str)] = &[
 /// exactly these, and an item that matched on more would be one a caller could
 /// never find again after storing it with a label it did not repeat.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-struct Identity {
-    class: String,
-    service: String,
-    account: String,
+pub(crate) struct Identity {
+    pub(crate) class: String,
+    pub(crate) service: String,
+    pub(crate) account: String,
 }
 
 static ITEMS: Mutex<BTreeMap<Identity, Vec<u8>>> = Mutex::new(BTreeMap::new());
 static LOADED: std::sync::Once = std::sync::Once::new();
 
-fn items() -> std::sync::MutexGuard<'static, BTreeMap<Identity, Vec<u8>>> {
+pub(crate) fn items() -> std::sync::MutexGuard<'static, BTreeMap<Identity, Vec<u8>>> {
     LOADED.call_once(|| {
         *ITEMS.lock().unwrap_or_else(|e| e.into_inner()) = load();
     });
@@ -84,6 +84,10 @@ fn store_path() -> PathBuf {
 /// anything, including a tab, a newline or a zero - and the three fields around
 /// it are the identity, which must stay readable for the file to be debuggable.
 fn load() -> BTreeMap<Identity, Vec<u8>> {
+    // A test's items are its own: never the user's keychain, read or written.
+    if cfg!(test) {
+        return BTreeMap::new();
+    }
     let Ok(text) = std::fs::read_to_string(store_path()) else {
         return BTreeMap::new();
     };
@@ -100,7 +104,10 @@ fn load() -> BTreeMap<Identity, Vec<u8>> {
         .collect()
 }
 
-fn save(items: &BTreeMap<Identity, Vec<u8>>) {
+pub(crate) fn save(items: &BTreeMap<Identity, Vec<u8>>) {
+    if cfg!(test) {
+        return;
+    }
     let mut text = String::new();
     for (identity, value) in items {
         text.push_str(&format!(
@@ -219,8 +226,10 @@ pub unsafe extern "C" fn SecItemAdd(attributes: CFTypeRef, result: *mut CFTypeRe
     if items.contains_key(&identity) {
         return DUPLICATE_ITEM;
     }
-    items.insert(identity, data);
+    items.insert(identity.clone(), data);
     save(&items);
+    drop(items);
+    crate::seckeychain::alert(crate::seckeychain::event::ADD, &identity);
     SUCCESS
 }
 
@@ -272,6 +281,8 @@ pub unsafe extern "C" fn SecItemDelete(query: CFTypeRef) -> OSStatus {
         return ITEM_NOT_FOUND;
     }
     save(&items);
+    drop(items);
+    crate::seckeychain::alert(crate::seckeychain::event::DELETE, &identity);
     SUCCESS
 }
 
@@ -296,8 +307,10 @@ pub unsafe extern "C" fn SecItemUpdate(query: CFTypeRef, changes: CFTypeRef) -> 
     if !items.contains_key(&identity) {
         return ITEM_NOT_FOUND;
     }
-    items.insert(identity, data);
+    items.insert(identity.clone(), data);
     save(&items);
+    drop(items);
+    crate::seckeychain::alert(crate::seckeychain::event::UPDATE, &identity);
     SUCCESS
 }
 
