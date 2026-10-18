@@ -38,6 +38,7 @@ pub mod compat;
 pub mod copyfile;
 pub mod credentials;
 pub mod data;
+pub mod dirhelper;
 pub mod dirent;
 pub mod dispatch;
 pub mod divergent;
