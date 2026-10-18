@@ -2287,6 +2287,7 @@ dependencies = [
  "sdl3",
  "security",
  "server",
+ "starnix",
  "static_init",
  "videotoolbox",
  "webkit",

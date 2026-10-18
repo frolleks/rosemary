@@ -100,6 +100,11 @@ pub fn enabled() -> bool {
                  x86-64 listings: {}",
                 listing_dir().display()
             );
+            // A helper is started by another guest, so a debugger started
+            // from a shell is never its ancestor.
+            if let Err(error) = starnix::process::allow_debugger_attach() {
+                eprintln!("rosemary: a debugger may not be able to attach: {error}");
+            }
         }
         on
     };
