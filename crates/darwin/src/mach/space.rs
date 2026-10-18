@@ -126,8 +126,14 @@ pub enum Right {
     Semaphore(Arc<super::sync::Semaphore>),
     /// A send right to a task: this one under a name other than
     /// [`TASK_SELF`], or another guest's, from `task_for_pid`. The pid is the
-    /// whole of it - every question about the task goes to the process server.
-    Task { pid: i32, refs: u32 },
+    /// whole of it - every question about the task goes to the process server
+    /// - but for the flavor of port it is, which is what the calls taking it
+    /// accept or refuse.
+    Task {
+        pid: i32,
+        flavor: TaskFlavor,
+        refs: u32,
+    },
     /// A send right to a thread of some task, by its host thread id.
     Thread { pid: i32, tid: i32, refs: u32 },
     /// A name this runtime answers for without a port behind it: the task, the
@@ -361,19 +367,53 @@ pub fn insert_send_with(address: Address, carried: Option<OwnedFd>) -> Name {
     })
 }
 
-/// A send right to the task `pid`, reusing the name already held for it.
+/// `mach_task_flavor_t`: which of a task's four ports a right is to, in
+/// descending capability. XNU makes each a port of its own (`IKOT_TASK_CONTROL`,
+/// `_READ`, `_INSPECT`, `_NAME`), so they answer to different names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TaskFlavor {
+    Control = 0,
+    Read = 1,
+    Inspect = 2,
+    Name = 3,
+}
+
+impl TaskFlavor {
+    pub fn from_raw(flavor: u32) -> Option<TaskFlavor> {
+        Some(match flavor {
+            0 => TaskFlavor::Control,
+            1 => TaskFlavor::Read,
+            2 => TaskFlavor::Inspect,
+            3 => TaskFlavor::Name,
+            _ => return None,
+        })
+    }
+
+    /// XNU's `task_port_kotype_valid_for_flavor`: a port serves any call that
+    /// asks for its own flavor or a weaker one.
+    pub fn serves(self, wanted: TaskFlavor) -> bool {
+        self <= wanted
+    }
+}
+
+/// A send right to the task `pid`'s port of `flavor`, reusing the name
+/// already held for it.
 ///
-/// One name per task for the same reason as [`insert_send`]: `top` compares
+/// One name per port for the same reason as [`insert_send`]: `top` compares
 /// what two calls handed back, and a task that answered to two names would be
-/// two tasks. This task is always [`TASK_SELF`].
-pub fn insert_task(pid: i32) -> Name {
-    if pid == own_pid() {
+/// two tasks. This task's control port is always [`TASK_SELF`].
+pub fn insert_task(pid: i32, flavor: TaskFlavor) -> Name {
+    if pid == own_pid() && flavor == TaskFlavor::Control {
         return TASK_SELF;
     }
     with(|space| {
         for (name, right) in space.names.iter_mut() {
-            if let Right::Task { pid: held, refs } = right
-                && *held == pid
+            if let Right::Task {
+                pid: held,
+                flavor: held_flavor,
+                refs,
+            } = right
+                && (*held, *held_flavor) == (pid, flavor)
             {
                 *refs = refs.saturating_add(1);
                 return *name;
@@ -381,7 +421,14 @@ pub fn insert_task(pid: i32) -> Name {
         }
         let name = space.next;
         space.next = space.next.wrapping_add(4);
-        space.names.insert(name, Right::Task { pid, refs: 1 });
+        space.names.insert(
+            name,
+            Right::Task {
+                pid,
+                flavor,
+                refs: 1,
+            },
+        );
         name
     })
 }
@@ -425,14 +472,27 @@ fn own_pid() -> i32 {
     starnix::process::me()
 }
 
-/// The pid of the task `name` is a right to.
+/// The pid of the task `name` is a right to, whichever of its ports.
 pub fn task_pid(name: Name) -> Option<i32> {
+    task_of(name).map(|(pid, _)| pid)
+}
+
+/// The pid of the task `name` is a right to, if it is a port that serves a
+/// call wanting `wanted` - as XNU's `convert_port_to_task_with_flavor`.
+pub fn task_pid_as(name: Name, wanted: TaskFlavor) -> Option<i32> {
+    task_of(name)
+        .filter(|(_, flavor)| flavor.serves(wanted))
+        .map(|(pid, _)| pid)
+}
+
+/// The task `name` is a right to, and which of its ports.
+pub fn task_of(name: Name) -> Option<(i32, TaskFlavor)> {
     if name == TASK_SELF {
-        return Some(own_pid());
+        return Some((own_pid(), TaskFlavor::Control));
     }
     let guard = space().read().unwrap_or_else(|e| e.into_inner());
     match guard.names.get(&name) {
-        Some(Right::Task { pid, .. }) => Some(*pid),
+        Some(Right::Task { pid, flavor, .. }) => Some((*pid, *flavor)),
         _ => None,
     }
 }
