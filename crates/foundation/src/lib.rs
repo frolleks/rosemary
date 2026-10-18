@@ -44,6 +44,7 @@ pub mod strings;
 pub mod task;
 pub mod thread;
 pub mod timer;
+mod port;
 mod timezone;
 pub mod unarchiver;
 pub mod url;
@@ -82,6 +83,7 @@ pub fn bootstrap() {
         locale::install();
         formatter::install();
         timer::install();
+        port::install();
         timezone::install();
         thread::install();
         operation::install();
@@ -273,6 +275,7 @@ pub const CLASSES: &[&str] = &[
     "NSLocale",
     "NSException",
     "NSRunLoop",
+    "NSPort",
     "NSTimer",
     "NSTimeZone",
     "NSFormatter",
@@ -372,6 +375,14 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
 ];
 
 pub const NOTIFICATION_NAMES: &[&str] = &[
+    "NSPortDidBecomeInvalidNotification",
+    // Observed, and posted by nothing here: no time zone change, defaults
+    // write from another process, or background read is followed.
+    "NSSystemTimeZoneDidChangeNotification",
+    "NSUserDefaultsDidChangeNotification",
+    "NSFileHandleReadCompletionNotification",
+    "NSFileHandleReadToEndOfFileCompletionNotification",
+    "NSFileHandleDataAvailableNotification",
     "NSProcessInfoThermalStateDidChangeNotification",
     "NSProcessInfoPowerStateDidChangeNotification",
     "NSCurrentLocaleDidChangeNotification",
