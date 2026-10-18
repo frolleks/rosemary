@@ -978,6 +978,30 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CVDisplayLinkGetNominalOutputVideoRefreshPeriod", V, P),
     sig!("CVDisplayLinkRelease", V, P),
     sig!("CVDisplayLinkRetain", P, P),
+    sig!("dispatch_queue_set_specific", V, P, P, P, P),
+    sig!("dispatch_queue_get_specific", P, P, P),
+    sig!("dispatch_get_specific", P, P),
+    sig!("dispatch_set_target_queue", V, P, P),
+    cbsig!([1], "dispatch_source_set_registration_handler_f", V, P, P),
+    cbsig!(
+        [1],
+        "dispatch_source_set_mandatory_cancel_handler_f",
+        V,
+        P,
+        P
+    ),
+    sig!("dispatch_source_testcancel", I64, P),
+    sig!("dispatch_source_get_data", U64, P),
+    sig!("dispatch_source_get_extended_data", U64, P, P, U64),
+    sig!("dispatch_source_get_mask", U64, P),
+    sig!("dispatch_source_get_handle", U64, P),
+    sig!("dispatch_source_merge_data", V, P, U64),
+    sig!("dispatch_activate", V, P),
+    // Never returns: the main thread drains the main queue from then on.
+    rsig!("dispatch_main", V),
+    // `dispatch_walltime(const struct timespec *, int64_t delta)`.
+    sig!("dispatch_walltime", U64, P, I64),
+    sig!("dispatch_queue_attr_make_with_qos_class", P, P, U32, I32),
     sig!("CVDisplayLinkSetCurrentCGDisplay", I32, P, U32),
     sig!(
         "CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext",
