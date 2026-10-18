@@ -184,6 +184,28 @@ pub fn is_known(p: *const Class) -> bool {
             .contains_key(&(p as usize))
 }
 
+/// Every class and metaclass this runtime has built, in the order it built
+/// them - for a diagnostic that asks what the runtime answers, not for a
+/// send.
+pub fn every() -> Vec<&'static Class> {
+    let mut all = Vec::new();
+    let base = ARENA.load(Ordering::Relaxed);
+    if base != 0 && base != NO_ARENA {
+        let built = BUILT.load(Ordering::Acquire);
+        // SAFETY: the first `built` slots of the arena are written classes,
+        // published before the count was.
+        all.extend((0..built).map(|i| unsafe { &*((base + i * CLASS_STRIDE) as *const Class) }));
+    }
+    if OVERFLOWED.load(Ordering::Acquire) {
+        for shard in &OVERFLOW {
+            let shard = shard.read().unwrap_or_else(|e| e.into_inner());
+            // SAFETY: each key is a leaked class, never freed.
+            all.extend(shard.keys().map(|&p| unsafe { &*(p as *const Class) }));
+        }
+    }
+    all
+}
+
 fn arena_slot() -> Option<*mut Class> {
     if ARENA.load(Ordering::Relaxed) == 0 {
         // SAFETY: a fresh private anonymous reservation.

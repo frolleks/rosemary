@@ -354,7 +354,13 @@ pub unsafe extern "C" fn objc_constructInstance(cls: *const c_void, bytes: *mut 
     }
     // SAFETY: the caller says `bytes` is at least `instance_size` bytes.
     unsafe { *(bytes as *mut *mut Class) = crate::class::ptr(cls) };
-    bytes
+    // objc4's `OBJECT_CONSTRUCT_NONE`: the C++ ivars are constructed, and a
+    // failure is nil with the bytes left to the caller.
+    // SAFETY: the caller's bytes, now an instance of `cls`.
+    match unsafe { crate::object::construct_instance(bytes, cls) } {
+        true => bytes,
+        false => std::ptr::null_mut(),
+    }
 }
 
 pub unsafe extern "C" fn objc_destructInstance(object: Id) -> Id {
