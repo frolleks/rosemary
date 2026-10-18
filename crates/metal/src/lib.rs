@@ -180,6 +180,7 @@ pub fn bootstrap() {
             "supportsFamily:" => supports_family, c"B24@0:8Q16";
             "argumentBuffersSupport" => argument_buffers_tier, c"Q16@0:8";
             "argumentBuffersTier" => argument_buffers_tier, c"Q16@0:8";
+            "readWriteTextureSupport" => read_write_texture_tier, c"Q16@0:8";
             "supportsShaderBarycentricCoordinates" => no, c"B16@0:8";
             "areBarycentricCoordsSupported" => no, c"B16@0:8";
             "supportsRaytracing" => no, c"B16@0:8";
