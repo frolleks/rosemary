@@ -1071,6 +1071,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // which is the 32-bit port name the registry calls are asked in terms of -
     // the one place in this family where a handle *becomes* a port name.
     sig!("IOHIDDeviceGetService", U32, P),
+    sig!("pthread_stack_frame_decode_np", U64, U64, P),
+    sig!("posix_spawnattr_set_csm_np", I32, P, U32),
+    sig!("posix_spawnattr_setnosmt_np", I32, P),
+    sig!("vsnprintf_l", I32, P, U64, P, P, P),
     // `IOReturn IOHIDDeviceGetValue(IOHIDDeviceRef, IOHIDElementRef,
     // IOHIDValueRef *)` - the polled counterpart to the value callback below.
     sig!("IOHIDDeviceGetValue", I32, P, P, P),
