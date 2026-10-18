@@ -35,6 +35,7 @@ pub mod operation;
 pub mod paths;
 pub use corefoundation::plist;
 pub mod pool;
+mod port;
 pub mod processinfo;
 pub mod proxy;
 pub mod runtime;
@@ -82,6 +83,7 @@ pub fn bootstrap() {
         locale::install();
         formatter::install();
         timer::install();
+        port::install();
         timezone::install();
         thread::install();
         operation::install();
@@ -273,6 +275,7 @@ pub const CLASSES: &[&str] = &[
     "NSLocale",
     "NSException",
     "NSRunLoop",
+    "NSPort",
     "NSTimer",
     "NSTimeZone",
     "NSFormatter",
@@ -375,6 +378,7 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     "NSProcessInfoThermalStateDidChangeNotification",
     "NSProcessInfoPowerStateDidChangeNotification",
     "NSCurrentLocaleDidChangeNotification",
+    "NSPortDidBecomeInvalidNotification",
 ];
 
 #[cfg(test)]
