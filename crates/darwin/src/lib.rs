@@ -83,6 +83,7 @@ pub mod random;
 pub mod regex;
 mod resolv;
 pub mod rlimit;
+pub mod sandbox;
 pub mod sched;
 pub mod select;
 pub mod shm;
@@ -386,6 +387,7 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     callback::MODULE,
     rlimit::MODULE,
     shm::MODULE,
+    sandbox::MODULE,
     oslog::MODULE,
     backtrace::MODULE,
     #[cfg(target_arch = "x86_64")]
