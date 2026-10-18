@@ -255,6 +255,21 @@ pub unsafe fn context(raw: *const c_void) -> Option<Context> {
     unsafe { sys::signal::context(raw) }
 }
 
+/// Only the interrupted program counter, from the same context as [`context`]:
+/// what a handler on a small alternate stack can afford, where a whole
+/// [`Context`] takes kilobytes of an unoptimized build's frame.
+///
+/// # Safety
+///
+/// As [`context`].
+pub unsafe fn pc(raw: *const c_void) -> Option<u64> {
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's guarantee.
+    unsafe { sys::signal::pc(raw) }
+}
+
 /// Write `context` into the one the kernel restores from when the handler
 /// returns. Registers, floating-point state and mask; nothing else.
 ///

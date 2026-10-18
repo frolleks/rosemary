@@ -242,6 +242,16 @@ mod machine {
 
 pub use machine::{context, set_context};
 
+/// Only the program counter. A whole context is cheap enough here.
+///
+/// # Safety
+///
+/// As [`context`].
+pub unsafe fn pc(raw: *const c_void) -> Option<u64> {
+    // SAFETY: the caller's guarantee.
+    unsafe { context(raw) }.map(|c| c.machine.pc())
+}
+
 /// `SIGRTMAX` in `<sys/signal.h>`, which the `libc` crate does not carry.
 const SIGRTMAX: c_int = 126;
 

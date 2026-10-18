@@ -15,6 +15,16 @@ pub unsafe fn context(_: *const c_void) -> Option<Context> {
 
 pub unsafe fn set_context(_: *mut c_void, _: &Context) {}
 
+/// Only the program counter. A whole context is cheap enough here.
+///
+/// # Safety
+///
+/// As [`context`].
+pub unsafe fn pc(raw: *const c_void) -> Option<u64> {
+    // SAFETY: the caller's guarantee.
+    unsafe { context(raw) }.map(|c| c.machine.pc())
+}
+
 pub fn private_signal(_index: u8) -> Option<c_int> {
     None
 }

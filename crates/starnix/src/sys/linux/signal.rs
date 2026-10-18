@@ -78,6 +78,12 @@ mod machine {
     pub(super) const SW_BYTES: usize = 464;
     const FP_XSTATE_MAGIC1: u32 = 0x4650_5853;
 
+    pub unsafe fn pc(raw: *const c_void) -> Option<u64> {
+        // SAFETY: the caller's live `ucontext_t`.
+        let uc = unsafe { &*raw.cast::<libc::ucontext_t>() };
+        Some(uc.uc_mcontext.gregs[libc::REG_RIP as usize] as u64)
+    }
+
     pub unsafe fn context(raw: *const c_void) -> Option<Context> {
         // SAFETY: the caller's live `ucontext_t`.
         let uc = unsafe { &*raw.cast::<libc::ucontext_t>() };
@@ -191,6 +197,12 @@ mod machine {
         None
     }
 
+    pub unsafe fn pc(raw: *const c_void) -> Option<u64> {
+        // SAFETY: the caller's live `ucontext_t`.
+        let uc = unsafe { &*raw.cast::<libc::ucontext_t>() };
+        Some(uc.uc_mcontext.pc)
+    }
+
     pub unsafe fn context(raw: *const c_void) -> Option<Context> {
         // SAFETY: the caller's live `ucontext_t`.
         let uc = unsafe { &*raw.cast::<libc::ucontext_t>() };
@@ -256,6 +268,10 @@ mod machine {
 mod machine {
     use super::*;
 
+    pub unsafe fn pc(_: *const c_void) -> Option<u64> {
+        None
+    }
+
     pub unsafe fn context(_: *const c_void) -> Option<Context> {
         None
     }
@@ -263,7 +279,7 @@ mod machine {
     pub unsafe fn set_context(_: *mut c_void, _: &Context) {}
 }
 
-pub use machine::{context, set_context};
+pub use machine::{context, pc, set_context};
 
 /// Linux's realtime signals, counted down from the top, where glibc's own
 /// two at the bottom are not.
@@ -337,5 +353,29 @@ mod tests {
         }
         assert_eq!(after[..16], LOW, "the handler's xmm15 was not restored");
         assert_eq!(after[16..], before[16..], "the ymm15 upper half was lost");
+    }
+    static PCS: std::sync::Mutex<Option<(Option<u64>, Option<u64>)>> = std::sync::Mutex::new(None);
+
+    extern "C" fn record_pcs(_: c_int, _: *mut libc::siginfo_t, raw: *mut c_void) {
+        // SAFETY: the kernel's context for this handler.
+        let both = unsafe { (pc(raw), context(raw).map(|c| c.machine.pc())) };
+        *PCS.lock().unwrap() = Some(both);
+    }
+
+    /// The program counter read on its own is the one in the whole context.
+    #[test]
+    fn the_pc_alone_is_the_contexts_pc() {
+        let signo = libc::SIGRTMAX() - 1;
+        // SAFETY: a handler of this module's own, for a signal nothing else uses.
+        unsafe {
+            let mut action: libc::sigaction = core::mem::zeroed();
+            action.sa_sigaction = record_pcs as *const () as usize;
+            action.sa_flags = libc::SA_SIGINFO;
+            assert_eq!(libc::sigaction(signo, &action, core::ptr::null_mut()), 0);
+            libc::raise(signo);
+        }
+        let (alone, whole) = PCS.lock().unwrap().take().expect("the handler ran");
+        assert!(alone.is_some_and(|pc| pc != 0));
+        assert_eq!(alone, whole);
     }
 }
