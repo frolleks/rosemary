@@ -57,13 +57,13 @@ int main(int argc, char **argv) {
     CHECK(dlsym(framework, "CGLFlushDrawable") == (void *)CGLFlushDrawable);
     CHECK(dlsym(framework, "gluOrtho2D") == (void *)gluOrtho2D);
     CHECK(dlsym(framework, "glGetString") == (void *)glGetString);
-    CHECK(dlsym(framework, "CGLChoosePixelFormat") == NULL);
-    CHECK(dlsym(RTLD_DEFAULT, "CGLChoosePixelFormat") == NULL);
+    CHECK(dlsym(framework, "CGLCreatePBuffer") == NULL);
+    CHECK(dlsym(RTLD_DEFAULT, "CGLCreatePBuffer") == NULL);
     CHECK(dlsym(framework, "gluPerspective") == NULL);
     CHECK(dlsym(RTLD_DEFAULT, "gluPerspective") == NULL);
     // A real host handle must obey the same fallback policy.
     void *system = dlopen("/usr/lib/libSystem.B.dylib", RTLD_LAZY);
-    CHECK(system && dlsym(system, "CGLChoosePixelFormat") == NULL);
+    CHECK(system && dlsym(system, "CGLCreatePBuffer") == NULL);
     GLint zero = 0, one = 1;
     CHECK(CGLSetParameter(first_handle, kCGLCPSwapInterval, &zero) == kCGLNoError);
     CHECK(CGLSetParameter(second_handle, kCGLCPSwapInterval, &one) == kCGLNoError);
