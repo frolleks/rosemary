@@ -30,10 +30,6 @@ pub const CLAIMED: &[&str] = &[
     "index",
     "rindex",
     "abort",
-    "atof",
-    // Off Darwin these go through `crate::malloc`'s zones; on it, the host's
-    // own libsystem_malloc is the right answer.
-    #[cfg(target_os = "macos")]
     "calloc",
     "div",
     #[cfg(target_os = "macos")]
@@ -44,8 +40,6 @@ pub const CLAIMED: &[&str] = &[
     #[cfg(target_os = "macos")]
     "realloc",
     "srand",
-    "strtod",
-    "strtof",
     "strtol",
     "strtoll",
     "strtoul",
