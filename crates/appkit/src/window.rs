@@ -1299,24 +1299,43 @@ unsafe extern "C" fn content_view(receiver: Id, _sel: Sel) -> Id {
 /// draws into a fraction of the window and reports a backing store that does not
 /// match it.
 unsafe extern "C" fn set_content_view(receiver: Id, _sel: Sel, view: Id) {
-    let window = window_of(receiver);
-    let old = std::mem::replace(&mut window.content_view, objc::arc::retain(view));
+    let old = window_of(receiver).content_view;
+    let same = old == view;
+    // SAFETY: null or an object this runtime allocated.
+    let leaves = !same && !old.is_null() && unsafe { crate::view::window_of(old) } == receiver;
+    if leaves {
+        crate::view::will_move_to_window(old, std::ptr::null_mut());
+    }
+    // SAFETY: as above.
+    let arrives = !same && !view.is_null() && unsafe { crate::view::window_of(view) } != receiver;
+    if arrives {
+        crate::view::will_move_to_window(view, receiver);
+    }
+    let old = std::mem::replace(
+        &mut window_of(receiver).content_view,
+        objc::arc::retain(view),
+    );
     // The view being replaced may outlive this window: Qt keeps its own reference
     // and moves the view elsewhere, and a stale link would answer `-window` with
     // this object after it is freed.
     if old != view {
         // SAFETY: null or an object this runtime allocated.
         unsafe { crate::view::detach_window(old, receiver) };
+        if leaves {
+            crate::view::did_move_to_window(old);
+        }
     }
     objc::arc::release(old);
     // SAFETY: `view` is null or an object this runtime allocated.
     unsafe { crate::view::set_window(view, receiver) };
-    if view.is_null() || window.sdl.is_null() {
-        return;
+    if !view.is_null() && !window_of(receiver).sdl.is_null() {
+        fit_content_view(receiver);
+        // SAFETY: a view this crate made, now this window's.
+        unsafe { crate::view::update_tracking_areas(view) };
     }
-    fit_content_view(receiver);
-    // SAFETY: a view this crate made, now this window's.
-    unsafe { crate::view::update_tracking_areas(view) };
+    if arrives {
+        crate::view::did_move_to_window(view);
+    }
 }
 
 unsafe extern "C" fn window_controller(receiver: Id, _sel: Sel) -> Id {
