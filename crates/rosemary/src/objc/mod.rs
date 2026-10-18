@@ -687,7 +687,10 @@ fn register_class(
     }
 
     // C++ ivars, before the pair is registered because this adds two methods.
-    if let Some(ctor) = cxx_construct {
+    // Only for objc4: the builtin runtime runs every `.cxx_construct` itself,
+    // on every instance however it was made, and one installed here too would
+    // construct each instance twice.
+    if let Some(ctor) = cxx_construct.filter(|_| host::backend() == host::Backend::Native) {
         // SAFETY: `cls` is a class this pass allocated and has not registered,
         // and `ctor` is the `IMP` it installed for `.cxx_construct` on it.
         for reason in unsafe { cxxivars::install(cls, ctor, &name) } {
