@@ -145,7 +145,7 @@ static FRAMEWORKS: &[Framework] = &[
         version: 'A',
         umbrellas: &[],
         provide: Some(corevideo::provide),
-        data: None,
+        data: Some(corevideo::data_symbols),
         symbol: Some(corevideo::symbol),
     },
     Framework {
