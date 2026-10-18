@@ -226,6 +226,17 @@ pub fn threads(pid: i32) -> Option<Vec<Thread>> {
     Some(found.into_values().collect())
 }
 
+pub fn allow_debugger_attach() -> io::Result<()> {
+    // SAFETY: a prctl with two integer arguments.
+    let rc = unsafe { libc::prctl(libc::PR_SET_PTRACER, libc::PR_SET_PTRACER_ANY, 0, 0, 0) };
+    match rc {
+        0 => Ok(()),
+        // EINVAL: no Yama, so nothing stands in the way.
+        _ if io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) => Ok(()),
+        _ => Err(io::Error::last_os_error()),
+    }
+}
+
 pub fn has_thread(tid: i32) -> bool {
     std::path::Path::new(&format!("/proc/self/task/{tid}")).exists()
 }
