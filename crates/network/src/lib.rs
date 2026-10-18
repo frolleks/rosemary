@@ -66,6 +66,9 @@ struct State {
     phase: Phase,
     /// `1 << nw_interface_type_t` for each type the path may not use.
     prohibited: u32,
+    /// The monitor object, retained from start until the cancel handler has
+    /// run: Apple's keeps a started monitor alive after its creator lets go.
+    held: usize,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -112,8 +115,12 @@ fn lock(monitor: &Monitor) -> MutexGuard<'_, State> {
 fn monitor_class() -> &'static Class {
     static CLASS: std::sync::OnceLock<&'static Class> = std::sync::OnceLock::new();
     CLASS.get_or_init(|| {
-        let class =
-            corefoundation::base::register(c"OS_nw_path_monitor", None, size_of::<MonitorBody>(), false);
+        let class = corefoundation::base::register(
+            c"OS_nw_path_monitor",
+            None,
+            size_of::<MonitorBody>(),
+            false,
+        );
         class.add_method(
             objc::sel::get("dealloc"),
             monitor_dealloc as *const c_void,
@@ -236,6 +243,8 @@ struct Delivery {
     handler: Block,
     /// A path at +1, or nil for the cancel handler.
     path: Id,
+    /// An object to release once the handler has run, or nil.
+    release: Id,
 }
 
 unsafe extern "C" fn deliver(context: *mut c_void) {
@@ -252,11 +261,17 @@ unsafe extern "C" fn deliver(context: *mut c_void) {
         }
     }
     objc::arc::release(delivery.path);
+    objc::arc::release(delivery.release);
 }
 
-/// Run `handler` on `queue` with `path`, which this call owns.
-fn post(queue: u64, handler: Block, path: Id) {
-    let context = Box::into_raw(Box::new(Delivery { handler, path }));
+/// Run `handler` on `queue` with `path`, then release `release`; this call
+/// owns both.
+fn post(queue: u64, handler: Block, path: Id, release: Id) {
+    let context = Box::into_raw(Box::new(Delivery {
+        handler,
+        path,
+        release,
+    }));
     // SAFETY: a live queue the monitor retains, and `deliver` takes back the
     // box it is handed.
     unsafe { darwin::dispatch::queue::async_f(queue, context as u64, deliver as *const () as u64) };
@@ -272,7 +287,12 @@ fn report(monitor: &Monitor, status: Status) {
     let Some(handler) = state.update.clone() else {
         return;
     };
-    post(state.queue, handler, make_path(status));
+    post(
+        state.queue,
+        handler,
+        make_path(status),
+        std::ptr::null_mut(),
+    );
 }
 
 /// What a started monitor's thread does: report the path, then again each
@@ -301,20 +321,28 @@ fn watch(monitor: Arc<Monitor>) {
 }
 
 /// Stop `monitor` and run its cancel handler, the first time only.
-fn cancel(monitor: &Monitor) {
+///
+/// Answers the reference a started monitor holds on itself when nothing was
+/// posted to release it; the caller releases it once `monitor` is no longer
+/// borrowed, as that release may be the last.
+#[must_use]
+fn cancel(monitor: &Monitor) -> Id {
     let mut state = lock(monitor);
     if state.phase == Phase::Cancelled {
-        return;
+        return std::ptr::null_mut();
     }
     state.phase = Phase::Cancelled;
     monitor.cancelled.notify_all();
     // No update after the cancel handler: the handler is dropped here, and a
     // report already queued runs before the cancel handler on the same queue.
     state.update = None;
-    if let (Some(handler), queue) = (state.cancel.take(), state.queue)
-        && queue != 0
-    {
-        post(queue, handler, std::ptr::null_mut());
+    let held = std::mem::take(&mut state.held) as Id;
+    match (state.cancel.take(), state.queue) {
+        (Some(handler), queue) if queue != 0 => {
+            post(queue, handler, std::ptr::null_mut(), held);
+            std::ptr::null_mut()
+        }
+        _ => held,
     }
 }
 
@@ -392,6 +420,7 @@ pub unsafe extern "C" fn nw_path_monitor_start(object: Id) {
             return;
         }
         state.phase = Phase::Started;
+        state.held = objc::arc::retain(object) as usize;
     }
     // SAFETY: `object` is a monitor, whose `Arc` the body holds a count of.
     let shared = unsafe {
@@ -405,15 +434,15 @@ pub unsafe extern "C" fn nw_path_monitor_start(object: Id) {
     if spawned.is_err() {
         // Without a thread there is no one to report, and a monitor that will
         // never report is better told apart as cancelled.
-        cancel(monitor);
+        let held = cancel(monitor);
+        objc::arc::release(held);
     }
 }
 
 /// `void nw_path_monitor_cancel(nw_path_monitor_t)`
 pub unsafe extern "C" fn nw_path_monitor_cancel(object: Id) {
-    if let Some(monitor) = monitor_of(object) {
-        cancel(monitor);
-    }
+    let held = monitor_of(object).map_or(std::ptr::null_mut(), cancel);
+    objc::arc::release(held);
 }
 
 /// `nw_path_status_t nw_path_get_status(nw_path_t)`
@@ -442,8 +471,8 @@ unsafe extern "C" fn monitor_dealloc(receiver: Id, _sel: Sel) {
     let monitor = unsafe { Arc::from_raw((*body).monitor) };
     let queue = {
         let mut state = lock(&monitor);
-        // The last reference is gone, so nothing can cancel it any more; a
-        // watcher still running stops here, and the handlers go with it.
+        // A started monitor holds itself until cancelled, so this is one that
+        // never started or has already run its cancel handler.
         state.phase = Phase::Cancelled;
         monitor.cancelled.notify_all();
         state.update = None;
@@ -553,6 +582,44 @@ mod tests {
         }
     }
 
+    static HELD_UPDATES: AtomicUsize = AtomicUsize::new(0);
+    static HELD_CANCELS: AtomicUsize = AtomicUsize::new(0);
+    static HELD_MONITOR: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn on_held_update(_block: Id, _path: Id) {
+        if HELD_UPDATES.fetch_add(1, Ordering::SeqCst) == 0 {
+            // SAFETY: the monitor the test started, still alive because it
+            // is started.
+            unsafe { nw_path_monitor_cancel(HELD_MONITOR.load(Ordering::SeqCst) as Id) };
+        }
+    }
+
+    unsafe extern "C" fn on_held_cancel(_block: Id) {
+        HELD_CANCELS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The usual C pattern: start, then let go at once. The monitor keeps
+    /// reporting until it is cancelled, and its cancel handler still runs.
+    #[test]
+    fn a_started_monitor_outlives_its_creators_reference() {
+        let update = block(on_held_update as *const c_void);
+        let cancelled = block(on_held_cancel as *const c_void);
+        let queue = darwin::dispatch::queue::create_serial("nw held test");
+        // SAFETY: the entry points, called as a guest would.
+        unsafe {
+            let monitor = nw_path_monitor_create();
+            HELD_MONITOR.store(monitor as usize, Ordering::SeqCst);
+            nw_path_monitor_set_queue(monitor, queue);
+            nw_path_monitor_set_update_handler(monitor, update.as_ref() as *const _ as Id);
+            nw_path_monitor_set_cancel_handler(monitor, cancelled.as_ref() as *const _ as Id);
+            nw_path_monitor_start(monitor);
+            nw_release(monitor);
+            wait_for(|| HELD_CANCELS.load(Ordering::SeqCst) == 1);
+            assert_eq!(HELD_UPDATES.load(Ordering::SeqCst), 1);
+            darwin::dispatch::object::release(queue);
+        }
+    }
+
     /// With every type an interface can have prohibited, nothing is left to
     /// reach anything through.
     #[test]
@@ -567,14 +634,20 @@ mod tests {
         .iter()
         .fold(0, |mask, t| mask | 1 << *t as u32);
         assert_eq!(current_status(every), Status::Unsatisfied);
-        assert_eq!(current_status(1 << InterfaceType::Loopback as u32), current_status(0));
+        assert_eq!(
+            current_status(1 << InterfaceType::Loopback as u32),
+            current_status(0)
+        );
     }
 
     #[test]
     fn something_that_is_not_a_path_has_no_status() {
         // SAFETY: nil and a non-path object are both refused.
         unsafe {
-            assert_eq!(nw_path_get_status(std::ptr::null_mut()), Status::Invalid as i32);
+            assert_eq!(
+                nw_path_get_status(std::ptr::null_mut()),
+                Status::Invalid as i32
+            );
             let monitor = nw_path_monitor_create();
             assert_eq!(nw_path_get_status(monitor), Status::Invalid as i32);
             nw_release(monitor);
