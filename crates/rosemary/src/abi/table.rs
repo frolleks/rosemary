@@ -952,6 +952,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGReleaseDisplayFadeReservation", I32, U32),
     // A `CGWindowLevel` and a `CGWindowLevelKey` are both `int32_t`.
     sig!("CGShieldingWindowLevel", I32),
+    sig!("SetApplicationIsDaemon", I32, BOOL),
     sig!("_LSSetApplicationLaunchServicesServerConnectionStatus", V, U64, P),
     sig!("_CSCheckFixDisable", V),
     sig!("CSBackupIsItemExcluded", BOOL, P, P),
