@@ -114,12 +114,12 @@ exports::exports! {
         "clock_sleep" => clock::clock_sleep,
         "task_get_special_port" => task::task_get_special_port,
 
-        // Other tasks, by way of the process server. Every flavour of task
-        // port is the same port here; see `tasks::processor_set_tasks_with_flavor`.
-        "task_for_pid"
-            | "task_name_for_pid"
-            | "task_read_for_pid"
-            | "task_inspect_for_pid" => tasks::task_for_pid,
+        // Other tasks, by way of the process server, through the port of the
+        // flavor each call names.
+        "task_for_pid" => tasks::task_for_pid,
+        "task_read_for_pid" => tasks::task_read_for_pid,
+        "task_inspect_for_pid" => tasks::task_inspect_for_pid,
+        "task_name_for_pid" => tasks::task_name_for_pid,
         "pid_for_task" => tasks::pid_for_task,
         "host_processor_sets" => tasks::host_processor_sets,
         "processor_set_default" => tasks::processor_set_default,
@@ -136,6 +136,7 @@ exports::exports! {
         "thread_policy_set" => thread::thread_policy_set,
         "mach_port_space_basic_info" => tasks::mach_port_space_basic_info,
         "task_policy_get" => tasks::task_policy_get,
+        "task_policy_set" => tasks::task_policy_set,
         "task_set_special_port" => task::task_set_special_port,
 
         // The exception-port family. `task`, `host` and `thread` are the same
