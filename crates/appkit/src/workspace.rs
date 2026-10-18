@@ -386,6 +386,18 @@ unsafe extern "C" fn is_file_package(_receiver: Id, _sel: Sel, path: Id) -> u8 {
     u8::from(package && host.is_dir())
 }
 
+/// The display accommodations of Accessibility > Display -
+/// `-accessibilityDisplayShouldIncreaseContrast` and the rest - and whether
+/// VoiceOver or Switch Control is on.
+///
+/// NO: there is no such settings pane here to turn any of them on, so this
+/// workspace never posts `NSWorkspaceAccessibilityDisplayOptionsDidChange`
+/// either. FIXME: the host desktop's own high contrast and reduced motion
+/// settings are not read.
+unsafe extern "C" fn accessibility_option_off(_receiver: Id, _sel: Sel) -> u8 {
+    0
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSWorkspace").expect("declared before its methods");
     class_methods!(class, {
@@ -404,6 +416,14 @@ pub(crate) fn install() {
         "iconForFileType:" => icon_for_file_type, c"@24@0:8@16";
         "iconForFile:" => icon_for_file_type, c"@24@0:8@16";
         "isFilePackageAtPath:" => is_file_package, c"c24@0:8@16";
+        "accessibilityDisplayShouldIncreaseContrast" => accessibility_option_off, c"c16@0:8";
+        "accessibilityDisplayShouldDifferentiateWithoutColor" => accessibility_option_off,
+            c"c16@0:8";
+        "accessibilityDisplayShouldReduceTransparency" => accessibility_option_off, c"c16@0:8";
+        "accessibilityDisplayShouldReduceMotion" => accessibility_option_off, c"c16@0:8";
+        "accessibilityDisplayShouldInvertColors" => accessibility_option_off, c"c16@0:8";
+        "isVoiceOverEnabled" => accessibility_option_off, c"c16@0:8";
+        "isSwitchControlEnabled" => accessibility_option_off, c"c16@0:8";
     });
 
     let running =
