@@ -953,6 +953,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // A `CGWindowLevel` and a `CGWindowLevelKey` are both `int32_t`.
     sig!("CGShieldingWindowLevel", I32),
     sig!("CGSSetDenyWindowServerConnections", I32, BOOL),
+    sig!("CTFontGetGlyphCount", I64, P),
+    sig!("CTFontCopyAvailableTables", P, P, U32),
+    sig!("CTFontCollectionCreateFromAvailableFonts", P, P),
+    sig!("CTFontCollectionCreateWithFontDescriptors", P, P, P),
+    sig!("CTFontCollectionGetTypeID", U64),
+    sig!("CTFontCollectionCreateMatchingFontDescriptors", P, P),
     sig!("SetApplicationIsDaemon", I32, BOOL),
     sig!("_LSSetApplicationLaunchServicesServerConnectionStatus", V, U64, P),
     sig!("_CSCheckFixDisable", V),
