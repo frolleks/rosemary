@@ -1949,6 +1949,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     vsig!("dprintf", I32, I32, P),
     sig!("dup", I32, I32),
     sig!("dup2", I32, I32, I32),
+    sig!("change_fdguard_np", I32, I32, P, U32, P, U32, P),
+    sig!("guarded_close_np", I32, I32, P),
     sig!("dup3", I32, I32, I32, I32),
     sig!("endgrent", V),
     sig!("endpwent", V),
