@@ -461,6 +461,25 @@ pub unsafe extern "C" fn get_stackaddr_np(thread: u64) -> u64 {
     }
 }
 
+/// `uintptr_t pthread_stack_frame_decode_np(uintptr_t frame_addr, uintptr_t
+/// *return_addr)`, as libpthread's: a frame record is the caller's frame
+/// pointer then the return address, and on a 64-bit platform the top byte of
+/// the next frame is stripped, since an ABI may keep its own bits there. There
+/// is no pointer authentication on x86-64 to strip besides.
+///
+/// # Safety
+///
+/// `frame` is a readable frame record, and `return_addr` is null or writable.
+pub unsafe extern "C" fn stack_frame_decode_np(frame: u64, return_addr: *mut u64) -> u64 {
+    // SAFETY: the caller's guarantee: two words.
+    let [next, ret] = unsafe { *(frame as *const [u64; 2]) };
+    if !return_addr.is_null() {
+        // SAFETY: as above.
+        unsafe { *return_addr = ret };
+    }
+    next & !0xFF00_0000_0000_0000
+}
+
 /// `size_t pthread_get_stacksize_np(pthread_t)`
 ///
 /// # Safety
@@ -1164,6 +1183,7 @@ exports::exports! {
         "pthread_cancel" => cancel,
         "pthread_get_stackaddr_np" => get_stackaddr_np,
         "pthread_get_stacksize_np" => get_stacksize_np,
+        "pthread_stack_frame_decode_np" => stack_frame_decode_np,
         "pthread_setname_np" => setname_np,
         "pthread_getname_np" => getname_np,
         "pthread_main_np" => main_np,
@@ -1193,6 +1213,34 @@ exports::exports! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// libpthread's `pthread_stack_frame_decode_np` test, over a chain of
+    /// frame records laid out by hand rather than read with
+    /// `__builtin_frame_address`, which Rust has no spelling of: each decode
+    /// gives back the frame and return address the record above it holds.
+    #[test]
+    fn stack_frames_decode_to_their_callers() {
+        let mut records = [[0u64; 2]; 10];
+        let base = records.as_mut_ptr() as u64;
+        for (n, record) in records.iter_mut().enumerate() {
+            // Each record names the next as its caller's frame.
+            *record = [base + 16 * (n as u64 + 1), 0x1000 + n as u64];
+        }
+        let mut frame = base;
+        for n in 0..9 {
+            let mut ret = 0;
+            // SAFETY: a record in `records`, and a writable word.
+            frame = unsafe { stack_frame_decode_np(frame, &mut ret) };
+            assert_eq!(frame, base + 16 * (n + 1), "Frame {n}");
+            assert_eq!(ret, 0x1000 + n, "Retaddr {n}");
+        }
+        // The top byte is not part of the address, and the out-parameter is
+        // optional.
+        let tagged = [[0xAB00_0000_1234_5678u64, 7]];
+        // SAFETY: a record, and no out-parameter.
+        let next = unsafe { stack_frame_decode_np(tagged.as_ptr() as u64, std::ptr::null_mut()) };
+        assert_eq!(next, 0x0000_0000_1234_5678);
+    }
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
