@@ -120,6 +120,8 @@ struct State {
     /// Held by the one worker allowed to run this serial queue's work. Unused for a
     /// concurrent queue, which has no such restriction.
     draining: bool,
+    /// `dispatch_suspend`'s count: while it is above zero no new work starts.
+    suspended: u32,
 }
 
 /// The queue a handle names, if it names a live one.
@@ -145,6 +147,7 @@ fn new(label: &str, concurrent: bool, main: bool) -> u64 {
         state: Mutex::new(State {
             pending: VecDeque::new(),
             draining: false,
+            suspended: 0,
         }),
         specifics: Mutex::new(Vec::new()),
     });
@@ -210,13 +213,14 @@ pub fn drain_main() {
         .pending
         .len();
     while budget > 0 {
-        let Some(item) = main
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pending
-            .pop_front()
-        else {
+        let item = {
+            let mut state = main.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.suspended > 0 {
+                return;
+            }
+            state.pending.pop_front()
+        };
+        let Some(item) = item else {
             return;
         };
         budget -= 1;
@@ -235,7 +239,7 @@ thread_local! {
 }
 
 /// Run `f` with `handle` noted as the queue this thread is inside.
-fn run_tracked<R>(handle: u64, f: impl FnOnce() -> R) -> R {
+pub(crate) fn run_tracked<R>(handle: u64, f: impl FnOnce() -> R) -> R {
     struct Pop;
     impl Drop for Pop {
         fn drop(&mut self) {
@@ -257,6 +261,9 @@ fn inside(handle: u64) -> bool {
 
 fn current_label() -> *const c_char {
     let handle = Some(current_queue()).filter(|&h| h != 0);
+    if let Some(label) = handle.and_then(super::source::label) {
+        return label;
+    }
     // SAFETY: a handle this module put there, still live while this thread runs it.
     match handle.and_then(|h| unsafe { queue(h) }) {
         Some(q) => q.label.as_ptr(),
@@ -379,6 +386,10 @@ fn run_one(handle: u64) {
         if !q.concurrent && state.draining {
             return;
         }
+        // Suspended: the work stays queued, and `resume` schedules it.
+        if state.suspended > 0 {
+            return;
+        }
         match state.pending.pop_front() {
             None => return,
             Some(item) => {
@@ -423,6 +434,84 @@ fn submit(handle: u64, item: Item) {
     // would run its work on the wrong thread, which is the one thing it promises.
     if !q.main {
         schedule(handle);
+    } else {
+        main_arrived();
+    }
+}
+
+/// Counts arrivals on the main queue, for a main thread parked in
+/// [`dispatch_main`] until there is something to drain.
+struct MainArrivals {
+    count: Mutex<u64>,
+    woken: Condvar,
+}
+
+fn main_arrivals() -> &'static MainArrivals {
+    static ARRIVALS: OnceLock<MainArrivals> = OnceLock::new();
+    ARRIVALS.get_or_init(|| MainArrivals {
+        count: Mutex::new(0),
+        woken: Condvar::new(),
+    })
+}
+
+fn main_arrived() {
+    let arrivals = main_arrivals();
+    *arrivals.count.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+    arrivals.woken.notify_all();
+    if let Some(wake) = MAIN_WAKE.get() {
+        wake();
+    }
+}
+
+/// What wakes the main thread's run loop: the receive right
+/// `_dispatch_get_main_queue_port_4CF` hands CoreFoundation, which its main loop
+/// sleeps on in every common mode.
+static MAIN_WAKE: OnceLock<fn()> = OnceLock::new();
+
+/// Have `wake` called whenever work reaches the main queue. The first caller's
+/// is the one kept: there is one main run loop.
+pub fn on_main_arrival(wake: fn()) {
+    let _ = MAIN_WAKE.set(wake);
+}
+
+/// Whether the calling thread is running a block of the main queue's - CF's
+/// `__CFTSDKeyIsInGCDMainQ`, under which the main run loop leaves the queue
+/// alone rather than starting its next block inside this one.
+pub fn is_draining_main() -> bool {
+    inside(main_queue())
+}
+
+/// Whether the main queue holds work it would run now: some pending, and the
+/// queue not suspended.
+pub fn main_has_work() -> bool {
+    // SAFETY: the main queue is this module's own and lives for the process.
+    let Some(main) = (unsafe { queue(main_queue()) }) else {
+        return false;
+    };
+    let state = main.state.lock().unwrap_or_else(|e| e.into_inner());
+    state.suspended == 0 && !state.pending.is_empty()
+}
+
+/// `void dispatch_main(void)`: the calling thread - the main one - does
+/// nothing from now on but run what is submitted to the main queue, and
+/// never returns; the program ends when something calls `exit`.
+///
+/// Apple's parks the main thread and lets the main queue drain elsewhere.
+/// Here the main queue is the main thread's to drain, so it drains it.
+pub unsafe extern "C" fn dispatch_main() -> ! {
+    let arrivals = main_arrivals();
+    loop {
+        let seen = *arrivals.count.lock().unwrap_or_else(|e| e.into_inner());
+        drain_main();
+        let count = arrivals.count.lock().unwrap_or_else(|e| e.into_inner());
+        if *count == seen {
+            // Bounded, so work that reached the main queue some other way
+            // than `submit` is not stranded.
+            let _ = arrivals
+                .woken
+                .wait_timeout(count, std::time::Duration::from_millis(100))
+                .unwrap_or_else(|e| e.into_inner());
+        }
     }
 }
 
@@ -469,8 +558,16 @@ impl Drop for Queue {
     }
 }
 
+/// The queue `handle` sends its work to: a queue's target, or a source's.
 pub(crate) fn target(handle: u64) -> u64 {
-    unsafe { queue(handle) }.map_or(0, |q| q.target.load(Ordering::Acquire))
+    // SAFETY: a live object, by the caller.
+    match unsafe { object::header(handle) }.map(Header::kind) {
+        Some(Kind::Queue) => {
+            unsafe { queue(handle) }.map_or(0, |q| q.target.load(Ordering::Acquire))
+        }
+        Some(Kind::Source) => super::source::target(handle),
+        _ => 0,
+    }
 }
 
 /// `void dispatch_set_target_queue(dispatch_object_t, dispatch_queue_t)`.
@@ -486,6 +583,10 @@ pub(crate) fn target(handle: u64) -> u64 {
 /// `handle` is null or a live dispatch object, and `target` null or a live
 /// queue.
 pub unsafe extern "C" fn set_target_queue(handle: u64, target: u64) {
+    // SAFETY: the caller's guarantee.
+    if unsafe { object::typed(handle, Kind::Source) }.is_some() {
+        return super::source::set_target(handle, target);
+    }
     // SAFETY: the caller's guarantee.
     let Some(q) = (unsafe { queue(handle) }) else {
         return;
@@ -654,6 +755,9 @@ pub unsafe extern "C" fn queue_get_label(handle: u64) -> *const c_char {
     if handle == 0 {
         return current_label();
     }
+    if let Some(label) = super::source::label(handle) {
+        return label;
+    }
     // SAFETY: the guest holds a reference for the duration of the call.
     match unsafe { queue(handle) } {
         Some(q) => q.label.as_ptr(),
@@ -713,6 +817,50 @@ pub unsafe extern "C" fn get_global_queue(identifier: i64, flags: u64) -> u64 {
 pub fn concurrent_attr() -> u64 {
     static ATTR: OnceLock<u64> = OnceLock::new();
     *ATTR.get_or_init(|| Box::into_raw(Box::new(0u64)) as u64)
+}
+
+/// `dispatch_queue_attr_t dispatch_queue_attr_make_with_qos_class(
+/// dispatch_queue_attr_t, dispatch_qos_class_t, int relative_priority)`.
+///
+/// Queues here run at one priority, so the class is checked as Apple checks
+/// it and then has nothing to change: an invalid one returns the attribute
+/// unchanged, as Apple's does, and so does a valid one - which keeps the
+/// one thing an attribute says here, whether the queue is concurrent.
+pub unsafe extern "C" fn attr_make_with_qos_class(attr: u64, _qos: u32, _relpri: i32) -> u64 {
+    attr
+}
+
+/// Whether `handle` is a queue a guest may suspend: Apple ignores
+/// suspending a global queue, though not the main one.
+fn suspendable<'a>(handle: u64) -> Option<&'a Queue> {
+    // SAFETY: the guest's live object.
+    unsafe { queue(handle) }.filter(|q| q.main || object::retain_count(handle) != usize::MAX)
+}
+
+/// `dispatch_suspend` on a queue: no work it holds starts until it is resumed.
+pub(crate) fn suspend(handle: u64) {
+    if let Some(q) = suspendable(handle) {
+        q.state.lock().unwrap_or_else(|e| e.into_inner()).suspended += 1;
+    }
+}
+
+/// `dispatch_resume` on a queue.
+pub(crate) fn resume(handle: u64) {
+    let Some(q) = suspendable(handle) else {
+        return;
+    };
+    let mut state = q.state.lock().unwrap_or_else(|e| e.into_inner());
+    if state.suspended == 0 {
+        drop(state);
+        eprintln!("BUG IN CLIENT OF LIBDISPATCH: Over-resume of an object");
+        std::process::abort();
+    }
+    state.suspended -= 1;
+    let runnable = state.suspended == 0 && !state.pending.is_empty();
+    drop(state);
+    if runnable && !q.main {
+        schedule(handle);
+    }
 }
 
 /// `void dispatch_async(dispatch_queue_t, dispatch_block_t)`.
@@ -879,7 +1027,10 @@ fn timer_thread() {
     }
 }
 
-fn arm(deadline: u64, handle: u64, work: Work) {
+fn arm(when: u64, handle: u64, work: Work) {
+    // The timer thread counts on uptime; a wall-clock or continuous-time
+    // deadline is how long from now it is.
+    let deadline = super::time::uptime_deadline(when);
     // A deadline that never arrives would hold the block forever; Darwin never runs
     // it either, so the block is simply dropped.
     if deadline == super::time::FOREVER {

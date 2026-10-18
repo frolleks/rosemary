@@ -12,6 +12,7 @@ pub enum Kind {
     Group,
     Semaphore,
     Data,
+    Source,
 }
 
 /// The header every dispatch object begins with.
@@ -136,6 +137,14 @@ pub unsafe fn release(handle: u64) {
     if h.refs.fetch_sub(1, Ordering::AcqRel) != 1 {
         return;
     }
+    // A source outlives its last external reference until it has
+    // unregistered, as Apple's `_dispatch_xref_dispose` has it; it disposes
+    // of itself, finalizer and all, once its internal references are gone.
+    if h.kind == Kind::Source {
+        // SAFETY: a source whose external count just reached zero.
+        unsafe { super::source::xref_dispose(handle) };
+        return;
+    }
     let (finalizer, context) = (
         h.finalizer.load(Ordering::Acquire),
         h.context.load(Ordering::Acquire),
@@ -156,6 +165,7 @@ pub unsafe fn release(handle: u64) {
             Kind::Group => drop(Box::from_raw(handle as *mut super::sync::Group)),
             Kind::Semaphore => drop(Box::from_raw(handle as *mut super::sync::Semaphore)),
             Kind::Data => drop(Box::from_raw(handle as *mut super::data::Data)),
+            Kind::Source => unreachable!("a source disposes of itself"),
         }
     }
     if finalizer != 0 && context != 0 {
@@ -166,6 +176,15 @@ pub unsafe fn release(handle: u64) {
     unsafe {
         release(target);
     }
+}
+
+/// The finalizer and context an object goes with, for one that disposes of
+/// itself.
+pub(crate) fn finalizer_of(header: &Header) -> (u64, u64) {
+    (
+        header.finalizer.load(Ordering::Acquire),
+        header.context.load(Ordering::Acquire),
+    )
 }
 
 /// `void dispatch_retain(dispatch_object_t)`.
