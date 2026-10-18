@@ -57,6 +57,14 @@ pub struct MenuItem {
     indentation: isize,
     /// `-representedObject`, retained.
     represented: Id,
+    /// `-allowsKeyEquivalentWhenHidden`: whether a hidden item's key
+    /// equivalent still works. Kept for the caller that reads it back.
+    key_equivalent_when_hidden: usize,
+    /// `-subtitle`, retained.
+    subtitle: Id,
+    /// `-onStateImage`, `-offStateImage` and `-mixedStateImage`, retained and
+    /// not drawn.
+    state_images: [Id; 3],
 }
 
 pub const MENU_INSTANCE_SIZE: usize = size_of::<Menu>();
@@ -556,6 +564,111 @@ unsafe extern "C" fn perform_action_for_item_at_index(receiver: Id, _sel: Sel, i
 
 unsafe extern "C" fn ignored_object(_receiver: Id, _sel: Sel, _object: Id) {}
 
+unsafe extern "C" fn allows_key_equivalent_when_hidden(receiver: Id, _sel: Sel) -> u8 {
+    (item_of(receiver).key_equivalent_when_hidden != 0) as u8
+}
+
+unsafe extern "C" fn set_allows_key_equivalent_when_hidden(receiver: Id, _sel: Sel, allows: u8) {
+    item_of(receiver).key_equivalent_when_hidden = (allows != 0) as usize;
+}
+
+/// Put `value` in `slot`, retained, releasing what was there.
+fn store(slot: &mut Id, value: Id) {
+    let old = std::mem::replace(slot, objc::arc::retain(value));
+    objc::arc::release(old);
+}
+
+unsafe extern "C" fn item_subtitle(receiver: Id, _sel: Sel) -> Id {
+    item_of(receiver).subtitle
+}
+
+unsafe extern "C" fn set_item_subtitle(receiver: Id, _sel: Sel, subtitle: Id) {
+    store(&mut item_of(receiver).subtitle, subtitle);
+}
+
+/// `NSControlStateValueOn`, `Off` and `Mixed` index `state_images` as 0, 1
+/// and 2.
+const ON_IMAGE: usize = 0;
+const OFF_IMAGE: usize = 1;
+const MIXED_IMAGE: usize = 2;
+
+unsafe extern "C" fn on_state_image(receiver: Id, _sel: Sel) -> Id {
+    item_of(receiver).state_images[ON_IMAGE]
+}
+
+unsafe extern "C" fn set_on_state_image(receiver: Id, _sel: Sel, image: Id) {
+    store(&mut item_of(receiver).state_images[ON_IMAGE], image);
+}
+
+unsafe extern "C" fn off_state_image(receiver: Id, _sel: Sel) -> Id {
+    item_of(receiver).state_images[OFF_IMAGE]
+}
+
+unsafe extern "C" fn set_off_state_image(receiver: Id, _sel: Sel, image: Id) {
+    store(&mut item_of(receiver).state_images[OFF_IMAGE], image);
+}
+
+unsafe extern "C" fn mixed_state_image(receiver: Id, _sel: Sel) -> Id {
+    item_of(receiver).state_images[MIXED_IMAGE]
+}
+
+unsafe extern "C" fn set_mixed_state_image(receiver: Id, _sel: Sel, image: Id) {
+    store(&mut item_of(receiver).state_images[MIXED_IMAGE], image);
+}
+
+/// `-userKeyEquivalent`: the equivalent the user assigned in System
+/// Settings, "an empty string if none" - and none is ever assigned here.
+unsafe extern "C" fn user_key_equivalent(_receiver: Id, _sel: Sel) -> Id {
+    foundation::string::from_str("")
+}
+
+/// `+usesUserKeyEquivalents`, which only decides whether the user's
+/// equivalents - of which there are none - override the program's.
+static USES_USER_KEY_EQUIVALENTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+unsafe extern "C" fn uses_user_key_equivalents(_class: Id, _sel: Sel) -> u8 {
+    USES_USER_KEY_EQUIVALENTS.load(std::sync::atomic::Ordering::Relaxed) as u8
+}
+
+unsafe extern "C" fn set_uses_user_key_equivalents(_class: Id, _sel: Sel, uses: u8) {
+    USES_USER_KEY_EQUIVALENTS.store(uses != 0, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// `-isHighlighted`: no menu is ever being tracked here, so no item is.
+unsafe extern "C" fn is_highlighted(_receiver: Id, _sel: Sel) -> u8 {
+    0
+}
+
+/// `-isHiddenOrHasHiddenAncestor`: hidden itself, or the item its menu hangs
+/// from is.
+unsafe extern "C" fn is_hidden_or_has_hidden_ancestor(receiver: Id, _sel: Sel) -> u8 {
+    let mut item = receiver;
+    // Bounded: a menu hung under its own item is a cycle a program can make.
+    for _ in 0..64 {
+        if item.is_null() {
+            return 0;
+        }
+        let this = item_of(item);
+        if this.hidden != 0 {
+            return 1;
+        }
+        item = match this.menu.is_null() {
+            true => std::ptr::null_mut(),
+            false => menu_of(this.menu).supermenu,
+        };
+    }
+    0
+}
+
+/// `-parentItem`: the item whose submenu holds this one.
+unsafe extern "C" fn parent_item(receiver: Id, _sel: Sel) -> Id {
+    match item_of(receiver).menu {
+        menu if menu.is_null() => menu,
+        menu => menu_of(menu).supermenu,
+    }
+}
+
 unsafe extern "C" fn set_represented_object(receiver: Id, _sel: Sel, object: Id) {
     let item = item_of(receiver);
     let old = std::mem::replace(&mut item.represented, objc::arc::retain(object));
@@ -659,6 +772,8 @@ pub(crate) fn install() {
     let item = objc::class::lookup(c"NSMenuItem").expect("declared before its methods");
     class_methods!(item, {
         "separatorItem" => separator_item, c"@16@0:8";
+        "usesUserKeyEquivalents" => uses_user_key_equivalents, c"c16@0:8";
+        "setUsesUserKeyEquivalents:" => set_uses_user_key_equivalents, c"v20@0:8c16";
     });
     methods!(item, {
         "init" => init_plain_item, c"@16@0:8";
@@ -697,8 +812,20 @@ pub(crate) fn install() {
         "setImage:" => set_item_image, c"v24@0:8@16";
         "view" => item_view, c"@16@0:8";
         "setView:" => set_item_view, c"v24@0:8@16";
-        "setOnStateImage:" => ignored_object, c"v24@0:8@16";
-        "setMixedStateImage:" => ignored_object, c"v24@0:8@16";
+        "onStateImage" => on_state_image, c"@16@0:8";
+        "setOnStateImage:" => set_on_state_image, c"v24@0:8@16";
+        "offStateImage" => off_state_image, c"@16@0:8";
+        "setOffStateImage:" => set_off_state_image, c"v24@0:8@16";
+        "mixedStateImage" => mixed_state_image, c"@16@0:8";
+        "setMixedStateImage:" => set_mixed_state_image, c"v24@0:8@16";
+        "allowsKeyEquivalentWhenHidden" => allows_key_equivalent_when_hidden, c"c16@0:8";
+        "setAllowsKeyEquivalentWhenHidden:" => set_allows_key_equivalent_when_hidden, c"v20@0:8c16";
+        "subtitle" => item_subtitle, c"@16@0:8";
+        "setSubtitle:" => set_item_subtitle, c"v24@0:8@16";
+        "userKeyEquivalent" => user_key_equivalent, c"@16@0:8";
+        "isHighlighted" => is_highlighted, c"c16@0:8";
+        "isHiddenOrHasHiddenAncestor" => is_hidden_or_has_hidden_ancestor, c"c16@0:8";
+        "parentItem" => parent_item, c"@16@0:8";
         "setRepresentedObject:" => set_represented_object, c"v24@0:8@16";
         "representedObject" => represented_object, c"@16@0:8";
     });
