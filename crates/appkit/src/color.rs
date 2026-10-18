@@ -162,6 +162,35 @@ static NAMED: &[(&str, f64, f64, f64, f64)] = &[
     ("systemBrownColor", 0.64, 0.52, 0.37, 1.0),
     ("systemGrayColor", 0.56, 0.56, 0.58, 1.0),
     ("controlAccentColor", 0.0, 0.39, 0.88, 1.0),
+    // macOS 14's insertion point follows the accent.
+    ("textInsertionPointColor", 0.0, 0.39, 0.88, 1.0),
+    ("quinaryLabelColor", 0.0, 0.0, 0.0, 0.05),
+    // macOS 14's fills: the label colour at low alphas.
+    ("systemFillColor", 0.0, 0.0, 0.0, 0.10),
+    ("secondarySystemFillColor", 0.0, 0.0, 0.0, 0.08),
+    ("tertiarySystemFillColor", 0.0, 0.0, 0.0, 0.05),
+    ("quaternarySystemFillColor", 0.0, 0.0, 0.0, 0.03),
+    ("quinarySystemFillColor", 0.0, 0.0, 0.0, 0.02),
+    ("systemMintColor", 0.0, 0.78, 0.75, 1.0),
+    ("systemCyanColor", 0.20, 0.68, 0.90, 1.0),
+    // The background of a find indicator.
+    ("findHighlightColor", 1.0, 1.0, 0.0, 1.0),
+    // The Touch Bar scrubber's texture, as the one colour it averages to.
+    ("scrubberTexturedBackgroundColor", 0.0, 0.0, 0.0, 1.0),
+    // Deprecated, and still asked for: the bevel shades of the classic
+    // controls, the scroller's and window frame's grey, and the selection
+    // colours that `selectedContentBackgroundColor` and
+    // `unemphasizedSelectedContentBackgroundColor` replaced.
+    ("controlHighlightColor", 1.0, 1.0, 1.0, 1.0),
+    ("controlLightHighlightColor", 1.0, 1.0, 1.0, 1.0),
+    ("controlShadowColor", 0.5, 0.5, 0.5, 1.0),
+    ("controlDarkShadowColor", 0.0, 0.0, 0.0, 1.0),
+    ("scrollBarColor", 2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 1.0),
+    ("knobColor", 0.5, 0.5, 0.5, 1.0),
+    ("selectedKnobColor", 0.3, 0.3, 0.3, 1.0),
+    ("windowFrameColor", 2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 1.0),
+    ("selectedMenuItemColor", 0.0, 0.39, 0.88, 1.0),
+    ("secondarySelectedControlColor", 0.86, 0.86, 0.86, 1.0),
     ("blackColor", 0.0, 0.0, 0.0, 1.0),
     ("whiteColor", 1.0, 1.0, 1.0, 1.0),
     ("clearColor", 0.0, 0.0, 0.0, 0.0),
@@ -174,6 +203,10 @@ static NAMED: &[(&str, f64, f64, f64, f64)] = &[
     ("grayColor", 0.5, 0.5, 0.5, 1.0),
     ("lightGrayColor", 2.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 1.0),
     ("darkGrayColor", 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 1.0),
+    // The values `NSColor.h` documents for them.
+    ("brownColor", 0.6, 0.4, 0.2, 1.0),
+    ("orangeColor", 1.0, 0.5, 0.0, 1.0),
+    ("purpleColor", 0.5, 0.0, 0.5, 1.0),
 ];
 
 /// One `+namedColor`, resolved by the selector it was sent.
@@ -198,6 +231,13 @@ unsafe extern "C" fn named(_class: Id, sel: Sel) -> Id {
         "secondaryLabelColor" => Some((1.0, 0.5)),
         "tertiaryLabelColor" => Some((1.0, 0.26)),
         "quaternaryLabelColor" => Some((1.0, 0.1)),
+        "quinaryLabelColor" => Some((1.0, 0.05)),
+        "systemFillColor" => Some((1.0, 0.10)),
+        "secondarySystemFillColor" => Some((1.0, 0.08)),
+        "tertiarySystemFillColor" => Some((1.0, 0.05)),
+        "quaternarySystemFillColor" => Some((1.0, 0.03)),
+        "quinarySystemFillColor" => Some((1.0, 0.02)),
+        "secondarySelectedControlColor" => Some((0.30, 1.0)),
         "placeholderTextColor" => Some((1.0, 0.25)),
         "separatorColor" => Some((1.0, 0.1)),
         "windowBackgroundColor" | "controlColor" | "headerColor" => Some((0.18, 1.0)),
@@ -234,6 +274,53 @@ pub(crate) fn named_color(name: &str) -> Option<Id> {
         .iter()
         .find(|(n, ..)| *n == name)
         .map(|_| unsafe { named(std::ptr::null_mut(), objc::sel::get(name)) })
+}
+
+/// The colours made by `+blackColor`, `+redColor` and the rest of the device
+/// set: plain RGB values rather than entries of a colour list, so no catalog
+/// names them.
+const DEVICE_COLORS: &[&str] = &[
+    "blackColor",
+    "whiteColor",
+    "clearColor",
+    "redColor",
+    "greenColor",
+    "blueColor",
+    "yellowColor",
+    "cyanColor",
+    "magentaColor",
+    "grayColor",
+    "lightGrayColor",
+    "darkGrayColor",
+    "brownColor",
+    "orangeColor",
+    "purpleColor",
+];
+
+/// `+colorWithCatalogName:colorName:`
+///
+/// The colour named `colorName` in the colour list named `listName`, or nil
+/// when there is no such list or no such colour in it - which is what
+/// AppKit answers, and what a caller checks for. The one list here is
+/// `System`, the system colours: the semantic and `systemX` colours this
+/// runtime defines, by the names of the class methods that return them.
+///
+/// # Safety
+///
+/// `list` and `name` are `NSString`s or nil.
+unsafe extern "C" fn color_with_catalog_name(_class: Id, _sel: Sel, list: Id, name: Id) -> Id {
+    // SAFETY: the caller's obligation.
+    let (list, name) = unsafe { (foundation::string::bytes(list), foundation::string::bytes(name)) };
+    if list != b"System" {
+        return std::ptr::null_mut();
+    }
+    let Ok(name) = std::str::from_utf8(&name) else {
+        return std::ptr::null_mut();
+    };
+    if DEVICE_COLORS.contains(&name) {
+        return std::ptr::null_mut();
+    }
+    named_color(name).unwrap_or(std::ptr::null_mut())
 }
 
 unsafe extern "C" fn alternating_row_colors(_class: Id, _sel: Sel) -> Id {
@@ -525,6 +612,7 @@ pub(crate) fn install() {
         "colorWithCalibratedWhite:alpha:" => color_with_white, c"@32@0:8d16d24";
         "colorWithDeviceWhite:alpha:" => color_with_white, c"@32@0:8d16d24";
         "colorWithWhite:alpha:" => color_with_white, c"@32@0:8d16d24";
+        "colorWithCatalogName:colorName:" => color_with_catalog_name, c"@32@0:8@16@24";
     });
     methods!(class, {
         "highlightWithLevel:" => highlight_with_level, c"@24@0:8d16";
@@ -569,6 +657,27 @@ mod tests {
             // SAFETY: a colour this crate just made.
             assert_eq!(unsafe { components(color) }, (*r, *g, *b, *a), "{name}");
         }
+    }
+
+    /// The `System` catalog has the system colours under their method names,
+    /// as the very objects those methods return, and nothing else does.
+    #[test]
+    fn the_system_catalog_names_the_system_colours() {
+        crate::bootstrap();
+        let class = objc::class::ptr(objc::class::lookup(c"NSColor").expect("NSColor")) as Id;
+        let sel = objc::sel::get("colorWithCatalogName:colorName:");
+        let ask = |list: &str, name: &str| {
+            let (list, name) = (foundation::string::from_str(list), foundation::string::from_str(name));
+            // SAFETY: two strings.
+            unsafe { color_with_catalog_name(class, sel, list, name) }
+        };
+        // SAFETY: `+namedColor` is `id (Class, SEL)`.
+        let label = unsafe { named(class, objc::sel::get("labelColor")) };
+        assert_eq!(ask("System", "labelColor"), label);
+        assert!(!ask("System", "controlAccentColor").is_null());
+        assert!(ask("System", "redColor").is_null(), "a device colour is in no list");
+        assert!(ask("System", "noSuchColor").is_null());
+        assert!(ask("Crayons", "labelColor").is_null());
     }
 
     /// A named colour is the *same object* every time and is not autoreleased.
