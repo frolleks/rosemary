@@ -3013,6 +3013,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // any other: asynchronously, on whichever thread the kernel picks.
     sig!("raise", I32, I32),
     sig!("rand", I32),
+    sig!("CGSSetDenyWindowServerConnections", I32, BOOL),
     sig!("random", I64),
     sig!("read", I64, I32, P, U64),
     sig!("readdir", P, P),
