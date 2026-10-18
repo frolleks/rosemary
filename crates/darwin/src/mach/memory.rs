@@ -215,7 +215,7 @@ fn create(size: u64) -> Result<Arc<Object>, i32> {
 
 /// A file with no name, for an object's pages.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-fn anonymous_file() -> Option<OwnedFd> {
+pub(super) fn anonymous_file() -> Option<OwnedFd> {
     // SAFETY: a NUL-terminated name and a flag word.
     let raw = unsafe { libc::memfd_create(c"mach memory entry".as_ptr(), libc::MFD_CLOEXEC) };
     // SAFETY: a descriptor just made and owned by nothing else.
@@ -225,7 +225,7 @@ fn anonymous_file() -> Option<OwnedFd> {
 /// A file with no name, for an object's pages: a POSIX shared memory object
 /// unlinked as soon as it is open.
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-fn anonymous_file() -> Option<OwnedFd> {
+pub(super) fn anonymous_file() -> Option<OwnedFd> {
     let name = format!("/rosemary-{:016x}\0", fresh_id());
     // SAFETY: a NUL-terminated name.
     let raw = unsafe {

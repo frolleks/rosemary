@@ -2,6 +2,7 @@ use std::ffi::c_void;
 
 pub mod bootstrap;
 pub mod clock;
+pub mod fileport;
 pub mod info;
 pub mod kern;
 pub mod memory;
@@ -165,6 +166,8 @@ exports::exports! {
         "mach_port_get_context" => space::mach_port_get_context,
         "mach_port_set_context" => space::mach_port_set_context,
         "mach_port_deallocate" => space::mach_port_deallocate,
+        "fileport_makeport" => fileport::fileport_makeport,
+        "fileport_makefd" => fileport::fileport_makefd,
         "mach_port_destroy" => space::mach_port_destroy,
         "mach_port_mod_refs" => space::mach_port_mod_refs,
         "mach_port_get_refs" => space::mach_port_get_refs,

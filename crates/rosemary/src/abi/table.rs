@@ -2887,6 +2887,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("mach_port_get_context", I32, U32, U32, P),
     sig!("mach_port_set_context", I32, U32, U32, U64),
     sig!("mach_port_deallocate", I32, U32, U32),
+    sig!("fileport_makeport", I32, I32, P),
+    sig!("fileport_makefd", I32, U32),
     // `kern_return_t mach_port_extract_right(ipc_space_t, mach_port_name_t,
     // mach_msg_type_name_t, mach_port_t *poly, mach_msg_type_name_t *polyPoly)`
     // - the two out-parameters are a 32-bit port name and a 32-bit type name,

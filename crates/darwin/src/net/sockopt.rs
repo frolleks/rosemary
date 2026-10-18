@@ -474,6 +474,15 @@ pub fn inherit_sigpipe_suppression(from: i32, to: i32) {
     }
 }
 
+/// Treat `fd` as a socket with `SO_NOSIGPIPE`: one that arrived from another
+/// process for a socket that had it, since on Darwin the option is the
+/// socket's and goes wherever the socket does.
+pub fn suppress_sigpipe(fd: i32) {
+    if fd >= 0 {
+        with_suppressed_mut(|held| held.insert(fd));
+    }
+}
+
 /// Forget any option set on `fd`, because it no longer names that socket.
 pub fn forget(fd: i32) {
     if fd >= 0 && any_suppress_sigpipe() {
