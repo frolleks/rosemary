@@ -558,7 +558,7 @@ pub unsafe extern "C" fn CGDisplayMoveCursorToPoint(
 }
 
 /// `kCGErrorFailure`: what a request for something this host cannot do answers.
-const CG_ERROR_FAILURE: i32 = 1001;
+const CG_ERROR_FAILURE: i32 = 1000;
 
 /// `CGError CGDisplayCapture(CGDirectDisplayID)` and `CGCaptureAllDisplays`.
 ///
