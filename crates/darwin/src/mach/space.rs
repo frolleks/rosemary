@@ -211,6 +211,14 @@ fn with<R>(f: impl FnOnce(&mut Space) -> R) -> R {
     let (result, unused) = {
         let mut guard = space().write().unwrap_or_else(|e| e.into_inner());
         let result = f(&mut guard);
+        // A watched send right that went or changed has closed its claim.
+        super::deadname::retain(|name, fd| {
+            use std::os::fd::AsRawFd;
+            matches!(
+                guard.names.get(&name),
+                Some(Right::Send { claim: Some(claim), .. }) if claim.as_raw_fd() == fd
+            )
+        });
         (result, std::mem::take(&mut guard.unused_once))
     };
     // Sent with the lock released: a notification may go to a port of this
@@ -725,6 +733,26 @@ pub fn spend(name: Name) -> i32 {
             KERN_SUCCESS
         }
         _ => release(space, name),
+    })
+}
+
+/// The port behind the send right `name`, whose claim is `fd`, is gone: the
+/// right becomes a dead name, with one more reference when a notification
+/// is to say so - the one XNU hands the notification's receiver. False if
+/// `name` is no longer that right.
+pub fn kill_send(name: Name, fd: std::ffi::c_int, notified: bool) -> bool {
+    use std::os::fd::AsRawFd;
+    with(|space| match space.names.get(&name) {
+        Some(Right::Send {
+            claim: Some(claim),
+            refs,
+            ..
+        }) if claim.as_raw_fd() == fd => {
+            let refs = refs.saturating_add(u32::from(notified));
+            space.names.insert(name, Right::Dead { refs });
+            true
+        }
+        _ => false,
     })
 }
 
@@ -1368,6 +1396,8 @@ pub extern "C" fn mach_port_set_context(task: Name, name: Name, context: u64) ->
 
 /// `MACH_NOTIFY_NO_SENDERS`, from `<mach/notify.h>`: `MACH_NOTIFY_FIRST + 6`.
 pub const NOTIFY_NO_SENDERS: i32 = 0o106;
+/// `MACH_NOTIFY_DEAD_NAME`: `MACH_NOTIFY_FIRST + 8`.
+pub const NOTIFY_DEAD_NAME: i32 = 0o110;
 
 /// `kern_return_t mach_port_request_notification(ipc_space_t, mach_port_name_t,
 /// mach_msg_id_t, mach_port_mscount_t, mach_port_name_t notify,
@@ -1430,8 +1460,74 @@ pub unsafe extern "C" fn mach_port_request_notification(
     {
         return KERN_SUCCESS;
     }
+    if id == NOTIFY_DEAD_NAME
+        && let Some(code) = request_dead_name(name, sync, destination)
+    {
+        return code;
+    }
     announce_undelivered_notifications(id);
     KERN_SUCCESS
+}
+
+/// `MACH_NOTIFY_DEAD_NAME` on `name`, or `None` for a right this cannot
+/// watch. A name already dead is refused with `KERN_INVALID_ARGUMENT`, as
+/// `ipc_right_request_alloc` does, unless `sync` asks for the notification
+/// at once.
+fn request_dead_name(name: Name, sync: u32, notify: Option<Address>) -> Option<i32> {
+    use std::os::fd::AsRawFd;
+    let watched = with_right(name, |right| match right {
+        Right::Send {
+            address,
+            claim: Some(claim),
+            ..
+        } => Some((*address, Some(claim.as_raw_fd()))),
+        Right::Send { address, .. } => Some((*address, None)),
+        Right::Dead { .. } => Some((0, None)),
+        _ => None,
+    })??;
+    let dead = match watched {
+        (0, None) => true,
+        (address, None) => !super::wire::is_bound(address),
+        (_, Some(fd)) => super::senders::closed(fd),
+    };
+    if dead {
+        // A right whose port went before anyone looked is a dead name now.
+        if let (_, Some(fd)) = watched {
+            kill_send(name, fd, false);
+        } else if watched.0 != 0 {
+            with(|space| {
+                if let Some(Right::Send { refs, .. }) = space.names.get(&name) {
+                    let refs = *refs;
+                    space.names.insert(name, Right::Dead { refs });
+                }
+            });
+        }
+        if sync == 0 {
+            return Some(KERN_INVALID_ARGUMENT);
+        }
+        if let Some(notify) = notify {
+            with(|space| {
+                if let Some(Right::Dead { refs }) = space.names.get_mut(&name) {
+                    *refs = refs.saturating_add(1);
+                }
+            });
+            super::msg::deliver_dead_name(notify, name);
+        }
+        return Some(KERN_SUCCESS);
+    }
+    let (_, Some(fd)) = watched else {
+        // A port that keeps no listener cannot be watched.
+        return None;
+    };
+    match notify {
+        Some(notify) if super::deadname::watch(name, fd, notify) => Some(KERN_SUCCESS),
+        // No notify port cancels a request, which here means forgetting it.
+        None => {
+            super::deadname::retain(|watched, _| watched != name);
+            Some(KERN_SUCCESS)
+        }
+        Some(_) => None,
+    }
 }
 
 fn announce_undelivered_notifications(id: i32) {

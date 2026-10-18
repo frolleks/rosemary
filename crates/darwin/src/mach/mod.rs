@@ -2,6 +2,7 @@ use std::ffi::c_void;
 
 pub mod bootstrap;
 pub mod clock;
+pub mod deadname;
 pub mod fileport;
 pub mod info;
 pub mod kern;
