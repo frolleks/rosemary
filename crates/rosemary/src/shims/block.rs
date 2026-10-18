@@ -186,6 +186,23 @@ fn dispatch_after(
     Ok(())
 }
 
+/// `void dispatch_source_set_{event,cancel,registration,mandatory_cancel}_handler(
+/// dispatch_source_t, dispatch_block_t)`. A null block clears the handler,
+/// so it is passed through as it is.
+fn dispatch_source_set_handler(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let (source, block) = (ctx.rdi, ctx.rsi);
+    if block != 0 {
+        substitute_block(symbol, block, mem, callbacks)?;
+    }
+    call_block(symbol, host_or_refuse(symbol)?, &[source, block]);
+    Ok(())
+}
+
 /// `void dispatch_once(dispatch_once_t *predicate, dispatch_block_t block)`
 fn dispatch_once(
     symbol: &str,
@@ -294,6 +311,23 @@ fn run_loop_observer_create_with_handler(
     Ok(())
 }
 
+/// `void CFRunLoopPerformBlock(CFRunLoopRef rl, CFTypeRef mode, void (^block)(void))`
+fn run_loop_perform_block(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let block = ctx.rdx;
+    if block != 0 {
+        substitute_block(symbol, block, mem, callbacks)?;
+    }
+    let host = host_or_refuse(symbol)?;
+    // CF queues nothing for a null block, so it is passed on as given.
+    call_block(symbol, host, &[ctx.rdi, ctx.rsi, block]);
+    Ok(())
+}
+
 /// `dispatch_data_t dispatch_data_create(const void *buffer, size_t size,
 /// dispatch_queue_t queue, dispatch_block_t destructor)`
 fn dispatch_data_create(
@@ -358,8 +392,13 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         "dispatch_data_create" => Some(dispatch_data_create),
         "dispatch_group_notify" => Some(dispatch_group_notify),
         "dispatch_group_async" => Some(dispatch_group_async),
+        "dispatch_source_set_event_handler"
+        | "dispatch_source_set_cancel_handler"
+        | "dispatch_source_set_registration_handler"
+        | "dispatch_source_set_mandatory_cancel_handler" => Some(dispatch_source_set_handler),
         "notify_register_dispatch" => Some(notify_register_dispatch),
         "CFRunLoopObserverCreateWithHandler" => Some(run_loop_observer_create_with_handler),
+        "CFRunLoopPerformBlock" => Some(run_loop_perform_block),
         // Both spellings.
         "_Block_copy" | "Block_copy" => Some(block_copy),
         _ => None,
