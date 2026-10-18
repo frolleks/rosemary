@@ -19,6 +19,7 @@ fn install() {
         darwin::register_host_symbol_filter(|name| !crate::opengl::owns(name));
         register_dlopen_names();
         crate::dyld::install_image_hooks();
+        darwin::mach::memory::on_executable(crate::shims::vmmap::executable);
         install_block_runtime();
         push_main_pool();
     });

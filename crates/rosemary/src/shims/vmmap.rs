@@ -150,6 +150,14 @@ pub fn contains(va: u64) -> bool {
     arenas::find(va).is_some()
 }
 
+/// What `darwin`'s `mach_vm_map` and `mach_vm_remap` report of a range they
+/// mapped with `VM_PROT_EXECUTE`, readable in its place: the guest means to
+/// execute it, as for an executable `mmap`.
+pub fn executable(base: u64, len: u64, prot: i32) {
+    arenas::push(base, len);
+    crate::smc::track(base, len, prot);
+}
+
 /// The shim for `name`, if this module has one.
 pub fn shim_for(
     name: &str,
@@ -282,7 +290,10 @@ fn vm_protect(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemo
     }
     const PAGE: u64 = 4096;
     let start = address & !(PAGE - 1);
-    let Some(end) = address.checked_add(size).and_then(|e| e.checked_add(PAGE - 1)) else {
+    let Some(end) = address
+        .checked_add(size)
+        .and_then(|e| e.checked_add(PAGE - 1))
+    else {
         set_int_return(ctx, KERN_INVALID_ADDRESS);
         return Ok(());
     };
@@ -306,7 +317,8 @@ fn vm_protect(_symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemo
         let want_prot = host_prot(prot);
         // SAFETY: the guest's own request on its own pages, with executable
         // permission removed as for `mprotect`.
-        let rc = unsafe { libc::mprotect(from as *mut libc::c_void, (to - from) as usize, want_prot) };
+        let rc =
+            unsafe { libc::mprotect(from as *mut libc::c_void, (to - from) as usize, want_prot) };
         if rc != 0 {
             status = match std::io::Error::last_os_error().raw_os_error() {
                 Some(libc::EACCES) => KERN_PROTECTION_FAILURE,
