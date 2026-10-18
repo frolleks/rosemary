@@ -481,8 +481,18 @@ pub unsafe extern "C" fn vm_deallocate(task: Name, address: u64, size: u64) -> i
     if size == 0 {
         return KERN_SUCCESS;
     }
+    // Whole pages, as `vm_map_remove` takes them: Mach truncates the start
+    // and rounds the end, and `munmap` refuses a start that is not aligned.
+    let page = super::info::page_size();
+    let start = address & !(page - 1);
+    let Some(end) = address
+        .checked_add(size)
+        .and_then(|end| end.checked_next_multiple_of(page))
+    else {
+        return KERN_INVALID_ARGUMENT;
+    };
     // SAFETY: the caller states this is its own mapping.
-    let out = unsafe { libc::munmap(address as *mut c_void, size as usize) };
+    let out = unsafe { libc::munmap(start as *mut c_void, (end - start) as usize) };
     match out {
         0 => KERN_SUCCESS,
         _ => KERN_INVALID_ADDRESS,
