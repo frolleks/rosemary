@@ -718,6 +718,21 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
 
+    /// The alternate stack every thread rosemary runs a guest on has: the
+    /// suspend handler is `SA_ONSTACK`, and the one std gives a test thread is
+    /// too small for an unoptimized handler's frame on top of the kernel's.
+    fn give_this_thread_an_alternate_stack() {
+        const BYTES: usize = 256 * 1024;
+        let stack = Box::leak(vec![0u8; BYTES].into_boxed_slice());
+        // SAFETY: a leaked writable allocation of `BYTES` bytes.
+        unsafe {
+            let mut wanted: libc::stack_t = std::mem::zeroed();
+            wanted.ss_sp = stack.as_mut_ptr().cast();
+            wanted.ss_size = BYTES;
+            libc::sigaltstack(&wanted, std::ptr::null_mut());
+        }
+    }
+
     /// A thread spinning on a counter stops advancing it while suspended, its
     /// state names a stack pointer inside its own stack, and it carries on
     /// after a resume.
@@ -727,6 +742,7 @@ mod tests {
         static STOP: AtomicBool = AtomicBool::new(false);
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
+            give_this_thread_an_alternate_stack();
             let marker = 0u8;
             tx.send((crate::pthread::id() as i32, &marker as *const u8 as u64))
                 .unwrap();
@@ -776,6 +792,7 @@ mod tests {
         static STOP: AtomicBool = AtomicBool::new(false);
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
+            give_this_thread_an_alternate_stack();
             tx.send(crate::pthread::id() as i32).unwrap();
             while !STOP.load(Ordering::Relaxed) {
                 std::hint::spin_loop();

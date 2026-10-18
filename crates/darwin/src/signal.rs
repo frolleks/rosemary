@@ -1038,7 +1038,7 @@ pub unsafe fn fault_address(info: &libc::siginfo_t) -> u64 {
 /// `context` is null or the third argument of an `SA_SIGINFO` handler.
 pub unsafe fn interrupted_pc(context: *mut c_void) -> Option<u64> {
     // SAFETY: the caller's guarantee.
-    unsafe { starnix::signal::context(context) }.map(|c| c.machine.pc())
+    unsafe { starnix::signal::pc(context) }
 }
 
 /// The entry points a guest binds to.
