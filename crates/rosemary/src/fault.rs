@@ -220,6 +220,35 @@ pub fn for_each_placed(mut f: impl FnMut(&PlacedRegion, &[GuestCodeRange])) {
 /// Whether [`install`] has run. Handlers are process-wide.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
+/// The program's file name, for the report's first line: a program of
+/// several processes - a browser and its helpers - writes every helper's
+/// report to the one terminal, and a report that does not say whose it is
+/// cannot be acted on. Set once before guest code runs, so the handler only
+/// ever reads it.
+static PROGRAM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Name the program this process runs, for [`PROGRAM`].
+pub fn set_program(executable: &std::path::Path) {
+    let name = executable
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| executable.display().to_string());
+    let _ = PROGRAM.set(name);
+}
+
+/// ` in <program> (pid N)`. Async-signal-safe: an already-set `OnceLock` is
+/// an atomic load, and `getpid` is on the list.
+fn say_process(out: &mut Buffer) {
+    if let Some(program) = PROGRAM.get() {
+        out.str(" in ");
+        out.str(program);
+    }
+    out.str(" (pid ");
+    // SAFETY: no arguments.
+    out.dec(unsafe { libc::getpid() } as u64);
+    out.str(")");
+}
+
 /// Longest image name the report keeps. `libmonobdwgc-2.0.dylib` is 23.
 const NAME: usize = 48;
 
@@ -329,6 +358,10 @@ pub fn install() {
     }
     darwin::signal::set_fault_filter(guarded_write_filter);
     keep_the_fault_signals();
+    BACKTRACE.store(
+        std::env::var_os(FAULT_BACKTRACE_ENV).is_some_and(|v| v != "0"),
+        Ordering::Relaxed,
+    );
     // `SIGABRT` beside the two faults, because the allocator is the third way a
     // program of this size dies and the only one that used to leave no report at
     // all: glibc's `free(): invalid size` goes to stderr and then straight to
@@ -388,6 +421,18 @@ pub fn install() {
 /// Off by default: the guest's handler is part of the guest, and a program that
 /// recovers from a fault by design does not survive having its handler ignored.
 pub const KEEP_FAULT_HANDLER_ENV: &str = "ROSEMARY_KEEP_FAULT_HANDLER";
+
+/// Set to add the whole frame-pointer chain to a report: every return
+/// address, and the image or translation each is in.
+///
+/// For a fault whose cause is some frames above the guest frame
+/// [`say_caller`] names - a fatal error raised from a callback, say, which
+/// is reached through code that is not the program's.
+pub const FAULT_BACKTRACE_ENV: &str = "ROSEMARY_FAULT_BACKTRACE";
+
+/// [`FAULT_BACKTRACE_ENV`], read once at [`install`], since a handler should
+/// not be reading the environment.
+static BACKTRACE: AtomicBool = AtomicBool::new(false);
 
 fn keep_the_fault_signals() {
     if !std::env::var_os(KEEP_FAULT_HANDLER_ENV).is_some_and(|v| v != "0") {
@@ -638,12 +683,29 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
             libc::SIGTRAP => "SIGTRAP",
             _ => "signal",
         });
+        say_process(&mut line);
         line.str(" on thread ");
         line.hex(me as u32 as u64);
         line.str(" at host pc ");
         line.hex(host_pc(context).unwrap_or(0));
         line.str(" - another thread is reporting its own fault first\n");
         line.flush();
+        // Restoring the default disposition and returning re-raises this
+        // fault with nothing to catch it, which takes the process down while
+        // the first thread is still writing - so its report never arrived.
+        // Wait for it, a bounded time: a reporter that hung must not keep the
+        // process alive. `nanosleep` is async-signal-safe.
+        let pause = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000,
+        };
+        for _ in 0..5_000 {
+            if !REPORTING.load(Ordering::SeqCst) {
+                break;
+            }
+            // SAFETY: a live `timespec`, and no remainder is asked for.
+            unsafe { libc::nanosleep(&pause, std::ptr::null_mut()) };
+        }
         restore(signal);
         return;
     }
@@ -664,6 +726,7 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
         libc::SIGTRAP => "SIGTRAP",
         _ => "signal",
     });
+    say_process(out);
 
     // SAFETY: the kernel passes a live `siginfo_t` for the duration of the
     // handler; `si_addr` is the faulting address for both signals handled here.
@@ -719,6 +782,9 @@ extern "C" fn report(signal: i32, info: *mut libc::siginfo_t, context: *mut libc
     // library - so the frame walk is the whole report.
     else if signal == libc::SIGABRT {
         say_caller(out, context);
+    }
+    if BACKTRACE.load(Ordering::Relaxed) {
+        say_backtrace(out, context);
     }
 
     stage(6);
@@ -784,6 +850,30 @@ fn say_caller(out: &mut Buffer, context: *mut libc::c_void) {
     } else {
         out.str(" in");
         let _ = say_image(out, ret);
+    }
+}
+
+/// Every return address in the faulting thread's frame chain, with what each
+/// is in. See [`FAULT_BACKTRACE_ENV`].
+fn say_backtrace(out: &mut Buffer, context: *mut libc::c_void) {
+    const FRAMES: usize = 64;
+    let Some((mut fp, sp, lr)) = host_frame(context) else {
+        return;
+    };
+    out.str("\n  backtrace:");
+    let returns = lr.into_iter().chain(std::iter::from_fn(|| {
+        let (next, ret) = readable(fp, sp).and_then(|f| frame(f))?;
+        fp = next;
+        Some(ret)
+    }));
+    for ret in returns.take(FRAMES) {
+        out.str("\n    ");
+        out.hex(ret);
+        if in_translation(ret) {
+            say_region(out, ret);
+        } else if !say_image(out, ret) {
+            say_host_mapping(out, ret);
+        }
     }
 }
 
@@ -1463,6 +1553,24 @@ impl Buffer {
             }
         }
         self.str("0x");
+        for i in (0..n).rev() {
+            self.bytes(&[digits[i]]);
+        }
+    }
+
+    /// The value, as `PRIu64` prints it - the pid's spelling in a fault report.
+    /// Hand-rolled for the reason the type exists.
+    fn dec(&mut self, mut value: u64) {
+        let mut digits = [0u8; 20];
+        let mut n = 0;
+        loop {
+            digits[n] = b'0' + (value % 10) as u8;
+            value /= 10;
+            n += 1;
+            if value == 0 {
+                break;
+            }
+        }
         for i in (0..n).rev() {
             self.bytes(&[digits[i]]);
         }

@@ -415,6 +415,7 @@ fn launch(path: OsString, options: &RunOptions, args: Vec<OsString>) -> ExitCode
     };
     let path = path.as_str();
     rosemary::shims::runtime::set_executable_path(std::path::Path::new(path));
+    rosemary::fault::set_program(std::path::Path::new(path));
     rosemary::frameworks::set_main_bundle(std::path::Path::new(path));
     // The same path as the guest spells it, for `argv[0]`.
     let guest = guest_spelling(path);
