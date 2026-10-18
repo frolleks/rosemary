@@ -150,6 +150,14 @@ pub fn contains(va: u64) -> bool {
     arenas::find(va).is_some()
 }
 
+/// What `darwin`'s `mach_vm_map` and `mach_vm_remap` report of a range they
+/// mapped with `VM_PROT_EXECUTE`, readable in its place: the guest means to
+/// execute it, as for an executable `mmap`.
+pub fn executable(base: u64, len: u64, prot: i32) {
+    arenas::push(base, len);
+    crate::smc::track(base, len, prot);
+}
+
 /// The shim for `name`, if this module has one.
 pub fn shim_for(
     name: &str,
