@@ -129,7 +129,10 @@ pub(crate) fn bounds_of(layer: Id) -> NSRect {
 
 pub(crate) fn set_bounds_of(layer: Id, bounds: NSRect) {
     if is_layer(layer) {
-        layer_of(layer).bounds = bounds;
+        let old = std::mem::replace(&mut layer_of(layer).bounds, bounds).size;
+        if old != bounds.size {
+            crate::coreanimation::bounds_resized(layer, old);
+        }
     }
 }
 
@@ -233,7 +236,7 @@ unsafe extern "C" fn bounds(receiver: Id, _sel: Sel) -> NSRect {
 }
 
 unsafe extern "C" fn set_bounds(receiver: Id, _sel: Sel, bounds: NSRect) {
-    layer_of(receiver).bounds = bounds;
+    set_bounds_of(receiver, bounds);
     crate::coreanimation::changed(receiver);
 }
 
