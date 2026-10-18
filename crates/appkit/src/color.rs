@@ -509,6 +509,13 @@ pub extern "C" fn NSRectFill(rect: NSRect) {
     );
 }
 
+/// `+currentControlTint`: `NSBlueControlTint`, which is what AppKit answers
+/// for the default Blue appearance. Only Graphite (`NSGraphiteControlTint`)
+/// differs, and it is a user setting nothing here offers.
+unsafe extern "C" fn current_control_tint(_class: Id, _sel: Sel) -> usize {
+    1
+}
+
 pub(crate) fn install() {
     let class = objc::class::lookup(c"NSColor").expect("declared before its methods");
     let meta = class.metaclass();
@@ -516,6 +523,7 @@ pub(crate) fn install() {
         meta.replace_method(objc::sel::get(name), named as *const c_void, c"@16@0:8");
     }
     class_methods!(class, {
+        "currentControlTint" => current_control_tint, c"Q16@0:8";
         "controlAlternatingRowBackgroundColors" => alternating_row_colors, c"@16@0:8";
         "alternatingContentBackgroundColors" => alternating_row_colors, c"@16@0:8";
         "colorWithCalibratedRed:green:blue:alpha:" => color_with_rgba, c"@48@0:8d16d24d32d40";
