@@ -404,7 +404,7 @@ mod tests {
         }
         // And the families around them are still shut: a member of one that this
         // crate has *not* implemented is refused rather than passed through.
-        assert!(contains("dispatch_source_create"));
+        assert!(contains("dispatch_io_create"));
         // The half of Mach that is still refused: reading or changing another
         // task, as opposed to asking the process server about it.
         assert!(contains("mach_vm_read"));
