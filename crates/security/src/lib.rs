@@ -5,6 +5,7 @@ pub mod keychain;
 pub mod seckeychain;
 pub mod sectask;
 pub mod trust;
+pub mod trustsettings;
 
 exports::group! {
     codesign,
@@ -12,6 +13,7 @@ exports::group! {
     seckeychain,
     sectask,
     trust,
+    trustsettings,
 }
 
 /// The `kSec*` key globals, each a cell holding an `NSString *`.
