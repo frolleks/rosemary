@@ -83,6 +83,15 @@ struct Attributes {
     /// guest's word and widened only when a host object is built.
     sigdefault: u32,
     sigmask: u32,
+    /// The CPU security mitigations `posix_spawnattr_set_csm_np` asks for:
+    /// thread execution context separation, and no sibling hyperthread shared
+    /// with another task's thread.
+    ///
+    /// Recorded and not applied. FIXME: Linux's core scheduling
+    /// (`PR_SCHED_CORE_CREATE`) is the host's no-SMT, but it has to be made in
+    /// the child before it runs, and the host spawn has no hook there.
+    tecs: bool,
+    no_smt: bool,
 }
 
 /// Read the pointer a guest's `posix_spawn*_t` holds.
@@ -1359,6 +1368,50 @@ pub unsafe extern "C" fn attr_setarchpref_np(
     unsafe { attr_setbinpref_np(at, count, prefs, taken) }
 }
 
+/// `POSIX_SPAWN_NP_CSM_ALL`, `_NOSMT` and `_TECS`, from `<spawn_private.h>`.
+const CSM_ALL: u32 = 0x1;
+const CSM_NOSMT: u32 = 0x2;
+const CSM_TECS: u32 = 0x4;
+
+/// `int posix_spawnattr_set_csm_np(const posix_spawnattr_t *, uint32_t)`, as
+/// xnu's `posix_spawn.c` has it: any flag outside the three is `EINVAL`, and
+/// `ALL` turns on both mitigations. Each only ever turns one on.
+///
+/// # Safety
+///
+/// As [`attr_setflags`].
+pub unsafe extern "C" fn attr_set_csm_np(at: *mut c_void, flags: u32) -> c_int {
+    let Some(attributes) = (unsafe { object::<Attributes>(at) }) else {
+        return libc::EINVAL;
+    };
+    if flags & !(CSM_ALL | CSM_TECS | CSM_NOSMT) != 0 {
+        return libc::EINVAL;
+    }
+    if flags & (CSM_TECS | CSM_ALL) != 0 {
+        attributes.tecs = true;
+    }
+    if flags & (CSM_NOSMT | CSM_ALL) != 0 {
+        attributes.no_smt = true;
+    }
+    0
+}
+
+/// `int posix_spawnattr_setnosmt_np(const posix_spawnattr_t *)`: the no-SMT
+/// half of [`attr_set_csm_np`].
+///
+/// # Safety
+///
+/// As [`attr_setflags`].
+pub unsafe extern "C" fn attr_setnosmt_np(at: *mut c_void) -> c_int {
+    match unsafe { object::<Attributes>(at) } {
+        Some(attributes) => {
+            attributes.no_smt = true;
+            0
+        }
+        None => libc::EINVAL,
+    }
+}
+
 /// Spawn a child for a framework's process API, such as `NSTask`.
 ///
 /// Launched as the guest's own `posix_spawn` would launch it, so `path` and
@@ -1452,12 +1505,56 @@ exports::exports! {
         "posix_spawnattr_setsigdefault" => attr_setsigdefault,
         "posix_spawnattr_setbinpref_np" => attr_setbinpref_np,
         "posix_spawnattr_setarchpref_np" => attr_setarchpref_np,
+        "posix_spawnattr_set_csm_np" => attr_set_csm_np,
+        "posix_spawnattr_setnosmt_np" => attr_setnosmt_np,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// xnu's rules for `posix_spawnattr_set_csm_np`: an uninitialized
+    /// attribute or an unknown flag is `EINVAL`, and `ALL` is both.
+    #[test]
+    fn cpu_security_mitigations_take_only_their_three_flags() {
+        let mut at: u64 = 0;
+        let at_ptr = &mut at as *mut u64 as *mut c_void;
+        unsafe {
+            assert_eq!(attr_set_csm_np(std::ptr::null_mut(), CSM_ALL), libc::EINVAL);
+            assert_eq!(
+                attr_set_csm_np(at_ptr, CSM_ALL),
+                libc::EINVAL,
+                "not yet init"
+            );
+            assert_eq!(attr_setnosmt_np(at_ptr), libc::EINVAL);
+            assert_eq!(attr_init(at_ptr), 0);
+            assert_eq!(attr_set_csm_np(at_ptr, 0x8), libc::EINVAL);
+            assert_eq!(attr_set_csm_np(at_ptr, CSM_ALL | 0x100), libc::EINVAL);
+            let attributes = object::<Attributes>(at_ptr).unwrap();
+            assert!(
+                !attributes.tecs && !attributes.no_smt,
+                "a refused call sets nothing"
+            );
+            assert_eq!(attr_set_csm_np(at_ptr, 0), 0);
+            assert_eq!(attr_set_csm_np(at_ptr, CSM_TECS), 0);
+            let attributes = object::<Attributes>(at_ptr).unwrap();
+            assert!(attributes.tecs && !attributes.no_smt);
+            assert_eq!(attr_destroy(at_ptr), 0);
+
+            assert_eq!(attr_init(at_ptr), 0);
+            assert_eq!(attr_set_csm_np(at_ptr, CSM_ALL), 0);
+            let attributes = object::<Attributes>(at_ptr).unwrap();
+            assert!(attributes.tecs && attributes.no_smt);
+            assert_eq!(attr_destroy(at_ptr), 0);
+
+            assert_eq!(attr_init(at_ptr), 0);
+            assert_eq!(attr_setnosmt_np(at_ptr), 0);
+            let attributes = object::<Attributes>(at_ptr).unwrap();
+            assert!(!attributes.tecs && attributes.no_smt);
+            assert_eq!(attr_destroy(at_ptr), 0);
+        }
+    }
 
     /// The test that decides everything else: a Mach-O is recognised by its magic,
     /// and the host's own binaries are not.
