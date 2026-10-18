@@ -10,11 +10,14 @@
 //! moment it happens: a started
 //! monitor looks again every [`POLL`], so a change is reported within that.
 //!
-//! The objects are Objective-C objects, as Apple's are (`OS_nw_path_monitor`
-//! and `OS_nw_path`): ARC retains and releases them, and `nw_retain` and
+//! The objects are Objective-C objects, as Apple's are (`OS_nw_path_monitor`,
+//! `OS_nw_path` and `OS_nw_interface`): ARC retains and releases them, and `nw_retain` and
 //! `nw_release` are the same two calls.
 
-use std::ffi::c_void;
+// The entry points are C functions whose safety is the C header's contract.
+#![allow(clippy::missing_safety_doc)]
+
+use std::ffi::{CString, c_char, c_void};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -58,6 +61,21 @@ pub struct Path {
     pub status: Status,
     /// The interfaces the path may use, the one carrying the route first.
     pub interfaces: Vec<Interface>,
+}
+
+/// The object an `nw_interface_t` is, which owns a copy of what it names so
+/// it outlives the path it came from.
+#[repr(C)]
+struct InterfaceBody {
+    isa: *const c_void,
+    /// From `Box::into_raw`, freed by `-dealloc`.
+    data: *mut InterfaceData,
+}
+
+struct InterfaceData {
+    interface: Interface,
+    /// `name`, NUL-terminated for `nw_interface_get_name`.
+    name: CString,
 }
 
 /// One interface a path may use.
@@ -160,6 +178,47 @@ fn path_class() -> &'static Class {
         );
         class
     })
+}
+
+fn interface_class() -> &'static Class {
+    static CLASS: std::sync::OnceLock<&'static Class> = std::sync::OnceLock::new();
+    CLASS.get_or_init(|| {
+        let class = corefoundation::base::register(
+            c"OS_nw_interface",
+            None,
+            size_of::<InterfaceBody>(),
+            false,
+        );
+        class.add_method(
+            objc::sel::get("dealloc"),
+            interface_dealloc as *const c_void,
+            c"v16@0:8",
+        );
+        class
+    })
+}
+
+/// A new interface at +1.
+fn make_interface(interface: Interface) -> Id {
+    // SAFETY: `InterfaceBody` is the layout the class was registered with.
+    let body: *mut InterfaceBody = unsafe { corefoundation::base::allocate(interface_class()) };
+    if !body.is_null() {
+        // Interface names never hold a NUL, but a lossy name is better than none.
+        let name = CString::new(interface.name.replace('\0', "")).unwrap_or_default();
+        let data = Box::new(InterfaceData { interface, name });
+        // SAFETY: freshly allocated.
+        unsafe { (*body).data = Box::into_raw(data) };
+    }
+    body as Id
+}
+
+fn interface_of<'a>(object: Id) -> Option<&'a InterfaceData> {
+    if !is_instance(object, interface_class()) {
+        return None;
+    }
+    // SAFETY: an instance of the interface class, whose body `make_interface`
+    // wrote.
+    Some(unsafe { &*(*(object as *const InterfaceBody)).data })
 }
 
 /// Whether `object` is a non-nil instance of exactly `class`.
@@ -392,6 +451,20 @@ pub unsafe extern "C" fn nw_path_monitor_create() -> Id {
     body as Id
 }
 
+/// `nw_path_monitor_t nw_path_monitor_create_with_type(nw_interface_type_t)`,
+/// at +1: a monitor whose paths use only interfaces of this type.
+pub unsafe extern "C" fn nw_path_monitor_create_with_type(kind: i32) -> Id {
+    // SAFETY: the entry point above.
+    let object = unsafe { nw_path_monitor_create() };
+    if let Some(monitor) = monitor_of(object) {
+        lock(monitor).prohibited = match (0..32).contains(&kind) {
+            true => !(1 << kind),
+            false => u32::MAX,
+        };
+    }
+    object
+}
+
 /// `void nw_path_monitor_set_queue(nw_path_monitor_t, dispatch_queue_t)`
 pub unsafe extern "C" fn nw_path_monitor_set_queue(object: Id, queue: u64) {
     let Some(monitor) = monitor_of(object) else {
@@ -480,6 +553,70 @@ pub unsafe extern "C" fn nw_path_get_status(path: Id) -> i32 {
     path_of(path).map_or(Status::Invalid, |p| p.status) as i32
 }
 
+/// `bool nw_path_is_equal(nw_path_t, nw_path_t)`
+pub unsafe extern "C" fn nw_path_is_equal(path: Id, other: Id) -> bool {
+    path_of(path).is_some_and(|p| path_of(other) == Some(p))
+}
+
+/// `bool nw_path_uses_interface_type(nw_path_t, nw_interface_type_t)`
+pub unsafe extern "C" fn nw_path_uses_interface_type(path: Id, kind: i32) -> bool {
+    path_of(path).is_some_and(|p| p.interfaces.iter().any(|i| i.kind as i32 == kind))
+}
+
+/// `bool nw_path_is_expensive(nw_path_t)`: Apple's means cellular, or a
+/// hotspot it knows to be one, and only the first is visible from a host.
+pub unsafe extern "C" fn nw_path_is_expensive(path: Id) -> bool {
+    path_of(path)
+        .and_then(|p| p.interfaces.first())
+        .is_some_and(|i| i.kind == InterfaceType::Cellular)
+}
+
+/// `bool nw_path_is_constrained(nw_path_t)`: Low Data Mode, which no host
+/// here has a setting for.
+pub unsafe extern "C" fn nw_path_is_constrained(_path: Id) -> bool {
+    false
+}
+
+/// `void nw_path_enumerate_interfaces(nw_path_t,
+/// nw_path_enumerate_interfaces_block_t)`: the block is `bool (^)(nw_interface_t)`
+/// and runs before this returns, once per interface until it answers false.
+pub unsafe extern "C" fn nw_path_enumerate_interfaces(path: Id, block: Id) {
+    let Some(path) = path_of(path) else {
+        return;
+    };
+    // SAFETY: nil or the caller's block.
+    let Some(invoke) = (unsafe { objc::block::invoke(block) }) else {
+        return;
+    };
+    // SAFETY: the enumerate block's prototype.
+    let f: unsafe extern "C" fn(Id, Id) -> bool = unsafe { std::mem::transmute(invoke) };
+    for interface in &path.interfaces {
+        let object = make_interface(interface.clone());
+        // SAFETY: the caller's block, handed an interface it may retain.
+        let more = unsafe { f(block, object) };
+        objc::arc::release(object);
+        if !more {
+            break;
+        }
+    }
+}
+
+/// `nw_interface_type_t nw_interface_get_type(nw_interface_t)`
+pub unsafe extern "C" fn nw_interface_get_type(interface: Id) -> i32 {
+    interface_of(interface).map_or(InterfaceType::Other, |i| i.interface.kind) as i32
+}
+
+/// `const char *nw_interface_get_name(nw_interface_t)`, alive as long as the
+/// interface is.
+pub unsafe extern "C" fn nw_interface_get_name(interface: Id) -> *const c_char {
+    interface_of(interface).map_or(std::ptr::null(), |i| i.name.as_ptr())
+}
+
+/// `uint32_t nw_interface_get_index(nw_interface_t)`
+pub unsafe extern "C" fn nw_interface_get_index(interface: Id) -> u32 {
+    interface_of(interface).map_or(0, |i| i.interface.index)
+}
+
 /// `void *nw_retain(void *obj)`
 pub unsafe extern "C" fn nw_retain(object: Id) -> Id {
     objc::arc::retain(object)
@@ -494,6 +631,13 @@ unsafe extern "C" fn path_dealloc(receiver: Id, _sel: Sel) {
     // SAFETY: `-dealloc` of a `PathBody` whose `path` came from
     // `Box::into_raw`, taken back once.
     drop(unsafe { Box::from_raw((*(receiver as *mut PathBody)).path) });
+    objc::arc::finalize(receiver);
+}
+
+unsafe extern "C" fn interface_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: `-dealloc` of an `InterfaceBody` whose `data` came from
+    // `Box::into_raw`, taken back once.
+    drop(unsafe { Box::from_raw((*(receiver as *mut InterfaceBody)).data) });
     objc::arc::finalize(receiver);
 }
 
@@ -526,7 +670,16 @@ exports::exports! {
         "nw_path_monitor_prohibit_interface_type" => nw_path_monitor_prohibit_interface_type,
         "nw_path_monitor_start" => nw_path_monitor_start,
         "nw_path_monitor_cancel" => nw_path_monitor_cancel,
+        "nw_path_monitor_create_with_type" => nw_path_monitor_create_with_type,
         "nw_path_get_status" => nw_path_get_status,
+        "nw_path_is_equal" => nw_path_is_equal,
+        "nw_path_uses_interface_type" => nw_path_uses_interface_type,
+        "nw_path_is_expensive" => nw_path_is_expensive,
+        "nw_path_is_constrained" => nw_path_is_constrained,
+        "nw_path_enumerate_interfaces" => nw_path_enumerate_interfaces,
+        "nw_interface_get_type" => nw_interface_get_type,
+        "nw_interface_get_name" => nw_interface_get_name,
+        "nw_interface_get_index" => nw_interface_get_index,
         "nw_retain" => nw_retain,
         "nw_release" => nw_release,
     }
@@ -673,6 +826,85 @@ mod tests {
             current_path(1 << InterfaceType::Loopback as u32),
             current_path(0)
         );
+    }
+
+    static SEEN: AtomicUsize = AtomicUsize::new(0);
+    static FIRST_KIND: AtomicI32 = AtomicI32::new(-1);
+    static FIRST_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn on_interface(_block: Id, interface: Id) -> bool {
+        // SAFETY: the interface the path hands over.
+        unsafe {
+            FIRST_KIND.store(nw_interface_get_type(interface), Ordering::SeqCst);
+            FIRST_INDEX.store(nw_interface_get_index(interface) as usize, Ordering::SeqCst);
+            let name = std::ffi::CStr::from_ptr(nw_interface_get_name(interface));
+            assert_eq!(name.to_bytes(), b"wwan0");
+        }
+        SEEN.fetch_add(1, Ordering::SeqCst);
+        false
+    }
+
+    /// A path answers what it uses from its interface list, in order, and
+    /// enumeration stops when the block says so.
+    #[test]
+    fn a_path_answers_for_its_interfaces() {
+        let path = make_path(Path {
+            status: Status::Satisfied,
+            interfaces: vec![
+                Interface {
+                    name: "wwan0".into(),
+                    index: 7,
+                    kind: InterfaceType::Cellular,
+                },
+                Interface {
+                    name: "wlan0".into(),
+                    index: 3,
+                    kind: InterfaceType::Wifi,
+                },
+            ],
+        });
+        let each = block(on_interface as *const c_void);
+        // SAFETY: the entry points, called as a guest would.
+        unsafe {
+            assert!(nw_path_uses_interface_type(
+                path,
+                InterfaceType::Wifi as i32
+            ));
+            assert!(!nw_path_uses_interface_type(
+                path,
+                InterfaceType::Wired as i32
+            ));
+            assert!(nw_path_is_expensive(path));
+            assert!(!nw_path_is_constrained(path));
+            assert!(nw_path_is_equal(path, path));
+            nw_path_enumerate_interfaces(path, each.as_ref() as *const _ as Id);
+            assert_eq!(SEEN.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                FIRST_KIND.load(Ordering::SeqCst),
+                InterfaceType::Cellular as i32
+            );
+            assert_eq!(FIRST_INDEX.load(Ordering::SeqCst), 7);
+            nw_release(path);
+        }
+    }
+
+    /// A monitor made for one type reports paths through that type only.
+    #[test]
+    fn a_typed_monitor_prohibits_every_other_type() {
+        // SAFETY: the entry points, called as a guest would.
+        unsafe {
+            let monitor = nw_path_monitor_create_with_type(InterfaceType::Wifi as i32);
+            let prohibited = lock(monitor_of(monitor).unwrap()).prohibited;
+            assert_eq!(prohibited & 1 << InterfaceType::Wifi as u32, 0);
+            assert_ne!(prohibited & 1 << InterfaceType::Wired as u32, 0);
+            assert!(
+                current_path(prohibited)
+                    .interfaces
+                    .iter()
+                    .all(|i| i.kind == InterfaceType::Wifi)
+            );
+            nw_release(monitor);
+        }
     }
 
     #[test]
