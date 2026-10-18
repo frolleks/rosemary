@@ -36,6 +36,36 @@ pub extern "C" fn mach_thread_self() -> Name {
     space::insert_thread(pid, tid)
 }
 
+/// `mach_port_name_t task_self_trap(void)`, the trap libsyscall initialises
+/// `mach_task_self_` from, which some images call themselves.
+pub extern "C" fn task_self_trap() -> Name {
+    TASK_SELF
+}
+
+/// `mach_port_name_t host_self_trap(void)`, behind `mach_host_self`.
+pub extern "C" fn host_self_trap() -> Name {
+    HOST_SELF
+}
+
+/// `mach_port_name_t thread_self_trap(void)`: libsyscall's `mach_thread_self`
+/// is this trap, user reference and all.
+pub extern "C" fn thread_self_trap() -> Name {
+    mach_thread_self()
+}
+
+/// `mach_port_name_t mach_reply_port(void)`: a new receive right, the trap
+/// `mig_get_reply_port` makes its ports with. `MACH_PORT_NULL` when none can
+/// be made.
+pub extern "C" fn mach_reply_port() -> Name {
+    let mut name = MACH_PORT_NULL;
+    // SAFETY: a live local for the out-parameter.
+    let kr = unsafe { space::mach_port_allocate(TASK_SELF, space::RIGHT_RECEIVE, &mut name) };
+    match kr {
+        KERN_SUCCESS => name,
+        _ => MACH_PORT_NULL,
+    }
+}
+
 /// `TASK_BOOTSTRAP_PORT`, the only special port anything here answers for.
 const TASK_BOOTSTRAP_PORT: i32 = 4;
 
@@ -264,6 +294,29 @@ pub unsafe extern "C" fn task_swap_exception_ports(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_self_traps_name_what_their_wrappers_do() {
+        assert_eq!(task_self_trap(), mach_task_self());
+        assert_eq!(host_self_trap(), mach_host_self());
+        let thread = thread_self_trap();
+        assert_eq!(thread, mach_thread_self(), "one name per thread");
+        for _ in 0..2 {
+            space::mach_port_deallocate(TASK_SELF, thread);
+        }
+    }
+
+    #[test]
+    fn a_reply_port_is_a_fresh_receive_right() {
+        let first = mach_reply_port();
+        let second = mach_reply_port();
+        assert_ne!(first, MACH_PORT_NULL);
+        assert_ne!(first, second);
+        for name in [first, second] {
+            assert!(space::receiver(name).is_some());
+            space::destroy(name);
+        }
+    }
 
     /// The data symbol that is the whole reason for this module: it must hold a
     /// name the port calls accept, not zero.
