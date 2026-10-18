@@ -69,6 +69,10 @@ pub struct Timer {
     valid: AtomicBool,
     /// The `f64` bits of the tolerance `CFRunLoopTimerSetTolerance` set.
     tolerance: AtomicU64,
+    /// The absolute date the fire time was last given as, and the instant that
+    /// became: `CFRunLoopTimerGetNextFireDate` answers the date a caller set,
+    /// exactly, until the timer moves on from it.
+    anchor: Mutex<Option<(Instant, f64)>>,
 }
 
 // SAFETY: as [`Source`].
@@ -113,6 +117,31 @@ impl Timer {
     /// being refused: that is what a caller asking for "now" means.
     pub fn set_next(&self, when: Instant) {
         *self.next.lock().unwrap_or_else(|e| e.into_inner()) = when;
+    }
+
+    /// [`Timer::set_next`] for a fire time given as the absolute date `date`,
+    /// which `when` is on the monotonic clock.
+    pub fn set_next_date(&self, when: Instant, date: f64) {
+        let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
+        *next = when;
+        *self.anchor.lock().unwrap_or_else(|e| e.into_inner()) = Some((when, date));
+    }
+
+    /// The absolute date the next fire time was given as, while it still is
+    /// that time - `None` once the timer has fired and moved on, or if it was
+    /// never given as one.
+    pub fn next_date(&self) -> Option<f64> {
+        let next = *self.next.lock().unwrap_or_else(|e| e.into_inner());
+        self.anchor
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .filter(|(when, _)| *when == next)
+            .map(|(_, date)| date)
+    }
+
+    /// The next fire date, valid or not: `CFRunLoopTimerGetNextFireDate`.
+    pub fn next_fire(&self) -> Instant {
+        *self.next.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// When this timer is next due, or `None` if it never is.
@@ -245,6 +274,19 @@ pub struct RunLoop {
     /// Set while the loop is asleep, for `CFRunLoopIsWaiting`. A caller asks it
     /// from *another* thread to decide whether it needs to wake this one.
     waiting: AtomicBool,
+    /// The modes the loop is running, innermost last - a callout may run the
+    /// loop again in another mode - for `CFRunLoopCopyCurrentMode`.
+    running: Mutex<Vec<String>>,
+    /// `CFRunLoopPerformBlock`'s queue, oldest first: CF's `_blocks_head`.
+    blocks: Mutex<std::collections::VecDeque<BlockItem>>,
+}
+
+/// One block `CFRunLoopPerformBlock` queued: a heap copy, and the modes it may
+/// run in - one name, which may be the common-modes alias, or a set of them.
+pub struct BlockItem {
+    pub modes: Vec<String>,
+    /// The `_Block_copy` this queue owns, released once it has run.
+    pub block: u64,
 }
 
 pub const DEFAULT_MODE: &str = "kCFRunLoopDefaultMode";
@@ -268,7 +310,94 @@ impl RunLoop {
             stopped: AtomicBool::new(false),
             waker: (Mutex::new(false), Condvar::new()),
             waiting: AtomicBool::new(false),
+            running: Mutex::new(Vec::new()),
+            blocks: Mutex::new(std::collections::VecDeque::new()),
         }
+    }
+
+    /// `CFRunLoopPerformBlock`: queue `item` to run the next time the loop
+    /// passes through one of its modes. The loop is not woken, as CF's is not.
+    pub fn perform_block(&self, item: BlockItem) {
+        self.blocks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(item);
+    }
+
+    /// Whether a queued block may run in `mode`, by `__CFRunLoopDoBlocks`'
+    /// rule: its mode is this one, or is the common-modes alias and this mode
+    /// is a common one.
+    fn block_runs_in(&self, item: &BlockItem, mode: &str) -> bool {
+        item.modes
+            .iter()
+            .any(|m| m == mode || (m == COMMON_MODES && self.is_common(mode)))
+    }
+
+    /// `__CFRunLoopDoBlocks`: run, in order, every queued block that may run
+    /// in `mode`, keeping the rest in front of anything queued meanwhile. A
+    /// block queued by a block runs on a later pass.
+    fn do_blocks(&self, mode: &str) -> bool {
+        let pending = std::mem::take(&mut *self.blocks.lock().unwrap_or_else(|e| e.into_inner()));
+        if pending.is_empty() {
+            return false;
+        }
+        let (run, keep): (Vec<_>, Vec<_>) =
+            pending.into_iter().partition(|item| self.block_runs_in(item, mode));
+        {
+            let mut blocks = self.blocks.lock().unwrap_or_else(|e| e.into_inner());
+            for item in keep.into_iter().rev() {
+                blocks.push_front(item);
+            }
+        }
+        let ran = !run.is_empty();
+        for item in run {
+            // SAFETY: a heap copy `CFRunLoopPerformBlock` took, callable on the
+            // loop's thread.
+            unsafe { darwin::dispatch::block::invoke(item.block) };
+            darwin::dispatch::block::release(item.block);
+        }
+        ran
+    }
+
+    /// Whether a queued block may run in `mode`, which keeps it from being
+    /// empty, as `__CFRunLoopModeIsEmpty` counts them.
+    fn has_block(&self, mode: &str) -> bool {
+        let blocks = self.blocks.lock().unwrap_or_else(|e| e.into_inner());
+        blocks.iter().any(|item| self.block_runs_in(item, mode))
+    }
+
+    /// The mode the loop is running in, or `None` when it is not running:
+    /// `CFRunLoopCopyCurrentMode`.
+    pub fn current_mode(&self) -> Option<String> {
+        self.running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last()
+            .cloned()
+    }
+
+    /// Whether `mode` is one of the loop's common modes.
+    fn is_common(&self, mode: &str) -> bool {
+        self.common
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .names
+            .iter()
+            .any(|name| name == mode)
+    }
+
+    /// Whether this pass of the loop services the main dispatch queue, as
+    /// `__CFRunLoopRun` decides it: the main loop, on the main thread, in a
+    /// common mode - and not from inside a main-queue block, which would run
+    /// the queue's next block before the one running had finished
+    /// (`__CFTSDKeyIsInGCDMainQ`).
+    fn serves_main_queue(&self, mode: &str) -> bool {
+        // SAFETY: no arguments; answers from thread ids.
+        let on_main = unsafe { darwin::pthread::main_np() } != 0;
+        on_main
+            && std::ptr::eq(self, Arc::as_ptr(&main()))
+            && self.is_common(mode)
+            && !darwin::dispatch::queue::is_draining_main()
     }
 
     /// The modes a name refers to: itself, or the common set for the alias.
@@ -475,7 +604,14 @@ impl RunLoop {
     /// `CFRunLoopRunInMode` on an empty mode returns immediately rather than
     /// waiting out its timeout: a loop with no sources is one nothing can ever
     /// wake, and sleeping in it is indistinguishable from a hang.
+    ///
+    /// The main loop asked on the main thread in a common mode is never empty:
+    /// the main dispatch queue is a source of it - "represents the libdispatch
+    /// main queue", in `__CFRunLoopModeIsEmpty`.
     pub fn is_empty(&self, mode: &str) -> bool {
+        if self.serves_main_queue(mode) || self.has_block(mode) {
+            return false;
+        }
         let modes = self.modes.lock().unwrap_or_else(|e| e.into_inner());
         self.names(mode).iter().all(|name| {
             modes.get(name).is_none_or(|m| {
@@ -525,11 +661,37 @@ impl RunLoop {
 
     /// Run `mode` for at most `seconds`, as `CFRunLoopRunInMode` does.
     pub fn run_in_mode(&self, mode: &str, seconds: f64, return_after_source: bool) -> i32 {
+        struct Running<'a>(&'a Mutex<Vec<String>>);
+        impl Drop for Running<'_> {
+            fn drop(&mut self) {
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).pop();
+            }
+        }
+        self.running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(mode.to_string());
+        let _running = Running(&self.running);
+        self.run_mode(mode, seconds, return_after_source)
+    }
+
+    fn run_mode(&self, mode: &str, seconds: f64, return_after_source: bool) -> i32 {
         self.stopped.store(false, Ordering::Release);
+        // The main queue is a source of the mode's for the whole run: CF's
+        // `__CFRunLoopModeIsEmpty` counts it, so a main loop in a common mode
+        // is never finished, and its port is one of those the loop sleeps on.
+        let main_queue = self.serves_main_queue(mode);
         self.observe(mode, activity::ENTRY);
-        let deadline = match seconds.is_finite() && seconds >= 0.0 {
-            true => Instant::now().checked_add(Duration::from_secs_f64(seconds.min(1e9))),
-            false => None,
+        // `__CFRunLoopRun`'s three cases: a timeout at or below zero is "an
+        // instant timeout", one pass; up to `TIMER_INTERVAL_LIMIT` is a
+        // deadline; anything past it - or not a number - is no deadline at all.
+        const TIMER_INTERVAL_LIMIT: f64 = 504_911_232.0;
+        let deadline = if seconds <= 0.0 {
+            Some(Instant::now())
+        } else if seconds <= TIMER_INTERVAL_LIMIT {
+            Instant::now().checked_add(Duration::from_secs_f64(seconds))
+        } else {
+            None
         };
 
         loop {
@@ -537,7 +699,7 @@ impl RunLoop {
                 self.observe(mode, activity::EXIT);
                 return result::STOPPED;
             }
-            if self.is_empty(mode) && !self.has_observer(mode) {
+            if !main_queue && self.is_empty(mode) && !self.has_observer(mode) {
                 self.observe(mode, activity::EXIT);
                 return result::FINISHED;
             }
@@ -551,8 +713,23 @@ impl RunLoop {
                 handled |= timer.fire(now);
             }
             self.observe(mode, activity::BEFORE_SOURCES);
+            // Blocks run before the version-0 sources and again after them
+            // when one fired, as `__CFRunLoopRun` orders it. Neither counts as
+            // a source handled.
+            self.do_blocks(mode);
+            let mut fired = false;
             for source in &sources {
-                handled |= source.fire();
+                fired |= source.fire();
+            }
+            if fired {
+                self.do_blocks(mode);
+            }
+            handled |= fired;
+            // `__CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__`, which counts
+            // as a source handled.
+            if main_queue && darwin::dispatch::queue::main_has_work() {
+                darwin::dispatch::queue::drain_main();
+                handled = true;
             }
             if handled && return_after_source {
                 self.observe(mode, activity::EXIT);
@@ -583,6 +760,7 @@ impl RunLoop {
             self.wait_until(wait_until);
             self.waiting.store(false, Ordering::Release);
             self.observe(mode, activity::AFTER_WAITING);
+            self.do_blocks(mode);
         }
     }
 
@@ -695,6 +873,7 @@ pub fn new_timer(
         info,
         valid: AtomicBool::new(true),
         tolerance: AtomicU64::new(0),
+        anchor: Mutex::new(None),
     });
     note(Arc::as_ptr(&timer));
     timer
@@ -728,7 +907,18 @@ pub fn current() -> Arc<RunLoop> {
 /// The main thread's run loop, made if nothing has asked for it yet.
 pub fn main() -> Arc<RunLoop> {
     let mut main = MAIN.lock().unwrap_or_else(|e| e.into_inner());
-    Arc::clone(main.get_or_insert_with(fresh))
+    Arc::clone(main.get_or_insert_with(|| {
+        // Work reaching the main queue wakes this loop, as the main queue's
+        // port wakes CF's.
+        darwin::dispatch::queue::on_main_arrival(wake_main);
+        fresh()
+    }))
+}
+
+fn wake_main() {
+    if let Some(main) = MAIN.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        main.wake();
+    }
 }
 
 fn fresh() -> Arc<RunLoop> {
@@ -740,6 +930,105 @@ fn fresh() -> Arc<RunLoop> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A global block literal of the Blocks ABI, whose `invoke` calls a
+    // closure this test leaked. `_Block_copy` hands a global one back as is.
+    #[repr(C)]
+    struct Descriptor {
+        reserved: u64,
+        size: u64,
+    }
+
+    #[repr(C)]
+    struct Literal {
+        isa: u64,
+        flags: i32,
+        reserved: i32,
+        invoke: unsafe extern "C" fn(*const Literal),
+        descriptor: *const Descriptor,
+        body: *const Box<dyn Fn()>,
+    }
+
+    static DESCRIPTOR: Descriptor = Descriptor { reserved: 0, size: size_of::<Literal>() as u64 };
+
+    unsafe extern "C" fn invoke(block: *const Literal) {
+        // SAFETY: a literal `block` built, whose body it leaked.
+        unsafe { (*(*block).body)() };
+    }
+
+    fn block(body: impl Fn() + 'static) -> u64 {
+        let (Some(copy), Some(release)) = (
+            objc::block::symbol("_Block_copy"),
+            objc::block::symbol("_Block_release"),
+        ) else {
+            panic!("no block runtime");
+        };
+        darwin::dispatch::block::set_runtime(copy, release);
+        let isa = objc::block::data_symbols()
+            .into_iter()
+            .find(|(name, _)| name == "__NSConcreteGlobalBlock")
+            .map_or(0, |(_, address)| address);
+        let body: &'static Box<dyn Fn()> = Box::leak(Box::new(Box::new(body) as Box<dyn Fn()>));
+        Box::leak(Box::new(Literal {
+            isa,
+            flags: 1 << 28,
+            reserved: 0,
+            invoke,
+            descriptor: &DESCRIPTOR,
+            body,
+        })) as *mut Literal as u64
+    }
+
+    fn queue(run_loop: &RunLoop, modes: &[&str], body: impl Fn() + 'static) {
+        let block = darwin::dispatch::block::copy(block(body)).expect("a copy");
+        run_loop.perform_block(BlockItem {
+            modes: modes.iter().map(|m| m.to_string()).collect(),
+            block,
+        });
+    }
+
+    /// `__CFRunLoopDoBlocks`: a block runs in its own mode, in the order
+    /// queued, and only there - one queued for another mode waits for it; and
+    /// a mode with a block waiting is not empty, as `__CFRunLoopModeIsEmpty`
+    /// counts it.
+    #[test]
+    fn performed_blocks_run_in_their_modes_in_order() {
+        objc::bootstrap();
+        let run_loop = RunLoop::new();
+        let ran = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        for (name, modes) in [("a", &["one"][..]), ("other", &["two"][..]), ("b", &["two", "one"][..])] {
+            let ran = ran.clone();
+            queue(&run_loop, modes, move || ran.borrow_mut().push(name));
+        }
+        assert!(!run_loop.is_empty("one"));
+        assert!(run_loop.is_empty("three"));
+        run_loop.run_in_mode("one", 0.0, false);
+        assert_eq!(*ran.borrow(), ["a", "b"]);
+        assert!(run_loop.is_empty("one"), "nothing left for it");
+        run_loop.run_in_mode("two", 0.0, false);
+        assert_eq!(*ran.borrow(), ["a", "b", "other"]);
+    }
+
+    /// A block queued under the common-modes alias runs in any common mode;
+    /// and one a block queues runs on a later pass, not the one running.
+    #[test]
+    fn common_mode_blocks_run_in_a_common_mode_and_a_queued_block_waits() {
+        objc::bootstrap();
+        let run_loop = std::rc::Rc::new(RunLoop::new());
+        let ran = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        {
+            let (ran, inner_loop) = (ran.clone(), run_loop.clone());
+            queue(&run_loop, &[COMMON_MODES], move || {
+                ran.borrow_mut().push("outer");
+                let ran = ran.clone();
+                queue(&inner_loop, &[DEFAULT_MODE], move || ran.borrow_mut().push("inner"));
+            });
+        }
+        run_loop.do_blocks(DEFAULT_MODE);
+        assert_eq!(*ran.borrow(), ["outer"], "the default mode is a common one");
+        run_loop.do_blocks(DEFAULT_MODE);
+        assert_eq!(*ran.borrow(), ["outer", "inner"]);
+    }
     use std::sync::atomic::AtomicUsize;
 
     /// A counter and a pair of callbacks, per test.
