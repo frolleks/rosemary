@@ -2247,6 +2247,7 @@ dependencies = [
  "iosurface",
  "libc",
  "machish",
+ "mediaaccessibility",
  "metal",
  "microlift",
  "mimalloc",
