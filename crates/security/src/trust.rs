@@ -1053,6 +1053,27 @@ pub unsafe extern "C" fn SecCertificateCopyNormalizedSubjectSequence(certificate
     }
 }
 
+/// A certificate object for `der`, owned by the caller - for the modules that
+/// hand certificates out.
+pub(crate) fn certificate_object(der: &[u8]) -> CFTypeRef {
+    new(Payload::Certificate(der.to_vec()))
+}
+
+/// The DER of a certificate object, for the modules that take them in.
+///
+/// # Safety
+///
+/// `certificate` is null or a live object.
+pub(crate) unsafe fn certificate_der<'a>(certificate: CFTypeRef) -> Option<&'a [u8]> {
+    // SAFETY: the caller's guarantee.
+    unsafe { der_of(certificate) }
+}
+
+/// The certificates of the system's anchors, as the host's bundle has them.
+pub(crate) fn system_anchors() -> &'static [Vec<u8>] {
+    host_anchors()
+}
+
 exports::exports! {
     functions {
         "SecCertificateCreateWithData" => SecCertificateCreateWithData,
