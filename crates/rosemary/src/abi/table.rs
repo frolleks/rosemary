@@ -4423,6 +4423,14 @@ pub static REFUSED: &[(&str, &str)] = &[
     // on the caller's stack; AAPCS64 has the caller copy it and pass a pointer.
     // Both are "in memory" and they are still not the same thing.
     ("audit_token_to_pid", AGGREGATE),
+    ("audit_token_to_auid", AGGREGATE),
+    ("audit_token_to_euid", AGGREGATE),
+    ("audit_token_to_egid", AGGREGATE),
+    ("audit_token_to_ruid", AGGREGATE),
+    ("audit_token_to_rgid", AGGREGATE),
+    ("audit_token_to_asid", AGGREGATE),
+    ("audit_token_to_pidversion", AGGREGATE),
+    ("audit_token_to_au32", AGGREGATE),
     // `void IODispatchCalloutFromMessage(void *unused, mach_msg_header_t *msg,
     // void *reference)` - the IOKit notification pump.
     (
