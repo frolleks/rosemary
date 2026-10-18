@@ -651,10 +651,6 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_kUTTagClassOSType", "com.apple.ostype"),
     // CoreGraphics names, passed back in as colour space names and as an
     // options key that is free to be ignored.
-    (
-        "_kCGColorSpaceExtendedLinearSRGB",
-        "kCGColorSpaceExtendedLinearSRGB",
-    ),
     // SDL's GPU swapchain table reads it whenever the OS version says it exists.
     ("_kCGColorSpaceITUR_2100_PQ", "kCGColorSpaceITUR_2100_PQ"),
     (

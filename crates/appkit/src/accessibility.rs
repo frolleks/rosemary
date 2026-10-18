@@ -558,6 +558,4 @@ pub const UNPAIRED: &[(&str, &str)] = &[
         "_NSAccessibilityMarkedMisspelledTextAttribute",
         "AXMarkedMisspelled",
     ),
-    ("_NSAccessibilityAnnouncementKey", "AXAnnouncementKey"),
-    ("_NSAccessibilityPriorityKey", "AXPriorityKey"),
 ];
