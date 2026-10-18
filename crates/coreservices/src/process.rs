@@ -210,8 +210,30 @@ pub unsafe extern "C" fn CSCopyMachineName() -> *mut c_void {
     foundation::string::from_str(&name).cast()
 }
 
+/// `void _LSSetApplicationLaunchServicesServerConnectionStatus(uint64_t
+/// flags, bool (^allowed)(CFDictionaryRef))`: close this process's
+/// connections to `launchservicesd` and let `allowed` decide on new ones.
+///
+/// A sandboxed process calls it to cut itself off. There is no
+/// `launchservicesd` here and no Launch Services call that would connect to
+/// one, so there is nothing to close and no connection to ask `allowed`
+/// about; the block is not kept.
+pub unsafe extern "C" fn _LSSetApplicationLaunchServicesServerConnectionStatus(
+    _flags: u64,
+    _allowed: *mut c_void,
+) {
+}
+
+/// `void _CSCheckFixDisable(void)`: stop Core Services looking up
+/// compatibility fixes for this process, a lookup a sandbox would refuse.
+/// Nothing here looks any up.
+pub unsafe extern "C" fn _CSCheckFixDisable() {}
+
 exports::exports! {
     functions {
+        "_LSSetApplicationLaunchServicesServerConnectionStatus"
+            => _LSSetApplicationLaunchServicesServerConnectionStatus,
+        "_CSCheckFixDisable" => _CSCheckFixDisable,
         "CSCopyMachineName" => CSCopyMachineName,
         "GetCurrentProcess" => GetCurrentProcess,
         "GetFrontProcess" => GetFrontProcess,
