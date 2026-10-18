@@ -27,7 +27,7 @@ fn matches(wanted: &[String], symbol: &str) -> bool {
 /// Report the call about to be serviced.
 pub fn entering(symbol: &str, ctx: &RegisterContext) {
     eprintln!(
-        "rosemary: call [{:#x}] at {:#x} {symbol}({:#x}, {:#x}, {:#x}, {:#x})",
+        "rosemary: call [{}] at {:#x} {symbol}({:#x}, {:#x}, {:#x}, {:#x})",
         thread_id(),
         ctx.rip,
         ctx.rdi,
@@ -41,17 +41,18 @@ pub fn entering(symbol: &str, ctx: &RegisterContext) {
 pub fn leaving<T>(symbol: &str, ctx: &RegisterContext, result: &Result<T, crate::abi::AbiError>) {
     match result {
         Ok(_) => eprintln!(
-            "rosemary: call [{:#x}] {symbol} -> {:#x}",
+            "rosemary: call [{}] {symbol} -> {:#x}",
             thread_id(),
             ctx.rax
         ),
-        Err(e) => eprintln!("rosemary: call [{:#x}] {symbol} !! {e}", thread_id()),
+        Err(e) => eprintln!("rosemary: call [{}] {symbol} !! {e}", thread_id()),
     }
 }
 
-/// This thread, as a number small enough to read across a log.
-fn thread_id() -> u32 {
-    darwin::pthread::id()
+/// This process and thread, as `pid:thread`: a log several guests write to
+/// needs both to be read.
+fn thread_id() -> String {
+    format!("{}:{:#x}", std::process::id(), darwin::pthread::id())
 }
 
 #[cfg(test)]
