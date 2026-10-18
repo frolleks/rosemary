@@ -33,10 +33,14 @@ pub const MACH_SEND_INVALID_RIGHT: i32 = 0x1000_000au32 as i32;
 pub const MACH_SEND_INVALID_TYPE: i32 = 0x1000_000fu32 as i32;
 pub const MACH_SEND_NO_BUFFER: i32 = 0x1000_000du32 as i32;
 pub const MACH_SEND_TOO_LARGE: i32 = 0x1000_000eu32 as i32;
+pub const MACH_SEND_INVALID_MEMORY: i32 = 0x1000_000cu32 as i32;
 pub const MACH_RCV_INVALID_NAME: i32 = 0x1000_4002u32 as i32;
 pub const MACH_RCV_TIMED_OUT: i32 = 0x1000_4003u32 as i32;
 pub const MACH_RCV_TOO_LARGE: i32 = 0x1000_4004u32 as i32;
 pub const MACH_RCV_BODY_ERROR: i32 = 0x1000_400cu32 as i32;
+/// `MACH_MSG_VM_SPACE`: a bit or-ed into a receive's result when out-of-line
+/// memory could not be placed in the receiver's address space.
+pub const MACH_MSG_VM_SPACE: i32 = 0x0000_1000;
 
 /// `bootstrap_*`, a third numbering again, and the one `bootstrap_strerror`
 /// names.
@@ -76,6 +80,7 @@ pub fn describe(code: i32) -> Option<&'static str> {
         MACH_SEND_INVALID_TYPE => "(ipc/send) invalid type descriptor",
         MACH_SEND_NO_BUFFER => "(ipc/send) no message buffer available",
         MACH_SEND_TOO_LARGE => "(ipc/send) message too large",
+        MACH_SEND_INVALID_MEMORY => "(ipc/send) invalid memory",
         MACH_RCV_INVALID_NAME => "(ipc/rcv) invalid name",
         MACH_RCV_TIMED_OUT => "(ipc/rcv) receive timed out",
         MACH_RCV_TOO_LARGE => "(ipc/rcv) message too large",
