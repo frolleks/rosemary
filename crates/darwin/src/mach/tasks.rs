@@ -10,7 +10,7 @@ use std::ffi::c_void;
 
 use super::info::{TimeValue, publish};
 use super::kern::*;
-use super::space::{self, HOST_SELF, Name, PSET_CONTROL, PSET_NAME};
+use super::space::{self, HOST_SELF, Name, PSET_CONTROL, PSET_NAME, TaskFlavor};
 use server::protocol::{State, Thread};
 
 /// Copy `names` into fresh pages, as the kernel hands an out-of-line array
@@ -54,12 +54,53 @@ unsafe fn out_of_line(names: &[Name], array: *mut *mut Name, count: *mut u32) ->
 }
 
 /// `kern_return_t task_for_pid(mach_port_name_t target_tport, int pid,
-/// mach_port_name_t *t)`
+/// mach_port_name_t *t)`: the task's control port.
 ///
 /// # Safety
 ///
 /// `out` is a writable `mach_port_name_t`.
 pub unsafe extern "C" fn task_for_pid(target: Name, pid: i32, out: *mut Name) -> i32 {
+    // SAFETY: the caller's out-parameter.
+    unsafe { port_for_pid(target, pid, out, TaskFlavor::Control) }
+}
+
+/// `task_read_for_pid`: the task's read port.
+///
+/// # Safety
+///
+/// As [`task_for_pid`].
+pub unsafe extern "C" fn task_read_for_pid(target: Name, pid: i32, out: *mut Name) -> i32 {
+    // SAFETY: the caller's out-parameter.
+    unsafe { port_for_pid(target, pid, out, TaskFlavor::Read) }
+}
+
+/// `task_inspect_for_pid`: the task's inspect port.
+///
+/// # Safety
+///
+/// As [`task_for_pid`].
+pub unsafe extern "C" fn task_inspect_for_pid(target: Name, pid: i32, out: *mut Name) -> i32 {
+    // SAFETY: the caller's out-parameter.
+    unsafe { port_for_pid(target, pid, out, TaskFlavor::Inspect) }
+}
+
+/// `task_name_for_pid`: the task's name port, which identifies it and does
+/// little else.
+///
+/// # Safety
+///
+/// As [`task_for_pid`].
+pub unsafe extern "C" fn task_name_for_pid(target: Name, pid: i32, out: *mut Name) -> i32 {
+    // SAFETY: the caller's out-parameter.
+    unsafe { port_for_pid(target, pid, out, TaskFlavor::Name) }
+}
+
+/// The `*_for_pid` calls' shared body.
+///
+/// # Safety
+///
+/// `out` is a writable `mach_port_name_t`.
+unsafe fn port_for_pid(target: Name, pid: i32, out: *mut Name, flavor: TaskFlavor) -> i32 {
     if out.is_null() {
         return KERN_INVALID_ARGUMENT;
     }
@@ -72,7 +113,7 @@ pub unsafe extern "C" fn task_for_pid(target: Name, pid: i32, out: *mut Name) ->
         return KERN_FAILURE;
     }
     // SAFETY: the caller's out-parameter.
-    unsafe { out.write(space::insert_task(pid)) };
+    unsafe { out.write(space::insert_task(pid, flavor)) };
     KERN_SUCCESS
 }
 
@@ -170,6 +211,19 @@ pub unsafe extern "C" fn processor_set_tasks(
     array: *mut *mut Name,
     count: *mut u32,
 ) -> i32 {
+    // SAFETY: the caller's out-parameters.
+    unsafe { tasks_with_flavor(pset, TaskFlavor::Control, array, count) }
+}
+
+/// # Safety
+///
+/// As [`processor_set_tasks`].
+unsafe fn tasks_with_flavor(
+    pset: Name,
+    flavor: TaskFlavor,
+    array: *mut *mut Name,
+    count: *mut u32,
+) -> i32 {
     if array.is_null() || count.is_null() {
         return KERN_INVALID_ARGUMENT;
     }
@@ -178,18 +232,15 @@ pub unsafe extern "C" fn processor_set_tasks(
     }
     let tasks: Vec<Name> = crate::process::list()
         .iter()
-        .map(|process| space::insert_task(process.pid))
+        .map(|process| space::insert_task(process.pid, flavor))
         .collect();
     // SAFETY: the caller's out-parameters.
     unsafe { out_of_line(&tasks, array, count) }
 }
 
 /// `kern_return_t processor_set_tasks_with_flavor(processor_set_t,
-/// mach_task_flavor_t, task_array_t *, mach_msg_type_number_t *)`.
-///
-/// Every flavour - control, read, inspect, name - is the same port here: the
-/// server answers questions and nothing here changes another task, so there is
-/// no capability for a weaker flavour to withhold.
+/// mach_task_flavor_t, task_array_t *, mach_msg_type_number_t *)`: each
+/// task's port of the flavor asked for.
 ///
 /// # Safety
 ///
@@ -200,13 +251,11 @@ pub unsafe extern "C" fn processor_set_tasks_with_flavor(
     array: *mut *mut Name,
     count: *mut u32,
 ) -> i32 {
-    /// `TASK_FLAVOR_NAME`, the last of the four.
-    const TASK_FLAVOR_NAME: u32 = 3;
-    if flavor > TASK_FLAVOR_NAME {
+    let Some(flavor) = TaskFlavor::from_raw(flavor) else {
         return KERN_INVALID_ARGUMENT;
-    }
+    };
     // SAFETY: the caller's out-parameters.
-    unsafe { processor_set_tasks(pset, array, count) }
+    unsafe { tasks_with_flavor(pset, flavor, array, count) }
 }
 
 /// `kern_return_t task_threads(task_inspect_t, thread_act_array_t *,
@@ -421,19 +470,204 @@ pub unsafe extern "C" fn mach_port_space_basic_info(task: Name, out: *mut c_void
     KERN_SUCCESS
 }
 
+/// `task_policy_flavor_t`, from `mach/task_policy.h`.
+const TASK_CATEGORY_POLICY: u32 = 1;
+const TASK_SUPPRESSION_POLICY: u32 = 3;
+const TASK_POLICY_STATE: u32 = 4;
+const TASK_BASE_QOS_POLICY: u32 = 8;
+const TASK_OVERRIDE_QOS_POLICY: u32 = 9;
+const TASK_BASE_LATENCY_QOS_POLICY: u32 = 10;
+const TASK_BASE_THROUGHPUT_QOS_POLICY: u32 = 11;
+
+/// `task_role_t`: the roles a task may give itself, and the two only a
+/// privileged one may (`TASK_CONTROL_APPLICATION`, `TASK_GRAPHICS_SERVER`).
+const TASK_FOREGROUND_APPLICATION: i32 = 1;
+const TASK_BACKGROUND_APPLICATION: i32 = 2;
+const TASK_DEFAULT_APPLICATION: i32 = 7;
+
+/// `LATENCY_QOS_TIER_0..5` are `0xFF << 16 | 1..6`, the throughput tiers
+/// `0xFE << 16 | 1..6`, and zero is "unspecified" for both.
+const LATENCY_QOS_TIER_0: i32 = (0xFF << 16) | 1;
+const LATENCY_QOS_TIER_5: i32 = (0xFF << 16) | 6;
+const THROUGHPUT_QOS_TIER_0: i32 = (0xFE << 16) | 1;
+const THROUGHPUT_QOS_TIER_5: i32 = (0xFE << 16) | 6;
+
+/// `struct task_qos_policy`, `struct task_category_policy` and `struct
+/// task_suppression_policy` in `integer_t`s - the `count` a caller passes.
+const TASK_QOS_POLICY_COUNT: u32 = 2;
+const TASK_CATEGORY_POLICY_COUNT: u32 = 1;
+const TASK_SUPPRESSION_POLICY_COUNT: u32 = 16;
+const TASK_POLICY_STATE_COUNT: u32 = 18;
+
+/// What this task asked for, as XNU's `requested_policy` keeps it: tiers by
+/// their low byte (`qos_extract`), and the suppression fields as given.
+#[derive(Clone, Copy, Default)]
+struct Requested {
+    role: i32,
+    base: (u32, u32),
+    over: (u32, u32),
+    suppression: [i32; 16],
+}
+
+static REQUESTED: std::sync::Mutex<Requested> = std::sync::Mutex::new(Requested {
+    role: 0,
+    base: (0, 0),
+    over: (0, 0),
+    suppression: [0; 16],
+});
+
+/// `qos_latency_policy_validate` and `qos_throughput_policy_validate`.
+fn tiers_valid(latency: i32, throughput: i32) -> bool {
+    let ok = |tier: i32, lo: i32, hi: i32| tier == 0 || (lo..=hi).contains(&tier);
+    ok(latency, LATENCY_QOS_TIER_0, LATENCY_QOS_TIER_5)
+        && ok(throughput, THROUGHPUT_QOS_TIER_0, THROUGHPUT_QOS_TIER_5)
+}
+
+/// `qos_extract`, and the two `qos_*_policy_package` that undo it.
+fn extract(tier: i32) -> u32 {
+    tier as u32 & 0xFF
+}
+
+fn package(value: u32, tag: u32) -> i32 {
+    match value {
+        0 => 0,
+        value => ((tag << 16) | value) as i32,
+    }
+}
+
+/// Whether `task` is a port to this task - the only one whose policy is here
+/// to set - that serves a call wanting `wanted`. XNU's
+/// `convert_port_to_task_policy_mig` wants the control port to set a policy
+/// and the inspect port to read one, and a name port for either only of a
+/// task holding `com.apple.private.task_policy`, which no program here holds.
+fn is_self(task: Name, wanted: TaskFlavor) -> bool {
+    space::task_pid_as(task, wanted) == Some(starnix::process::me())
+}
+
+/// `kern_return_t task_policy_set(task_policy_set_t, task_policy_flavor_t,
+/// task_policy_t, mach_msg_type_number_t)`
+///
+/// XNU's `task_policy_set` on macOS: each flavor's validation, then the
+/// request recorded for [`task_policy_get`] to report. The host schedules
+/// this process as it would any other, so nothing else follows from it - a
+/// QoS tier is a hint XNU's scheduler takes and this one has no counterpart
+/// for, and the roles only order applications against one another.
+///
+/// # Safety
+///
+/// `info` is `count` readable `integer_t`s.
+pub unsafe extern "C" fn task_policy_set(
+    task: Name,
+    flavor: u32,
+    info: *const i32,
+    count: u32,
+) -> i32 {
+    if !is_self(task, TaskFlavor::Control) || info.is_null() {
+        return KERN_INVALID_ARGUMENT;
+    }
+    // SAFETY: the caller's `count` words.
+    let words = unsafe { std::slice::from_raw_parts(info, count as usize) };
+    let mut requested = REQUESTED.lock().unwrap_or_else(|e| e.into_inner());
+    match flavor {
+        TASK_CATEGORY_POLICY => {
+            if count < TASK_CATEGORY_POLICY_COUNT {
+                return KERN_INVALID_ARGUMENT;
+            }
+            match words[0] {
+                TASK_FOREGROUND_APPLICATION
+                | TASK_BACKGROUND_APPLICATION
+                | TASK_DEFAULT_APPLICATION => requested.role = words[0],
+                // `TASK_CONTROL_APPLICATION` and `TASK_GRAPHICS_SERVER` need a
+                // privileged task, and the rest are no role to ask for.
+                _ => return KERN_INVALID_ARGUMENT,
+            }
+        }
+        TASK_BASE_QOS_POLICY
+        | TASK_OVERRIDE_QOS_POLICY
+        | TASK_BASE_LATENCY_QOS_POLICY
+        | TASK_BASE_THROUGHPUT_QOS_POLICY => {
+            if count < TASK_QOS_POLICY_COUNT || !tiers_valid(words[0], words[1]) {
+                return KERN_INVALID_ARGUMENT;
+            }
+            let (latency, throughput) = (extract(words[0]), extract(words[1]));
+            match flavor {
+                TASK_BASE_QOS_POLICY => requested.base = (latency, throughput),
+                TASK_OVERRIDE_QOS_POLICY => requested.over = (latency, throughput),
+                TASK_BASE_LATENCY_QOS_POLICY => requested.base.0 = latency,
+                _ => requested.base.1 = throughput,
+            }
+        }
+        TASK_SUPPRESSION_POLICY => {
+            if count < TASK_SUPPRESSION_POLICY_COUNT {
+                return KERN_INVALID_ARGUMENT;
+            }
+            // `timer_throttle` and `throughput_qos` are tiers.
+            if !tiers_valid(words[2], words[6]) {
+                return KERN_INVALID_ARGUMENT;
+            }
+            requested.suppression.copy_from_slice(&words[..16]);
+        }
+        _ => return KERN_INVALID_ARGUMENT,
+    }
+    KERN_SUCCESS
+}
+
 /// `kern_return_t task_policy_get(task_policy_get_t, task_policy_flavor_t,
 /// task_policy_t, mach_msg_type_number_t *, boolean_t *)`
 ///
-/// Refused: the policies are QoS and importance state no host keeps, and a
-/// caller reads their absence the way it reads a failure.
-pub extern "C" fn task_policy_get(
-    _task: Name,
-    _flavor: u32,
-    _info: *mut c_void,
-    _count: *mut u32,
-    _default: *mut u32,
+/// XNU's `task_policy_get`: what [`task_policy_set`] recorded, or with
+/// `*get_default` the flavor's defaults. `TASK_POLICY_STATE` is root's only.
+///
+/// # Safety
+///
+/// `info` has room for `*count` `integer_t`s, and `count` and `get_default`
+/// are readable.
+pub unsafe extern "C" fn task_policy_get(
+    task: Name,
+    flavor: u32,
+    info: *mut i32,
+    count: *mut u32,
+    get_default: *mut u32,
 ) -> i32 {
-    KERN_INVALID_ARGUMENT
+    if !is_self(task, TaskFlavor::Inspect)
+        || info.is_null()
+        || count.is_null()
+        || get_default.is_null()
+    {
+        return KERN_INVALID_ARGUMENT;
+    }
+    // SAFETY: the caller's in-out count and flag.
+    let (room, default) = unsafe { (*count, *get_default != 0) };
+    let requested = match default {
+        true => Requested::default(),
+        false => *REQUESTED.lock().unwrap_or_else(|e| e.into_inner()),
+    };
+    let words: Vec<i32> = match flavor {
+        TASK_CATEGORY_POLICY if room >= TASK_CATEGORY_POLICY_COUNT => vec![requested.role],
+        TASK_BASE_QOS_POLICY | TASK_OVERRIDE_QOS_POLICY if room >= TASK_QOS_POLICY_COUNT => {
+            let (latency, throughput) = match flavor {
+                TASK_BASE_QOS_POLICY => requested.base,
+                _ => requested.over,
+            };
+            vec![package(latency, 0xFF), package(throughput, 0xFE)]
+        }
+        TASK_SUPPRESSION_POLICY if room >= TASK_SUPPRESSION_POLICY_COUNT => {
+            let given = requested.suppression;
+            // `cpu_limit` and `suspend` are always reported as zero, and the
+            // two tiers as packaged from their low byte.
+            let mut words = given.to_vec();
+            words[2] = package(extract(given[2]), 0xFF);
+            words[4] = 0;
+            words[5] = 0;
+            words[6] = package(extract(given[6]), 0xFE);
+            words
+        }
+        TASK_POLICY_STATE if room >= TASK_POLICY_STATE_COUNT => return KERN_PROTECTION_FAILURE,
+        _ => return KERN_INVALID_ARGUMENT,
+    };
+    // SAFETY: the caller's room, which each arm checked is enough.
+    unsafe { std::ptr::copy_nonoverlapping(words.as_ptr(), info, words.len()) };
+    KERN_SUCCESS
 }
 
 #[cfg(test)]
@@ -489,7 +723,15 @@ mod tests {
             KERN_SUCCESS
         );
         let tasks_slice = unsafe { std::slice::from_raw_parts(tasks, ntasks as usize) };
-        assert!(tasks_slice.contains(&TASK_SELF));
+        // `TASK_FLAVOR_READ`: this task's read port, a port of its own and so
+        // a name other than `mach_task_self()`.
+        let me = starnix::process::me();
+        assert!(!tasks_slice.contains(&TASK_SELF));
+        assert!(
+            tasks_slice
+                .iter()
+                .any(|&name| space::task_of(name) == Some((me, TaskFlavor::Read)))
+        );
         unsafe {
             assert_eq!(
                 crate::mach::vm::vm_deallocate(TASK_SELF, tasks as u64, ntasks as u64 * 4),
