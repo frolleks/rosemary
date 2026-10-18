@@ -26,6 +26,14 @@ extern "C" fn AXIsProcessTrustedWithOptions(_options: *const std::ffi::c_void) -
     0
 }
 
+/// `OSStatus SetApplicationIsDaemon(Boolean isDaemon)`: mark this process as
+/// one with no user interface, which HIServices takes as leave to skip checking
+/// in with `launchservicesd` - a check-in nothing here does in the first place.
+#[allow(non_snake_case)]
+extern "C" fn SetApplicationIsDaemon(_daemon: u8) -> i32 {
+    0
+}
+
 /// The `CFStringRef` globals this framework defines.
 const STRING_GLOBALS: &[(&str, &str)] =
     &[("_kAXTrustedCheckOptionPrompt", "AXTrustedCheckOptionPrompt")];
@@ -39,5 +47,6 @@ exports::exports! {
         "CGWindowLevelForKey" => CGWindowLevelForKey,
         "AXIsProcessTrusted" => AXIsProcessTrusted,
         "AXIsProcessTrustedWithOptions" => AXIsProcessTrustedWithOptions,
+        "SetApplicationIsDaemon" => SetApplicationIsDaemon,
     }
 }
