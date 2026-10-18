@@ -2250,6 +2250,7 @@ dependencies = [
  "metal",
  "microlift",
  "mimalloc",
+ "network",
  "objc",
  "opencl",
  "prefix",
