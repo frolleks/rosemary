@@ -140,6 +140,7 @@ exports::exports! {
         "NSApplicationMain" => application::NSApplicationMain,
         "CAFrameRateRangeMake" => displaylink::CAFrameRateRangeMake,
         "CGMainDisplayID" => screen::CGMainDisplayID,
+        "CGSSetDenyWindowServerConnections" => screen::CGSSetDenyWindowServerConnections,
         "CGSessionCopyCurrentDictionary" => screen::CGSessionCopyCurrentDictionary,
         "CGPreflightScreenCaptureAccess" => screen::CGPreflightScreenCaptureAccess,
         "CGRequestScreenCaptureAccess" => screen::CGRequestScreenCaptureAccess,

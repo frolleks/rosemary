@@ -600,6 +600,20 @@ pub unsafe extern "C" fn CGDisplayMoveCursorToPoint(
 /// `kCGErrorFailure`: what a request for something this host cannot do answers.
 const CG_ERROR_FAILURE: i32 = 1000;
 
+/// `CGError CGSSetDenyWindowServerConnections(bool deny)`: refuse this
+/// process's later connections to the window server, or allow them again.
+///
+/// A sandboxed process calls it before giving up its rights, and it "will not
+/// succeed if there are open WindowServer connections" (WebKit's note on the
+/// call): the process would otherwise keep the one it has.
+#[allow(non_snake_case)]
+pub unsafe extern "C" fn CGSSetDenyWindowServerConnections(deny: u8) -> i32 {
+    match sdl3::video::deny_connections(deny != 0) {
+        true => 0,
+        false => CG_ERROR_FAILURE,
+    }
+}
+
 /// `CGError CGDisplayCapture(CGDirectDisplayID)` and `CGCaptureAllDisplays`.
 ///
 /// Refused: SDL gives no exclusive claim on a display, and a caller told it has one
