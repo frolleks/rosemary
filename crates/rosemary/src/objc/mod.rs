@@ -337,7 +337,67 @@ fn register_images(
         rt.stats.selectors += unique_selectors(r, image)?;
     }
 
+    if let Some(dir) = std::env::var_os(SELECTOR_AUDIT_ENV) {
+        audit_selectors(r, named, std::path::Path::new(&dir));
+    }
     Ok(())
+}
+
+/// Set to a directory to have each process write, as its images are realized,
+/// the selectors each image references and every method the runtime has: the
+/// difference is what a program may send that nothing here answers.
+pub const SELECTOR_AUDIT_ENV: &str = "ROSEMARY_SELECTOR_AUDIT";
+
+/// Append `named`'s selector references to `<pid>-selrefs.txt` in `dir`, as
+/// `image<TAB>selector`, and rewrite `<pid>-methods.txt` with every method of
+/// every class, `+name` or `-name` with the class.
+fn audit_selectors(r: &dyn Realizer, named: &[(Arc<str>, &ObjcImage)], dir: &std::path::Path) {
+    use std::io::Write;
+    let pid = std::process::id();
+    let mut refs = String::new();
+    let view = r.memory();
+    for (path, image) in named {
+        for &slot in image
+            .selector_refs
+            .iter()
+            .chain(&image.message_ref_selectors)
+        {
+            let mut buf = [0u8; 8];
+            if view.read(slot, &mut buf).is_err() {
+                continue;
+            }
+            let sel = u64::from_le_bytes(buf) as objc::sel::Sel;
+            if sel.is_null() {
+                continue;
+            }
+            // SAFETY: a slot `unique_selectors` rewrote to a `SEL`.
+            let name = unsafe { std::ffi::CStr::from_ptr(objc::sel::name(sel)) };
+            refs.push_str(&format!("{path}\t{}\n", name.to_string_lossy()));
+        }
+    }
+    drop(view);
+    let mut methods = String::new();
+    for class in objc::class::every() {
+        let kind = if class.is_meta() { '+' } else { '-' };
+        for method in class.own_methods() {
+            // SAFETY: a method's selector, interned for the process.
+            let name = unsafe { std::ffi::CStr::from_ptr(objc::sel::name(method.sel)) };
+            methods.push_str(&format!(
+                "{kind}{}\t{}\n",
+                name.to_string_lossy(),
+                class.name_str()
+            ));
+        }
+    }
+    let _ = std::fs::create_dir_all(dir);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("{pid}-selrefs.txt")))
+    {
+        let _ = file.write_all(refs.as_bytes());
+    }
+    let _ = std::fs::write(dir.join(format!("{pid}-methods.txt")), methods);
 }
 
 /// Call every `+load` the guest declares, superclass first.
