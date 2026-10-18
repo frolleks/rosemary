@@ -493,6 +493,86 @@ unsafe extern "C" fn fire(_timer: *const c_void, info: *mut c_void) {
     unsafe { callback(info, &now, &output, 0, &mut flags_out, context) };
 }
 
+/// The image buffer attachment keys and their values, as `(Mach-O name,
+/// text)`; the texts are Apple's, which CoreMedia's format description keys
+/// share.
+const KEYS: &[(&str, &str)] = &[
+    (
+        "_kCVImageBufferColorPrimariesKey",
+        "CVImageBufferColorPrimaries",
+    ),
+    (
+        "_kCVImageBufferTransferFunctionKey",
+        "CVImageBufferTransferFunction",
+    ),
+    ("_kCVImageBufferYCbCrMatrixKey", "CVImageBufferYCbCrMatrix"),
+    ("_kCVImageBufferGammaLevelKey", "CVImageBufferGammaLevel"),
+    (
+        "_kCVImageBufferMasteringDisplayColorVolumeKey",
+        "MasteringDisplayColorVolume",
+    ),
+    (
+        "_kCVImageBufferContentLightLevelInfoKey",
+        "ContentLightLevelInfo",
+    ),
+    ("_kCVImageBufferCleanApertureKey", "CVCleanAperture"),
+    ("_kCVImageBufferPixelAspectRatioKey", "CVPixelAspectRatio"),
+    ("_kCVImageBufferFieldCountKey", "CVFieldCount"),
+    (
+        "_kCVImageBufferChromaLocationTopFieldKey",
+        "CVImageBufferChromaLocationTopField",
+    ),
+    (
+        "_kCVImageBufferChromaLocationBottomFieldKey",
+        "CVImageBufferChromaLocationBottomField",
+    ),
+    ("_kCVImageBufferColorPrimaries_ITU_R_709_2", "ITU_R_709_2"),
+    ("_kCVImageBufferColorPrimaries_EBU_3213", "EBU_3213"),
+    ("_kCVImageBufferColorPrimaries_SMPTE_C", "SMPTE_C"),
+    ("_kCVImageBufferColorPrimaries_DCI_P3", "DCI_P3"),
+    ("_kCVImageBufferColorPrimaries_P3_D65", "P3_D65"),
+    ("_kCVImageBufferColorPrimaries_ITU_R_2020", "ITU_R_2020"),
+    ("_kCVImageBufferColorPrimaries_P22", "P22"),
+    ("_kCVImageBufferTransferFunction_ITU_R_709_2", "ITU_R_709_2"),
+    (
+        "_kCVImageBufferTransferFunction_SMPTE_240M_1995",
+        "SMPTE_240M_1995",
+    ),
+    ("_kCVImageBufferTransferFunction_UseGamma", "UseGamma"),
+    ("_kCVImageBufferTransferFunction_ITU_R_2020", "ITU_R_2020"),
+    (
+        "_kCVImageBufferTransferFunction_SMPTE_ST_428_1",
+        "SMPTE_ST_428_1",
+    ),
+    (
+        "_kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ",
+        "SMPTE_ST_2084_PQ",
+    ),
+    (
+        "_kCVImageBufferTransferFunction_ITU_R_2100_HLG",
+        "ITU_R_2100_HLG",
+    ),
+    ("_kCVImageBufferTransferFunction_Linear", "Linear"),
+    ("_kCVImageBufferTransferFunction_sRGB", "IEC_sRGB"),
+    ("_kCVImageBufferYCbCrMatrix_ITU_R_709_2", "ITU_R_709_2"),
+    ("_kCVImageBufferYCbCrMatrix_ITU_R_601_4", "ITU_R_601_4"),
+    (
+        "_kCVImageBufferYCbCrMatrix_SMPTE_240M_1995",
+        "SMPTE_240M_1995",
+    ),
+    ("_kCVImageBufferYCbCrMatrix_ITU_R_2020", "ITU_R_2020"),
+    (
+        "_kCVPixelBufferIOSurfacePropertiesKey",
+        "IOSurfaceProperties",
+    ),
+];
+
+/// The data symbols this crate publishes.
+pub fn data_symbols() -> Vec<(String, u64)> {
+    corefoundation::bootstrap();
+    corefoundation::base::string_globals(KEYS)
+}
+
 exports::exports! {
     functions {
         "CVDisplayLinkCreateWithCGDisplay" => CVDisplayLinkCreateWithCGDisplay,
