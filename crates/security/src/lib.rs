@@ -2,12 +2,14 @@ pub mod codesign;
 mod constants;
 mod der;
 pub mod keychain;
+pub mod seckeychain;
 pub mod sectask;
 pub mod trust;
 
 exports::group! {
     codesign,
     keychain,
+    seckeychain,
     sectask,
     trust,
 }
