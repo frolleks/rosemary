@@ -137,6 +137,9 @@ pub struct Region {
     pub shared: bool,
     /// The offset into the backing object.
     pub offset: u64,
+    /// The file it maps, by device and inode, where the host says - `None`
+    /// for anonymous memory, and on hosts that do not say.
+    pub file: Option<FileId>,
 }
 
 /// The audit ids the host keeps for this process, where it keeps any.
