@@ -1171,8 +1171,172 @@ pub unsafe extern "C" fn CTFontManagerUnregisterGraphicsFont(
     true
 }
 
+/// `CFIndex CTFontGetGlyphCount(CTFontRef)`: the face's `maxp` glyph count, or
+/// zero for a font with no face behind it.
+pub unsafe extern "C" fn CTFontGetGlyphCount(font: CFTypeRef) -> isize {
+    loaded(font).map_or(0, |face| face.face().number_of_glyphs() as isize)
+}
+
+/// `CFArrayRef CTFontCopyAvailableTables(CTFontRef, CTFontTableOptions)`: the
+/// tags of the face's tables, in its table directory's order. Each value is
+/// the tag itself rather than an object, as Apple's array holds them, so the
+/// array retains nothing.
+pub unsafe extern "C" fn CTFontCopyAvailableTables(font: CFTypeRef, _options: u32) -> CFTypeRef {
+    let Some(face) = loaded(font) else {
+        return std::ptr::null();
+    };
+    let tags: Vec<CFTypeRef> = face
+        .face()
+        .raw_face()
+        .table_records
+        .into_iter()
+        .map(|record| u32::from_be_bytes(record.tag.to_bytes()) as usize as CFTypeRef)
+        .collect();
+    collections::new_array(&tags, Policy::NONE, false)
+}
+
+/// A `CTFontCollection`: the query descriptors it was made from, or every
+/// available face.
+#[repr(C)]
+struct Collection {
+    isa: *const c_void,
+    /// An array this collection owns, or null for every available face.
+    query: CFTypeRef,
+}
+
+fn collection_class() -> &'static objc::class::Class {
+    static CLASS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let class = *CLASS.get_or_init(|| {
+        let class = corefoundation::base::register(
+            c"CTFontCollection",
+            None,
+            size_of::<Collection>(),
+            true,
+        );
+        class.replace_method(
+            objc::sel::get("dealloc"),
+            collection_dealloc as *const c_void,
+            c"v16@0:8",
+        );
+        objc::class::ptr(class) as usize
+    });
+    // SAFETY: a leaked class registered above.
+    unsafe { &*(class as *const objc::class::Class) }
+}
+
+unsafe extern "C" fn collection_dealloc(receiver: objc::object::Id, _sel: objc::sel::Sel) {
+    // SAFETY: `-dealloc` of a collection, whose body is `Collection`.
+    release(unsafe { (*(receiver as *const Collection)).query });
+    objc::arc::finalize(receiver);
+}
+
+/// A new collection owning `query`, a reference of its own or null.
+fn make_collection(query: CFTypeRef) -> CFTypeRef {
+    // SAFETY: `Collection` is the registered layout.
+    let collection = unsafe { corefoundation::base::allocate::<Collection>(collection_class()) };
+    // SAFETY: a fresh allocation whose query is written once here.
+    unsafe { (*collection).query = query };
+    collection as CFTypeRef
+}
+
+fn collection_of<'a>(collection: CFTypeRef) -> Option<&'a Collection> {
+    // SAFETY: null or an object a guest received from this runtime.
+    let is_collection = !collection.is_null()
+        && unsafe { corefoundation::base::is_kind_of(collection, collection_class()) };
+    // SAFETY: checked to be a collection.
+    is_collection.then(|| unsafe { &*(collection as *const Collection) })
+}
+
+/// The elements of a CF array a caller passed.
+fn array_values(array: CFTypeRef) -> Vec<CFTypeRef> {
+    if array.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: an array the caller passed, read by index within its count.
+    unsafe {
+        let count = corefoundation::api::CFArrayGetCount(array);
+        (0..count)
+            .map(|at| corefoundation::api::CFArrayGetValueAtIndex(array, at))
+            .collect()
+    }
+}
+
+/// `CTFontCollectionRef CTFontCollectionCreateFromAvailableFonts(CFDictionaryRef
+/// options)`: every face this process can use.
+///
+/// The one option, removing duplicates, is asked for with
+/// `kCTFontCollectionRemoveDuplicatesOption`, which this tree does not
+/// publish, so no options dictionary here can carry it.
+pub unsafe extern "C" fn CTFontCollectionCreateFromAvailableFonts(
+    _options: CFTypeRef,
+) -> CFTypeRef {
+    make_collection(std::ptr::null())
+}
+
+/// `CTFontCollectionRef CTFontCollectionCreateWithFontDescriptors(CFArrayRef
+/// queryDescriptors, CFDictionaryRef options)`: what those descriptors match.
+/// A null array matches nothing.
+pub unsafe extern "C" fn CTFontCollectionCreateWithFontDescriptors(
+    query: CFTypeRef,
+    _options: CFTypeRef,
+) -> CFTypeRef {
+    let values = array_values(query);
+    make_collection(collections::new_array(&values, type_policy(), false))
+}
+
+/// `CFTypeID CTFontCollectionGetTypeID(void)`.
+pub unsafe extern "C" fn CTFontCollectionGetTypeID() -> corefoundation::base::CFTypeID {
+    corefoundation::base::type_id(collection_class())
+}
+
+/// `CFArrayRef CTFontCollectionCreateMatchingFontDescriptors(CTFontCollectionRef)`:
+/// a descriptor per matching face, or null when nothing matches.
+pub unsafe extern "C" fn CTFontCollectionCreateMatchingFontDescriptors(
+    collection: CFTypeRef,
+) -> CFTypeRef {
+    let Some(collection) = collection_of(collection) else {
+        return std::ptr::null();
+    };
+    if collection.query.is_null() {
+        return descriptors_for(&fonts::all_faces());
+    }
+    let mut matched: Vec<CFTypeRef> = Vec::new();
+    for query in array_values(collection.query) {
+        // SAFETY: a descriptor the collection was made with.
+        let found =
+            unsafe { CTFontDescriptorCreateMatchingFontDescriptors(query, std::ptr::null()) };
+        for descriptor in array_values(found) {
+            let path = get_string(descriptor, PATH_KEY);
+            let index = get_number(descriptor, INDEX_KEY);
+            // One face matched by two queries is in the result once.
+            let seen = path.is_some()
+                && matched.iter().any(|other| {
+                    get_string(*other, PATH_KEY) == path && get_number(*other, INDEX_KEY) == index
+                });
+            if !seen {
+                // SAFETY: a live descriptor, kept by the result.
+                matched.push(unsafe { corefoundation::api::CFRetain(descriptor) });
+            }
+        }
+        release(found);
+    }
+    if matched.is_empty() {
+        return std::ptr::null();
+    }
+    let array = collections::new_array(&matched, type_policy(), false);
+    matched.into_iter().for_each(release);
+    array
+}
+
 exports::exports! {
     functions {
+        "CTFontGetGlyphCount" => CTFontGetGlyphCount,
+        "CTFontCopyAvailableTables" => CTFontCopyAvailableTables,
+        "CTFontCollectionCreateFromAvailableFonts" => CTFontCollectionCreateFromAvailableFonts,
+        "CTFontCollectionCreateWithFontDescriptors" => CTFontCollectionCreateWithFontDescriptors,
+        "CTFontCollectionGetTypeID" => CTFontCollectionGetTypeID,
+        "CTFontCollectionCreateMatchingFontDescriptors"
+            => CTFontCollectionCreateMatchingFontDescriptors,
         "CTFontCreateUIFontForLanguage" => CTFontCreateUIFontForLanguage,
         "CTFontCreateWithName" => CTFontCreateWithName,
         "CTFontCopyFontDescriptor" => CTFontCopyFontDescriptor,
@@ -1237,6 +1401,81 @@ mod tests {
         // SAFETY: a null language is documented.
         let font = unsafe { CTFontCreateUIFontForLanguage(0, size, std::ptr::null()) };
         loaded(font).is_some().then_some(font)
+    }
+
+    /// The glyph count and table list are the face's own, the tags held as
+    /// plain values.
+    #[test]
+    fn a_font_lists_its_tables_and_counts_its_glyphs() {
+        let Some(font) = default_font(12.0) else {
+            return;
+        };
+        // SAFETY: a live font, and an array of tags read within its count.
+        unsafe {
+            let face = loaded(font).unwrap();
+            assert_eq!(
+                CTFontGetGlyphCount(font),
+                face.face().number_of_glyphs() as isize
+            );
+            assert!(CTFontGetGlyphCount(font) > 0);
+            let tables = CTFontCopyAvailableTables(font, 0);
+            let tags: Vec<u32> = array_values(tables)
+                .into_iter()
+                .map(|t| t as usize as u32)
+                .collect();
+            for tag in [*b"head", *b"cmap", *b"maxp"] {
+                assert!(
+                    tags.contains(&u32::from_be_bytes(tag)),
+                    "{:?} listed",
+                    std::str::from_utf8(&tag)
+                );
+            }
+            release(tables);
+            release(font);
+        }
+    }
+
+    /// Every face is in the collection of available fonts, and a collection
+    /// of queries holds what they match, each face once.
+    #[test]
+    fn a_collection_matches_the_available_faces_or_its_queries() {
+        crate::bootstrap();
+        let faces = fonts::all_faces();
+        let Some(first) = faces.first() else {
+            return;
+        };
+        // SAFETY: collections made and released here.
+        unsafe {
+            let all = CTFontCollectionCreateFromAvailableFonts(std::ptr::null());
+            assert_eq!(
+                corefoundation::api::CFGetTypeID(all),
+                CTFontCollectionGetTypeID()
+            );
+            let every = CTFontCollectionCreateMatchingFontDescriptors(all);
+            assert_eq!(array_values(every).len(), faces.len());
+
+            let family = string(&first.family);
+            let query = new_dictionary(&[(key("NSFontFamilyAttribute"), family)]);
+            let queries = collections::new_array(&[query, query], type_policy(), false);
+            let some = CTFontCollectionCreateWithFontDescriptors(queries, std::ptr::null());
+            let matched = CTFontCollectionCreateMatchingFontDescriptors(some);
+            let in_family = faces
+                .iter()
+                .filter(|f| f.family.eq_ignore_ascii_case(&first.family))
+                .count();
+            assert_eq!(
+                array_values(matched).len(),
+                in_family,
+                "the same query twice adds nothing"
+            );
+
+            let none =
+                CTFontCollectionCreateWithFontDescriptors(std::ptr::null(), std::ptr::null());
+            assert!(CTFontCollectionCreateMatchingFontDescriptors(none).is_null());
+            for object in [all, every, family, query, queries, some, matched, none] {
+                release(object);
+            }
+        }
     }
 
     #[test]
