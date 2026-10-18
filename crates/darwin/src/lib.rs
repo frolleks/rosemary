@@ -85,6 +85,7 @@ pub mod pthread;
 pub mod random;
 pub mod regex;
 mod resolv;
+pub mod sandbox;
 pub mod rlimit;
 pub mod sched;
 pub mod select;
@@ -393,6 +394,7 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     #[cfg(target_arch = "x86_64")]
     printf_l::MODULE,
     notify::MODULE,
+    sandbox::MODULE,
     acl::MODULE,
     fmtcheck::MODULE,
     langinfo::MODULE,
