@@ -2244,6 +2244,7 @@ dependencies = [
  "contacts",
  "coreaudio",
  "corefoundation",
+ "coremedia",
  "coreservices",
  "corevideo",
  "darwin",
@@ -2268,6 +2269,7 @@ dependencies = [
  "security",
  "server",
  "static_init",
+ "videotoolbox",
  "webkit",
 ]
 
