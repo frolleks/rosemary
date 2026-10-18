@@ -392,6 +392,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // CFStringRef type, CFStringRef subDirName)` - three `CFStringRef`s, any of
     // which may be null.
     sig!("CFBundleCopyResourceURL", P, P, P, P, P),
+    sig!("CFBundleCopyResourceURLForLocalization", P, P, P, P, P, P),
     sig!("CFBundleCopyLocalizedString", P, P, P, P, P),
     sig!("CFBundleCopyBundleURL", P, P),
     sig!("CFBundleCreate", P, P, P),
@@ -487,6 +488,22 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGRectMakeWithDictionaryRepresentation", BOOL, P, P),
     sig!("AXIsProcessTrusted", BOOL),
     sig!("AXIsProcessTrustedWithOptions", BOOL, P),
+    sig!("CGPreflightScreenCaptureAccess", BOOL),
+    sig!("CGRequestScreenCaptureAccess", BOOL),
+    sig!("CGFontRenderingGetFontSmoothingDisabled", BOOL),
+    sig!("pthread_stack_frame_decode_np", U64, U64, P),
+    sig!("_CFCopyServerVersionDictionary", P),
+    sig!("CFCopySystemVersionString", P),
+    sig!("MACaptionAppearanceCopyForegroundColor", P, I64, P),
+    sig!("MACaptionAppearanceCopyBackgroundColor", P, I64, P),
+    sig!("MACaptionAppearanceCopyWindowColor", P, I64, P),
+    sig!("MACaptionAppearanceGetForegroundOpacity", F64, I64, P),
+    sig!("MACaptionAppearanceGetBackgroundOpacity", F64, I64, P),
+    sig!("MACaptionAppearanceGetWindowOpacity", F64, I64, P),
+    sig!("MACaptionAppearanceGetWindowRoundedCornerRadius", F64, I64, P),
+    sig!("MACaptionAppearanceGetRelativeCharacterSize", F64, I64, P),
+    sig!("MACaptionAppearanceGetTextEdgeStyle", I64, I64, P),
+    sig!("MACaptionAppearanceCopyFontDescriptorForStyle", P, I64, P, I64),
     sig!("CFHTTPAuthenticationCopyMethod", P, P),
     sig!("CFHTTPAuthenticationCopyRealm", P, P),
     sig!("CFHTTPAuthenticationCreateFromResponse", P, P, P),
@@ -578,9 +595,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFRunLoopRemoveObserver", V, P, P, P),
     sig!("CFRunLoopObserverInvalidate", V, P),
     sig!("CFRunLoopAddSource", V, P, P, P),
+    sig!("CFRunLoopPerformBlock", V, P, P, P),
+    sig!("SCDynamicStoreKeyCreateProxies", P, P),
     sig!("CFRunLoopGetCurrent", P),
     sig!("CFRunLoopGetMain", P),
     sig!("CFRunLoopGetNextTimerFireDate", F64, P, P),
+    sig!("CFRunLoopTimerGetNextFireDate", F64, P),
+    sig!("CFRunLoopCopyCurrentMode", P, P),
     // `void CFRunLoopRun(void)` - no parameters.
     sig!("CFRunLoopRun", V),
     // `CFTimeInterval` is a `double`, so this is the first entry in the table
@@ -1510,6 +1531,43 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("SecKeychainSearchCopyNext", I32, P, P),
     sig!("SecKeychainSearchCreateFromAttributes", I32, P, U32, P, P),
     sig!("SecTrustCopyAnchorCertificates", I32, P),
+    sig!("SecTrustSetSignedCertificateTimestamps", I32, P, P),
+    sig!("SecTrustCopyCertificateChain", P, P),
+    //
+    // The legacy keychain and trust calls a Chromium-based program makes at
+    // start-up: its certificate database registers for keychain events, its
+    // trust store reads each trust settings domain, and its cookie encryption
+    // keeps its key as a generic password. The callback is a guest function
+    // the host calls on the registering thread's run loop, and is also what a
+    // removal is matched against.
+    cbsig!([0], "SecKeychainAddCallback", I32, P, U32, P),
+    cbsig!([0], "SecKeychainRemoveCallback", I32, P),
+    sig!("SecKeychainAddGenericPassword", I32, P, U32, P, U32, P, U32, P, P),
+    sig!("SecKeychainFindGenericPassword", I32, P, U32, P, U32, P, P, P, P),
+    sig!("SecKeychainItemDelete", I32, P),
+    sig!("SecKeychainCopySearchList", I32, P),
+    sig!("SecKeychainCopyDefault", I32, P),
+    sig!("SecKeychainGetTypeID", U64),
+    sig!("SecKeychainItemGetTypeID", U64),
+    sig!("SecCertificateGetTypeID", U64),
+    sig!("SecPolicyGetTypeID", U64),
+    sig!("SecTrustGetTypeID", U64),
+    sig!("SecTrustGetCertificateCount", I64, P),
+    sig!("SecTrustGetCertificateAtIndex", P, P, I64),
+    sig!("SecTrustSetAnchorCertificates", I32, P, P),
+    sig!("SecTrustSetAnchorCertificatesOnly", I32, P, U8),
+    sig!("SecTrustSetKeychains", I32, P, P),
+    sig!("SecTrustSetOCSPResponse", I32, P, P),
+    sig!("SecTrustSetVerifyDate", I32, P, P),
+    sig!("SecTrustSetParameters", I32, P, U32, P),
+    sig!("SecTrustGetCssmResultCode", I32, P, P),
+    sig!("SecTrustGetResult", I32, P, P, P, P),
+    sig!("SecPolicyCreateRevocation", P, U64),
+    sig!("SecPolicyCopyProperties", P, P),
+    sig!("SecCertificateCopyNormalizedIssuerSequence", P, P),
+    sig!("SecCertificateCopyNormalizedSubjectSequence", P, P),
+    sig!("SecTrustSettingsCopyCertificates", I32, U32, P),
+    sig!("SecTrustSettingsCopyTrustSettings", I32, P, U32, P),
     sig!("SecStaticCodeCreateWithPath", I32, P, U64, P),
     sig!("SecRequirementCreateWithString", I32, P, U64, P),
     sig!("SecRequirementCreateWithData", I32, P, U32, P),
@@ -1856,7 +1914,27 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("dispatch_source_create", P, P, U64, U64, P),
     cbsig!([1], "dispatch_source_set_cancel_handler_f", V, P, P),
     cbsig!([1], "dispatch_source_set_event_handler_f", V, P, P),
+    cbsig!([1], "dispatch_source_set_registration_handler_f", V, P, P),
+    cbsig!(
+        [1],
+        "dispatch_source_set_mandatory_cancel_handler_f",
+        V,
+        P,
+        P
+    ),
     sig!("dispatch_source_set_timer", V, P, U64, U64, U64),
+    sig!("dispatch_source_testcancel", I64, P),
+    sig!("dispatch_source_get_data", U64, P),
+    sig!("dispatch_source_get_extended_data", U64, P, P, U64),
+    sig!("dispatch_source_get_mask", U64, P),
+    sig!("dispatch_source_get_handle", U64, P),
+    sig!("dispatch_source_merge_data", V, P, U64),
+    sig!("dispatch_activate", V, P),
+    // Never returns: the main thread drains the main queue from then on.
+    rsig!("dispatch_main", V),
+    // `dispatch_walltime(const struct timespec *, int64_t delta)`.
+    sig!("dispatch_walltime", U64, P, I64),
+    sig!("dispatch_queue_attr_make_with_qos_class", P, P, U32, I32),
     sig!("dispatch_suspend", V, P),
     // `dispatch_time(dispatch_time_t base, int64_t delta)` - the base is an
     // opaque absolute time and the delta is signed nanoseconds, which is why
@@ -2820,6 +2898,80 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // a protection argument, so none of them can hand the guest a page this
     // CPU would be asked to execute.
     sig!("mach_make_memory_entry_64", I32, U32, P, U64, I32, P, U32),
+    sig!("mach_make_memory_entry", I32, U32, P, U64, I32, P, U32),
+    sig!(
+        "mach_memory_object_memory_entry_64",
+        I32,
+        U32,
+        I32,
+        U64,
+        I32,
+        U32,
+        P
+    ),
+    sig!(
+        "mach_memory_object_memory_entry",
+        I32,
+        U32,
+        I32,
+        U64,
+        I32,
+        U32,
+        P
+    ),
+    sig!("mach_memory_entry_get_page_counts", I32, U32, P, P, P),
+    sig!("vm_read", I32, U32, U64, U64, P, P),
+    sig!(
+        "mach_vm_map",
+        I32,
+        U32,
+        P,
+        U64,
+        U64,
+        I32,
+        U32,
+        U64,
+        I32,
+        I32,
+        I32,
+        U32
+    ),
+    sig!(
+        "vm_map", I32, U32, P, U64, U64, I32, U32, U64, I32, I32, I32, U32
+    ),
+    sig!(
+        "vm_map_64",
+        I32,
+        U32,
+        P,
+        U64,
+        U64,
+        I32,
+        U32,
+        U64,
+        I32,
+        I32,
+        I32,
+        U32
+    ),
+    sig!(
+        "mach_vm_remap",
+        I32,
+        U32,
+        P,
+        U64,
+        U64,
+        I32,
+        U32,
+        U64,
+        I32,
+        P,
+        P,
+        U32
+    ),
+    sig!(
+        "vm_remap", I32, U32, P, U64, U64, I32, U32, U64, I32, P, P, U32
+    ),
     sig!("mach_vm_allocate", I32, U32, P, U64, I32),
     sig!("mach_vm_deallocate", I32, U32, U64, U64),
     sig!("mach_vm_region", I32, U32, P, P, I32, P, P, P),
@@ -2937,6 +3089,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `short flags`, which SysV passes in the low half of a register and
     // AAPCS64 reads back out of one: narrower than the slot on both sides.
     sig!("posix_spawnattr_setflags", I32, P, U32),
+    sig!("posix_spawnattr_set_csm_np", I32, P, U32),
+    sig!("posix_spawnattr_setnosmt_np", I32, P),
     sig!("posix_spawnattr_setsigmask", I32, P, P),
     sig!("pow", F64, F64, F64),
     sig!("powf", F32, F32, F32),
@@ -3351,6 +3505,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("processor_set_tasks_with_flavor", I32, U32, U32, P, P),
     sig!("mach_port_space_basic_info", I32, U32, P),
     sig!("task_policy_get", I32, U32, U32, P, P, P),
+    sig!("task_policy_set", I32, U32, U32, P, U32),
     sig!("task_info", I32, U32, U32, P, P),
     sig!("task_threads", I32, U32, P, P),
     sig!("openpty", I32, P, P, P, P, P),
@@ -3998,6 +4153,22 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("frexpf", F32, F32, P),
     sig!("res_9_init", I32),
     sig!("res_9_close", V),
+    sig!("__mac_syscall", I32, P, I32, P),
+    sig!("__sandbox_ms", I32, P, I32, P),
+    sig!("sandbox_init", I32, P, U64, P),
+    sig!("sandbox_init_with_parameters", I32, P, U64, P, P),
+    sig!("sandbox_free_error", V, P),
+    sig!("sandbox_create_params", P),
+    sig!("sandbox_set_param", I32, P, P, P),
+    sig!("sandbox_free_params", V, P),
+    sig!("sandbox_compile_string", P, P, P, P),
+    sig!("sandbox_apply", I32, P),
+    sig!("sandbox_free_profile", V, P),
+    sig!("sandbox_extension_issue_file", P, P, P, U32),
+    sig!("sandbox_extension_consume", I64, P),
+    sig!("sandbox_extension_release", I32, I64),
+    sig!("res_9_getservers", I32, P, P, I32),
+    sig!("res_9_setservers", V, P, P, I32),
 ];
 
 /// The commonest refusal by far, and the least interesting: a symbol that is a
