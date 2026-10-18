@@ -176,9 +176,11 @@ mod tests {
     use super::*;
 
     /// The claim the whole module rests on, checked against the runtime rather than
-    /// believed.
+    /// believed: objc4 does not call a dynamically added `.cxx_construct`. The
+    /// builtin runtime does, as objc4 does for a compiled one, which is why the
+    /// module is objc4's alone.
     #[test]
-    fn the_runtime_does_not_call_a_dynamically_added_constructor() {
+    fn only_objc4_skips_a_dynamically_added_constructor() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static CALLS: AtomicUsize = AtomicUsize::new(0);
         extern "C" fn ctor(obj: Class, _cmd: Sel) -> Class {
@@ -188,6 +190,10 @@ mod tests {
 
         let name = host::c_string("RosemaryCxxProbe").expect("no NUL");
         let root = host::c_string("NSObject").expect("no NUL");
+        if host::backend() == host::Backend::Builtin {
+            // The builtin runtime's `NSObject` is made at bootstrap.
+            objc::bootstrap();
+        }
         // SAFETY: an ordinary class-pair construction, disposed below.
         unsafe {
             let ns = host::objc_getClass(root.as_ptr());
@@ -206,17 +212,26 @@ mod tests {
             host::objc_registerClassPair(cls);
             let obj = host::class_createInstance(cls, 0);
             assert!(!obj.is_null());
-            assert_eq!(
-                CALLS.load(Ordering::SeqCst),
-                0,
-                "objc4 now calls a dynamically added .cxx_construct - delete this module"
-            );
+            match host::backend() {
+                host::Backend::Native => assert_eq!(
+                    CALLS.load(Ordering::SeqCst),
+                    0,
+                    "objc4 now calls a dynamically added .cxx_construct - delete this module"
+                ),
+                host::Backend::Builtin => assert_eq!(
+                    CALLS.load(Ordering::SeqCst),
+                    1,
+                    "the builtin runtime constructs every instance"
+                ),
+            }
         }
     }
 
-    /// And that this module's own path does call it, on an instance the *host*
-    /// allocated through `+alloc` rather than one the test made - which is the
-    /// case the module exists for.
+    /// And that `+alloc` then calls it exactly once, on an instance the *host*
+    /// allocated rather than one the test made: through this module's
+    /// `+allocWithZone:` on objc4, which is the case the module exists for, and
+    /// through the builtin runtime's own construction - with nothing installed,
+    /// since installing would construct twice.
     #[test]
     fn installing_makes_alloc_run_the_constructor() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -228,6 +243,10 @@ mod tests {
 
         let name = host::c_string("RosemaryCxxProbe2").expect("no NUL");
         let root = host::c_string("NSObject").expect("no NUL");
+        if host::backend() == host::Backend::Builtin {
+            // The builtin runtime's `NSObject` is made at bootstrap.
+            objc::bootstrap();
+        }
         unsafe {
             let ns = host::objc_getClass(root.as_ptr());
             assert!(!ns.is_null(), "no NSObject in this process");
@@ -242,12 +261,14 @@ mod tests {
                 ctor as *const c_void as Imp,
                 types.as_ptr()
             ));
-            let refusals = install(cls, ctor as *const c_void as Imp, "RosemaryCxxProbe2");
-            assert_eq!(
-                refusals,
-                Vec::new(),
-                "the class declares no allocWithZone: of its own"
-            );
+            if host::backend() == host::Backend::Native {
+                let refusals = install(cls, ctor as *const c_void as Imp, "RosemaryCxxProbe2");
+                assert_eq!(
+                    refusals,
+                    Vec::new(),
+                    "the class declares no allocWithZone: of its own"
+                );
+            }
             host::objc_registerClassPair(cls);
 
             // Through `objc_msgSend`, which is how everyone else reaches it.
