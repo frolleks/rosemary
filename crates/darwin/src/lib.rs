@@ -39,6 +39,7 @@ pub mod copyfile;
 pub mod credentials;
 pub mod data;
 pub mod dirent;
+pub mod dirhelper;
 pub mod dispatch;
 pub mod divergent;
 pub mod env;
