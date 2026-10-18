@@ -4,9 +4,10 @@
 //! A monitor, once given a queue and started, calls its update handler on that
 //! queue with the current path, and again each time the path changes, until it
 //! is cancelled; its cancel handler then runs once on the same queue. A path
-//! is *satisfied* when some interface that is up, running and not loopback has
-//! an address to send from, which is what this host's own interface list
-//! answers. Nothing here notices a change the moment it happens: a started
+//! is *satisfied* when the host has a route out and some interface the path
+//! may use is up with an address beyond its own link, which `starnix` answers
+//! the same way for SCNetworkReachability. Nothing here notices a change the
+//! moment it happens: a started
 //! monitor looks again every [`POLL`], so a change is reported within that.
 //!
 //! The objects are Objective-C objects, as Apple's are (`OS_nw_path_monitor`
@@ -47,7 +48,24 @@ struct MonitorBody {
 #[repr(C)]
 struct PathBody {
     isa: *const c_void,
-    status: Status,
+    /// From `Box::into_raw`, freed by `-dealloc`.
+    path: *mut Path,
+}
+
+/// What a path says, compared whole to tell whether it changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Path {
+    pub status: Status,
+    /// The interfaces the path may use, the one carrying the route first.
+    pub interfaces: Vec<Interface>,
+}
+
+/// One interface a path may use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Interface {
+    pub name: String,
+    pub index: u32,
+    pub kind: InterfaceType,
 }
 
 struct Monitor {
@@ -133,7 +151,14 @@ fn monitor_class() -> &'static Class {
 fn path_class() -> &'static Class {
     static CLASS: std::sync::OnceLock<&'static Class> = std::sync::OnceLock::new();
     CLASS.get_or_init(|| {
-        corefoundation::base::register(c"OS_nw_path", None, size_of::<PathBody>(), false)
+        let class =
+            corefoundation::base::register(c"OS_nw_path", None, size_of::<PathBody>(), false);
+        class.add_method(
+            objc::sel::get("dealloc"),
+            path_dealloc as *const c_void,
+            c"v16@0:8",
+        );
+        class
     })
 }
 
@@ -154,14 +179,23 @@ fn monitor_of<'a>(object: Id) -> Option<&'a Monitor> {
 }
 
 /// A new path at +1.
-fn make_path(status: Status) -> Id {
+fn make_path(path: Path) -> Id {
     // SAFETY: `PathBody` is the layout the class was registered with.
     let body: *mut PathBody = unsafe { corefoundation::base::allocate(path_class()) };
     if !body.is_null() {
         // SAFETY: freshly allocated.
-        unsafe { (*body).status = status };
+        unsafe { (*body).path = Box::into_raw(Box::new(path)) };
     }
     body as Id
+}
+
+/// What an `nw_path_t` says, or `None` for anything else.
+fn path_of<'a>(object: Id) -> Option<&'a Path> {
+    if !is_instance(object, path_class()) {
+        return None;
+    }
+    // SAFETY: an instance of the path class, whose body `make_path` wrote.
+    Some(unsafe { &*(*(object as *const PathBody)).path })
 }
 
 /// `nw_interface_type_t`
@@ -175,66 +209,60 @@ pub enum InterfaceType {
     Loopback = 4,
 }
 
-/// The type Network.framework would give a host interface: loopback by its
-/// flag, Wi-Fi where the host says the interface is wireless (Linux's
-/// `/sys/class/net/<name>/wireless`), a point-to-point link as other, and the
-/// rest wired. Nothing on a desktop host is cellular.
-fn interface_type(name: &std::ffi::CStr, flags: libc::c_int) -> InterfaceType {
-    if flags & libc::IFF_LOOPBACK != 0 {
-        return InterfaceType::Loopback;
+impl InterfaceType {
+    fn of(link: starnix::net::Link) -> InterfaceType {
+        use starnix::net::Link;
+        match link {
+            Link::Wifi => InterfaceType::Wifi,
+            Link::Wired => InterfaceType::Wired,
+            Link::Cellular => InterfaceType::Cellular,
+            Link::Loopback => InterfaceType::Loopback,
+            Link::Other => InterfaceType::Other,
+        }
     }
-    let sys = std::path::Path::new("/sys/class/net").join(name.to_string_lossy().as_ref());
-    if sys.join("wireless").exists() || sys.join("phy80211").exists() {
-        return InterfaceType::Wifi;
-    }
-    match flags & libc::IFF_POINTOPOINT != 0 {
-        true => InterfaceType::Other,
-        false => InterfaceType::Wired,
+
+    /// The order a path lists interfaces in when none carries the route.
+    fn preference(self) -> u8 {
+        match self {
+            InterfaceType::Wired => 0,
+            InterfaceType::Wifi => 1,
+            InterfaceType::Cellular => 2,
+            InterfaceType::Other => 3,
+            InterfaceType::Loopback => 4,
+        }
     }
 }
 
-/// What the host's interfaces say about reaching anything, through any type
-/// but the prohibited ones (a mask over `1 << nw_interface_type_t`):
-/// satisfied if one that is up and running, and not loopback, has an IPv4
-/// address or an IPv6 one beyond link-local.
-pub fn current_status(prohibited: u32) -> Status {
-    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: a list pointer for `getifaddrs` to fill in, freed below.
-    if unsafe { libc::getifaddrs(&mut list) } != 0 {
-        return Status::Unsatisfied;
-    }
-    let mut usable = false;
-    let mut at = list;
-    while !at.is_null() {
-        // SAFETY: a node of the list `getifaddrs` returned.
-        let entry = unsafe { &*at };
-        at = entry.ifa_next;
-        let flags = entry.ifa_flags as libc::c_int;
-        let up = flags & libc::IFF_UP != 0 && flags & libc::IFF_RUNNING != 0;
-        if !up || flags & libc::IFF_LOOPBACK != 0 || entry.ifa_addr.is_null() {
-            continue;
-        }
-        // SAFETY: `getifaddrs` names every interface it lists.
-        let name = unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) };
-        if prohibited & 1 << interface_type(name, flags) as u32 != 0 {
-            continue;
-        }
-        // SAFETY: a socket address of the family it states.
-        usable |= match unsafe { (*entry.ifa_addr).sa_family } as libc::c_int {
-            libc::AF_INET => true,
-            libc::AF_INET6 => {
-                let v6 = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in6) };
-                let octets = v6.sin6_addr.s6_addr;
-                !(octets[0] == 0xfe && octets[1] & 0xc0 == 0x80)
-            }
-            _ => false,
-        };
-    }
-    // SAFETY: the list `getifaddrs` returned, freed once.
-    unsafe { libc::freeifaddrs(list) };
-    match usable {
-        true => Status::Satisfied,
-        false => Status::Unsatisfied,
+/// The path the host's interfaces describe, through any type but the
+/// prohibited ones (a mask over `1 << nw_interface_type_t`).
+pub fn current_path(prohibited: u32) -> Path {
+    let (v4, v6) = (starnix::net::route_v4(), starnix::net::route_v6());
+    let mut usable: Vec<(bool, Interface)> = starnix::net::interfaces()
+        .into_iter()
+        .filter(starnix::net::Interface::routable)
+        .map(|i| {
+            let carries =
+                v4.is_some_and(|a| i.v4.contains(&a)) || v6.is_some_and(|a| i.v6.contains(&a));
+            let interface = Interface {
+                kind: InterfaceType::of(i.link),
+                name: i.name,
+                index: i.index,
+            };
+            (carries, interface)
+        })
+        .filter(|(_, i)| prohibited & 1 << i.kind as u32 == 0)
+        .collect();
+    usable.sort_by_key(|(carries, i)| (!carries, i.kind.preference()));
+    // FIXME (ACCURACY): only the default route is probed, so a path whose
+    // route-carrying interface is prohibited counts as satisfied through any
+    // other usable one, as a host with a route per interface would be.
+    let routed = v4.is_some() || v6.is_some();
+    Path {
+        status: match routed && !usable.is_empty() {
+            true => Status::Satisfied,
+            false => Status::Unsatisfied,
+        },
+        interfaces: usable.into_iter().map(|(_, i)| i).collect(),
     }
 }
 
@@ -250,8 +278,8 @@ struct Delivery {
 unsafe extern "C" fn deliver(context: *mut c_void) {
     // SAFETY: a `Delivery` boxed by `post`, taken back once.
     let delivery = unsafe { Box::from_raw(context as *mut Delivery) };
-    let invoke = unsafe { *((delivery.handler.id() as *const u8).add(16) as *const usize) };
-    if invoke != 0 {
+    // SAFETY: a block this module copied, alive until `delivery` drops.
+    if let Some(invoke) = unsafe { objc::block::invoke(delivery.handler.id()) } {
         // SAFETY: `nw_path_monitor_update_handler_t` is `void (^)(nw_path_t)`
         // and the cancel handler `void (^)(void)`; passing a nil second
         // argument to the latter is harmless under the C calling convention.
@@ -277,9 +305,9 @@ fn post(queue: u64, handler: Block, path: Id, release: Id) {
     unsafe { darwin::dispatch::queue::async_f(queue, context as u64, deliver as *const () as u64) };
 }
 
-/// Hand the update handler a path with `status`, unless the monitor has been
-/// cancelled since.
-fn report(monitor: &Monitor, status: Status) {
+/// Hand the update handler `path`, unless the monitor has been cancelled
+/// since.
+fn report(monitor: &Monitor, path: &Path) {
     let state = lock(monitor);
     if state.phase != Phase::Started || state.queue == 0 {
         return;
@@ -290,7 +318,7 @@ fn report(monitor: &Monitor, status: Status) {
     post(
         state.queue,
         handler,
-        make_path(status),
+        make_path(path.clone()),
         std::ptr::null_mut(),
     );
 }
@@ -301,10 +329,12 @@ fn watch(monitor: Arc<Monitor>) {
     let mut last = None;
     loop {
         let prohibited = lock(&monitor).prohibited;
-        let status = current_status(prohibited);
-        if last != Some(status) {
-            report(&monitor, status);
-            last = Some(status);
+        // Any change counts, not just one of status: Wi-Fi dropping while
+        // wired stays up is a new path that is still satisfied.
+        let path = current_path(prohibited);
+        if last.as_ref() != Some(&path) {
+            report(&monitor, &path);
+            last = Some(path);
         }
         let state = lock(&monitor);
         if state.phase != Phase::Started {
@@ -447,11 +477,7 @@ pub unsafe extern "C" fn nw_path_monitor_cancel(object: Id) {
 
 /// `nw_path_status_t nw_path_get_status(nw_path_t)`
 pub unsafe extern "C" fn nw_path_get_status(path: Id) -> i32 {
-    if !is_instance(path, path_class()) {
-        return Status::Invalid as i32;
-    }
-    // SAFETY: an instance of the path class.
-    unsafe { (*(path as *const PathBody)).status as i32 }
+    path_of(path).map_or(Status::Invalid, |p| p.status) as i32
 }
 
 /// `void *nw_retain(void *obj)`
@@ -462,6 +488,13 @@ pub unsafe extern "C" fn nw_retain(object: Id) -> Id {
 /// `void nw_release(void *obj)`
 pub unsafe extern "C" fn nw_release(object: Id) {
     objc::arc::release(object);
+}
+
+unsafe extern "C" fn path_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: `-dealloc` of a `PathBody` whose `path` came from
+    // `Box::into_raw`, taken back once.
+    drop(unsafe { Box::from_raw((*(receiver as *mut PathBody)).path) });
+    objc::arc::finalize(receiver);
 }
 
 unsafe extern "C" fn monitor_dealloc(receiver: Id, _sel: Sel) {
@@ -569,7 +602,7 @@ mod tests {
             nw_path_monitor_set_cancel_handler(monitor, cancelled.as_ref() as *const _ as Id);
             nw_path_monitor_start(monitor);
             wait_for(|| UPDATES.load(Ordering::SeqCst) == 1);
-            assert_eq!(STATUS.load(Ordering::SeqCst), current_status(0) as i32);
+            assert_eq!(STATUS.load(Ordering::SeqCst), current_path(0).status as i32);
 
             nw_path_monitor_cancel(monitor);
             nw_path_monitor_cancel(monitor);
@@ -633,10 +666,12 @@ mod tests {
         ]
         .iter()
         .fold(0, |mask, t| mask | 1 << *t as u32);
-        assert_eq!(current_status(every), Status::Unsatisfied);
+        let none = current_path(every);
+        assert_eq!(none.status, Status::Unsatisfied);
+        assert!(none.interfaces.is_empty());
         assert_eq!(
-            current_status(1 << InterfaceType::Loopback as u32),
-            current_status(0)
+            current_path(1 << InterfaceType::Loopback as u32),
+            current_path(0)
         );
     }
 

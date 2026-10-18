@@ -10,4 +10,4 @@ exports.workspace = true
 objc.workspace = true
 corefoundation.workspace = true
 darwin.workspace = true
-libc.workspace = true
+starnix.workspace = true

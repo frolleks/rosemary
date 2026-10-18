@@ -1760,8 +1760,8 @@ dependencies = [
  "corefoundation",
  "darwin",
  "exports",
- "libc",
  "objc",
+ "starnix",
 ]
 
 [[package]]
