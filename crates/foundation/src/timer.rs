@@ -537,9 +537,95 @@ unsafe extern "C" fn perform_after_delay(
     object: Id,
     delay: f64,
 ) {
-    let mut parts = selector_parts(delay, receiver, selector, object, 0);
+    let _ = make(delayed_parts(receiver, selector, object, delay), true);
+}
+
+/// A delayed perform's timer: one shot, handing its action the object rather
+/// than the timer. Nothing else makes a selector timer that does not pass
+/// itself, which is how the cancelling methods tell these apart.
+fn delayed_parts(target: Id, selector: Sel, object: Id, delay: f64) -> Parts {
+    let mut parts = selector_parts(delay, target, selector, object, 0);
     parts.passes_timer = false;
-    let _ = make(parts, true);
+    parts
+}
+
+fn is_delayed_perform(timer: &Timer) -> bool {
+    timer.block.is_null() && timer.passes_timer == 0
+}
+
+/// `-performSelector:withObject:afterDelay:inModes:`: the same, in each of
+/// `modes`; "if you specify nil or an empty array for this parameter, this
+/// method returns without performing the specified selector".
+unsafe extern "C" fn perform_after_delay_in_modes(
+    receiver: Id,
+    _sel: Sel,
+    selector: Sel,
+    object: Id,
+    delay: f64,
+    modes: Id,
+) {
+    let modes: Vec<String> = objects_of(modes).into_iter().map(mode_name).collect();
+    if modes.is_empty() {
+        return;
+    }
+    let timer = make(delayed_parts(receiver, selector, object, delay), false);
+    let run_loop = runloop::current();
+    for mode in &modes {
+        schedule(timer, &run_loop, mode);
+    }
+}
+
+/// Invalidate the delayed performs on the current thread's run loop that
+/// `cancel` picks. Apple's "removes perform requests only in the current run
+/// loop, not all run loops".
+fn cancel_delayed(cancel: impl Fn(&Timer) -> bool) {
+    let run_loop = runloop::current();
+    let mut picked: Vec<Id> = Vec::new();
+    {
+        let table = scheduled();
+        for schedule in table.iter() {
+            let object = schedule.object as Id;
+            let timer = timer_of(object);
+            if Arc::ptr_eq(&schedule.run_loop, &run_loop)
+                && is_delayed_perform(timer)
+                && timer.invalidated == 0
+                && !picked.contains(&object)
+            {
+                picked.push(objc::arc::retain(object));
+            }
+        }
+    }
+    // Matched outside the table's lock: `-isEqual:` is the program's code.
+    for object in picked {
+        if cancel(timer_of(object)) {
+            // SAFETY: `-invalidate` is `void (id, SEL)`.
+            unsafe { invalidate(object, objc::sel::get("invalidate")) };
+        }
+        objc::arc::release(object);
+    }
+}
+
+/// `+cancelPreviousPerformRequestsWithTarget:`: every delayed perform with
+/// that target, whatever its selector and object.
+unsafe extern "C" fn cancel_previous_performs(_class: Id, _sel: Sel, target: Id) {
+    cancel_delayed(|timer| timer.target == target);
+}
+
+/// `+cancelPreviousPerformRequestsWithTarget:selector:object:`: those with the
+/// same target and selector and an object equal to `object` - "argument
+/// equality is determined using isEqual:", and nil matches only nil.
+unsafe extern "C" fn cancel_previous_perform(
+    _class: Id,
+    _sel: Sel,
+    target: Id,
+    selector: Sel,
+    object: Id,
+) {
+    cancel_delayed(|timer| {
+        timer.target == target
+            && objc::sel::is_equal(timer.selector, selector)
+            && same_argument(timer.user_info, object)
+    });
 }
 
 /// The state owned by a `-performSelectorOnMainThread:...` queue entry.
@@ -1226,8 +1312,15 @@ pub(crate) fn install() {
     methods!(nsobject, {
         "performSelector:withObject:afterDelay:" => perform_after_delay,
             c"v40@0:8:16@24d32";
+        "performSelector:withObject:afterDelay:inModes:" => perform_after_delay_in_modes,
+            c"v48@0:8:16@24d32@40";
         "performSelectorOnMainThread:withObject:waitUntilDone:" => perform_on_main_thread,
             c"v40@0:8:16@24c32";
+    });
+    class_methods!(nsobject, {
+        "cancelPreviousPerformRequestsWithTarget:" => cancel_previous_performs, c"v24@0:8@16";
+        "cancelPreviousPerformRequestsWithTarget:selector:object:" => cancel_previous_perform,
+            c"v40@0:8@16:24@32";
     });
 
     let date_class = corefoundation::base::register(c"NSDate", None, DATE_INSTANCE_SIZE, false);
@@ -1731,6 +1824,77 @@ mod tests {
             *PERFORMED.lock().unwrap(),
             vec![first as usize, second as usize, third as usize]
         );
+    }
+
+    static DELAYED_PERFORMED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+    unsafe extern "C" fn record_delayed(_receiver: Id, _sel: Sel, argument: Id) {
+        DELAYED_PERFORMED.lock().unwrap().push(argument as usize);
+    }
+
+    /// Delayed performs are cancelled by target, or by target, selector and an
+    /// object equal to the one they were made with; the others still run.
+    #[test]
+    fn delayed_performs_are_cancelled_by_target_selector_and_equal_object() {
+        let target = target(c"RosemaryTestDelayedTarget", record_delayed);
+        let (kept, cancelled, also_kept) = (
+            foundation_string("kept"),
+            foundation_string("cancelled"),
+            foundation_string("also kept"),
+        );
+        let tick = objc::sel::get("tick:");
+        let after = objc::sel::get("performSelector:withObject:afterDelay:");
+        let nsobject = objc::class::ptr(objc::class::lookup(c"NSObject").unwrap()) as Id;
+        DELAYED_PERFORMED.lock().unwrap().clear();
+        // SAFETY: the methods' own prototypes, with live objects.
+        unsafe {
+            perform_after_delay(target, after, tick, kept, 0.0);
+            perform_after_delay(target, after, tick, cancelled, 0.0);
+            perform_after_delay(target, after, tick, also_kept, 0.0);
+            // A different but equal string: the match is `-isEqual:`.
+            cancel_previous_perform(
+                nsobject,
+                objc::sel::get("cancelPreviousPerformRequestsWithTarget:selector:object:"),
+                target,
+                tick,
+                foundation_string("cancelled"),
+            );
+            // Nil matches only a request made with nil.
+            cancel_previous_perform(
+                nsobject,
+                objc::sel::get("cancelPreviousPerformRequestsWithTarget:selector:object:"),
+                target,
+                tick,
+                std::ptr::null_mut(),
+            );
+        }
+        let current = corefoundation::runloop::current();
+        for _ in 0..100 {
+            if DELAYED_PERFORMED.lock().unwrap().len() >= 2 {
+                break;
+            }
+            current.run_in_mode(corefoundation::runloop::DEFAULT_MODE, 0.01, false);
+        }
+        current.run_in_mode(corefoundation::runloop::DEFAULT_MODE, 0.02, false);
+        let mut performed = DELAYED_PERFORMED.lock().unwrap().clone();
+        performed.sort();
+        let mut expected = vec![kept as usize, also_kept as usize];
+        expected.sort();
+        assert_eq!(performed, expected);
+
+        DELAYED_PERFORMED.lock().unwrap().clear();
+        // SAFETY: as above.
+        unsafe {
+            perform_after_delay(target, after, tick, kept, 0.0);
+            perform_after_delay(target, after, objc::sel::get("other:"), kept, 0.0);
+            cancel_previous_performs(
+                nsobject,
+                objc::sel::get("cancelPreviousPerformRequestsWithTarget:"),
+                target,
+            );
+        }
+        current.run_in_mode(corefoundation::runloop::DEFAULT_MODE, 0.02, false);
+        assert!(DELAYED_PERFORMED.lock().unwrap().is_empty());
     }
 
     /// An unscheduled timer is valid until it is invalidated, as Apple's is.
