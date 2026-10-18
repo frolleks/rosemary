@@ -820,6 +820,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGColorSpaceGetName", P, P),
     sig!("CGColorSpaceCopyName", P, P),
     sig!("CGColorSpaceCopyPropertyList", P, P),
+    sig!("fileport_makeport", I32, I32, P),
+    sig!("fileport_makefd", I32, U32),
     sig!("CGGetActiveDisplayList", I32, U32, P, P),
     //
     // `NSOpenGLContext` is a thin wrapper, and a Unity player written before
