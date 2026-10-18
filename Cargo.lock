@@ -607,6 +607,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "coremedia"
+version = "0.3.0"
+dependencies = [
+ "corefoundation",
+ "exports",
+ "foundation",
+ "objc",
+]
+
+[[package]]
 name = "coreservices"
 version = "0.3.0"
 dependencies = [
