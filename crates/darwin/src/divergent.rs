@@ -359,9 +359,10 @@ mod tests {
         // itself was here until `crate::dirent` answered it, and is asserted
         // the other way round below.
         assert_eq!(reason("getdirentries"), Some(DIRENT));
-        // A Mach call that reads another task's memory, which is the half of
-        // the family `crate::mach` does not answer.
-        assert_eq!(reason("mach_vm_read"), Some(MACH));
+        // A Mach call that reaches the kernel about *memory* in a way
+        // `crate::mach` does not answer: wiring pages takes a host privilege
+        // port.
+        assert_eq!(reason("mach_vm_wire"), Some(MACH));
         assert_eq!(
             reason("strlen"),
             None,
@@ -407,7 +408,7 @@ mod tests {
         assert!(contains("dispatch_source_create"));
         // The half of Mach that is still refused: reading or changing another
         // task, as opposed to asking the process server about it.
-        assert!(contains("mach_vm_read"));
+        assert!(contains("mach_vm_write"));
         assert!(contains("task_suspend"));
         for name in ["task_for_pid", "task_threads", "pid_for_task"] {
             assert!(!contains(name), "{name} is answered by the process server");
