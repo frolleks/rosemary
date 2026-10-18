@@ -602,6 +602,7 @@ dependencies = [
  "objc",
  "prefix",
  "sdl3",
+ "starnix",
  "static_init",
 ]
 
