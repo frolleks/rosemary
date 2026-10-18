@@ -53,6 +53,7 @@ pub mod fts;
 #[cfg(target_os = "linux")]
 pub mod getopt;
 pub mod glob;
+pub mod guarded;
 pub mod heap;
 pub mod humanize;
 pub mod icu;
@@ -350,6 +351,7 @@ static SHARED_MODULES: &[exports::Module] = &[
     fs::MODULE,
     copyfile::MODULE,
     xattr::MODULE,
+    guarded::MODULE,
     passwd::MODULE,
     audit::MODULE,
     dirent::MODULE,
