@@ -603,6 +603,7 @@ dependencies = [
  "objc",
  "prefix",
  "sdl3",
+ "starnix",
  "static_init",
 ]
 
@@ -1777,8 +1778,8 @@ dependencies = [
  "corefoundation",
  "darwin",
  "exports",
- "libc",
  "objc",
+ "starnix",
 ]
 
 [[package]]

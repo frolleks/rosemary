@@ -547,12 +547,6 @@ const ATTR_MAX_BUFFER: usize = 8192;
 /// The name Darwin keeps a file's Finder info under.
 const FINDER_INFO: &CStr = c"com.apple.FinderInfo";
 
-/// What this host's `removexattr` says of an attribute that is not there.
-#[cfg(target_os = "linux")]
-const NO_ATTRIBUTE: c_int = libc::ENODATA;
-#[cfg(not(target_os = "linux"))]
-const NO_ATTRIBUTE: c_int = libc::ENOATTR;
-
 /// What a `setattrlist` buffer asks to change, read in the order xnu's
 /// `setattrlist_internal` reads it.
 ///
@@ -591,6 +585,16 @@ impl Unpack<'_> {
             tv_sec: sec as libc::time_t,
             tv_nsec: nsec as _,
         })
+    }
+    /// A time that is set rather than read past. The host takes two
+    /// out-of-range nanosecond values as `UTIME_NOW` and `UTIME_OMIT`, so
+    /// every one outside a second is refused before it can reach it.
+    fn kept_time(&mut self) -> Result<libc::timespec, c_int> {
+        let time = self.time()?;
+        match (0..1_000_000_000).contains(&time.tv_nsec) {
+            true => Ok(time),
+            false => Err(libc::EINVAL),
+        }
     }
 }
 
@@ -636,14 +640,14 @@ fn changes(list: &AttrList, buf: &[u8]) -> Result<Changes, c_int> {
         at.time()?;
     }
     if common & ATTR_CMN_MODTIME != 0 {
-        out.modified = Some(at.time()?);
+        out.modified = Some(at.kept_time()?);
     }
     // Read and ignored by xnu too: the change time is the kernel's to keep.
     if common & ATTR_CMN_CHGTIME != 0 {
         at.time()?;
     }
     if common & ATTR_CMN_ACCTIME != 0 {
-        out.accessed = Some(at.time()?);
+        out.accessed = Some(at.kept_time()?);
     }
     if common & ATTR_CMN_BKUPTIME != 0 {
         at.time()?;
@@ -688,6 +692,23 @@ fn changes(list: &AttrList, buf: &[u8]) -> Result<Changes, c_int> {
     Ok(out)
 }
 
+/// Whether host path `path` is itself a symlink.
+#[cfg(target_os = "linux")]
+fn is_symlink(path: *const c_char) -> bool {
+    // SAFETY: a zeroed `struct stat` for the host to fill, and the caller's path.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    unsafe { libc::lstat(path, &mut st) == 0 && st.st_mode & libc::S_IFMT == libc::S_IFLNK }
+}
+
+/// Whether `st` is the root of a volume: the guest's `/`, the one mount
+/// `getmntinfo` reports.
+fn is_volume_root(st: &Stat) -> bool {
+    let mut root = Stat::default();
+    // SAFETY: a NUL-terminated path and a live local.
+    let rc = unsafe { crate::stat::stat(c"/".as_ptr(), &mut root) };
+    rc == 0 && (root.dev, root.ino) == (st.dev, st.ino)
+}
+
 /// The file a `setattrlist` changes.
 #[derive(Clone, Copy)]
 enum Target {
@@ -697,36 +718,44 @@ enum Target {
 }
 
 impl Target {
+    /// The file as `stat` shows it to the guest, or `None` with `errno` set.
+    fn stat(self) -> Option<Stat> {
+        let mut st = Stat::default();
+        // SAFETY: the guest's own path or descriptor, and a live local.
+        let rc = unsafe {
+            match self {
+                Target::Path(path, true) => crate::stat::stat(path, &mut st),
+                Target::Path(path, false) => crate::stat::lstat(path, &mut st),
+                Target::Fd(fd) => crate::stat::fstat(fd, &mut st),
+            }
+        };
+        (rc == 0).then_some(st)
+    }
+
     /// Finder info, as `setattrlist_setfinderinfo` writes it: an extended
     /// attribute, which thirty-two zero bytes remove.
     fn set_finder_info(self, info: &[u8; 32]) -> c_int {
         let value = (info != &[0; 32]).then_some(&info[..]);
-        let set = |host: &CStr, follow: bool| {
-            // SAFETY: a NUL-terminated host path and a name this module owns.
-            let rc = unsafe { crate::xattr::set_on_host(host, FINDER_INFO, value, !follow) };
-            match rc != 0 && value.is_none() && crate::errno::get() == NO_ATTRIBUTE {
-                // Nothing to remove is the state asked for.
-                true => 0,
-                false => rc,
-            }
-        };
+        // Nothing to remove is the state asked for.
+        let removed_nothing =
+            |rc: c_int| rc != 0 && value.is_none() && crate::xattr::is_absent(crate::errno::get());
         match self {
             Target::Path(path, follow) => crate::stat::with_fallback(path, |host| {
-                // SAFETY: the path `with_fallback` translated.
-                let rc = set(unsafe { CStr::from_ptr(host) }, follow);
+                if !crate::stat::may_write(host) {
+                    return (-1, false);
+                }
+                // SAFETY: the path `with_fallback` translated, and a name this
+                // module owns.
+                let rc = unsafe {
+                    crate::xattr::set_on_host(CStr::from_ptr(host), FINDER_INFO, value, !follow)
+                };
+                let rc = if removed_nothing(rc) { 0 } else { rc };
                 (rc, rc == 0)
             }),
             Target::Fd(fd) => {
-                let Some(path) = starnix::fd::path(fd) else {
-                    crate::errno::set(libc::EBADF);
-                    return -1;
-                };
-                let Ok(path) = std::ffi::CString::new(path.into_os_string().into_encoded_bytes())
-                else {
-                    crate::errno::set(libc::EBADF);
-                    return -1;
-                };
-                set(&path, true)
+                // SAFETY: the caller's descriptor, and a name this module owns.
+                let rc = unsafe { crate::xattr::set_on_fd(fd, FINDER_INFO, value) };
+                if removed_nothing(rc) { 0 } else { rc }
             }
         }
     }
@@ -756,6 +785,13 @@ impl Target {
                 let rc = unsafe {
                     libc::fchmodat(libc::AT_FDCWD, host, mode, libc::AT_SYMLINK_NOFOLLOW)
                 };
+                // FIXME (ACCURACY): Linux keeps no mode on a symlink and never
+                // consults one, so it refuses to set it. Darwin's `lchmod`
+                // succeeds; the link is reported as done, its mode still 0777.
+                #[cfg(target_os = "linux")]
+                if rc != 0 && crate::errno::get() == libc::EOPNOTSUPP && is_symlink(host) {
+                    return (0, true);
+                }
                 (rc, rc == 0)
             }),
             // SAFETY: the caller's descriptor.
@@ -792,37 +828,82 @@ impl Target {
     /// Make the changes, in xnu's order: Finder info first when the new mode
     /// takes away the owner's write permission, so that it can still be
     /// written, and last otherwise, so that a mode that grants it comes first.
-    fn apply(self, changes: Changes) -> c_int {
+    ///
+    /// xnu makes them in one `vnode_setattr`; here each is its own call, so
+    /// one that fails puts back the owner, mode and times already changed,
+    /// as `before` had them, and the guest's -1 means nothing changed.
+    fn apply(self, changes: Changes, before: &Stat) -> c_int {
+        let mut done = Done::default();
+        if self.try_apply(&changes, &mut done) {
+            return 0;
+        }
+        self.undo(done, before);
+        -1
+    }
+
+    fn try_apply(self, changes: &Changes, done: &mut Done) -> bool {
         let finder_first = changes.mode.is_some_and(|mode| mode & 0o200 == 0);
         if finder_first
             && let Some(info) = &changes.finder_info
             && self.set_finder_info(info) != 0
         {
-            return -1;
+            return false;
         }
-        if (changes.owner.is_some() || changes.group.is_some())
-            && self.set_owner(changes.owner, changes.group) != 0
-        {
-            return -1;
+        if changes.owner.is_some() || changes.group.is_some() {
+            if self.set_owner(changes.owner, changes.group) != 0 {
+                return false;
+            }
+            done.owner = true;
         }
-        if let Some(mode) = changes.mode
-            && self.set_mode(mode) != 0
-        {
-            return -1;
+        if let Some(mode) = changes.mode {
+            if self.set_mode(mode) != 0 {
+                return false;
+            }
+            done.mode = true;
         }
-        if (changes.modified.is_some() || changes.accessed.is_some())
-            && self.set_times(changes.modified, changes.accessed) != 0
-        {
-            return -1;
+        if changes.modified.is_some() || changes.accessed.is_some() {
+            if self.set_times(changes.modified, changes.accessed) != 0 {
+                return false;
+            }
+            done.times = true;
         }
+        // FIXME (ACCURACY): Finder info written first is not put back if a
+        // later change fails; nothing after it is expected to.
         if !finder_first
             && let Some(info) = &changes.finder_info
             && self.set_finder_info(info) != 0
         {
-            return -1;
+            return false;
         }
-        0
+        true
     }
+
+    /// Put back what `done` says was changed, latest first, leaving `errno`
+    /// as the failure that made it necessary.
+    fn undo(self, done: Done, before: &Stat) {
+        let _errno = crate::errno::Held::now();
+        let time = |t: crate::stat::Timespec| libc::timespec {
+            tv_sec: t.sec as libc::time_t,
+            tv_nsec: t.nsec as _,
+        };
+        if done.times {
+            self.set_times(Some(time(before.mtime)), Some(time(before.atime)));
+        }
+        if done.mode {
+            self.set_mode(u32::from(before.mode));
+        }
+        if done.owner {
+            self.set_owner(Some(before.uid), Some(before.gid));
+        }
+    }
+}
+
+/// Which of [`Target::apply`]'s changes have been made.
+#[derive(Default)]
+struct Done {
+    owner: bool,
+    mode: bool,
+    times: bool,
 }
 
 /// The shared body of [`setattrlist`] and [`fsetattrlist`].
@@ -856,10 +937,21 @@ unsafe fn set(target: Target, list: *const AttrList, buf: *const c_void, size: u
         // SAFETY: the caller's buffer of `size` bytes.
         _ => unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), size) },
     };
-    match changes(&list, bytes) {
-        Ok(changes) => target.apply(changes),
-        Err(errno) => fail(errno),
+    let changes = match changes(&list, bytes) {
+        Ok(changes) => changes,
+        Err(errno) => return fail(errno),
+    };
+    // What a failed change is put back to, and the lookup that fails before
+    // anything is changed.
+    let Some(before) = target.stat() else {
+        return -1;
+    };
+    // Volume attributes, the common ones among them, are the volume's, and
+    // xnu refuses them on anything but its root.
+    if list.volattr != 0 && !is_volume_root(&before) {
+        return fail(libc::EINVAL);
     }
+    target.apply(changes, &before)
 }
 
 /// `int setattrlist(const char *path, struct attrlist *attrList, void
@@ -995,6 +1087,41 @@ mod tests {
         assert_eq!(meta.mode() & 0o7777, 0o600);
     }
 
+    /// With FSOPT_NOFOLLOW a symlink's mode is the link's, and setting it
+    /// leaves the target alone and does not stop the times that follow it.
+    #[test]
+    fn setattrlist_sets_a_symlinks_mode_without_following_it() {
+        use std::os::unix::fs::MetadataExt;
+        let (file, _) = scratch_file("setattrlist-link-target");
+        std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+            .unwrap();
+        let link = file.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let path = std::ffi::CString::new(link.to_str().unwrap()).unwrap();
+        let mut buf = times(&[(1_000_000_000, 0)]);
+        buf.extend_from_slice(&0o600u32.to_ne_bytes());
+        let l = list(ATTR_CMN_MODTIME | ATTR_CMN_ACCESSMASK, 0, 0);
+        // SAFETY: live locals of the sizes passed.
+        let rc = unsafe {
+            setattrlist(
+                path.as_ptr(),
+                &l,
+                buf.as_ptr().cast(),
+                buf.len(),
+                FSOPT_NOFOLLOW,
+            )
+        };
+        let errno = crate::errno::get();
+        let link_meta = std::fs::symlink_metadata(&link).unwrap();
+        let target_meta = std::fs::metadata(&file).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(rc, 0, "errno {errno}");
+        assert_eq!(target_meta.mode() & 0o7777, 0o644);
+        assert_eq!(link_meta.mtime(), 1_000_000_000);
+    }
+
     #[test]
     fn fsetattrlist_sets_a_time_through_a_descriptor() {
         use std::os::fd::AsRawFd;
@@ -1059,6 +1186,109 @@ mod tests {
         assert_eq!((cleared, after), (0, -1));
     }
 
+    /// A change that fails puts back the ones made before it: a link's new
+    /// time is undone when the Finder info after it cannot be written, which
+    /// Linux refuses on a symlink.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn setattrlist_puts_back_what_it_changed_when_a_later_change_fails() {
+        use std::os::unix::fs::MetadataExt;
+        let (file, _) = scratch_file("setattrlist-undo-target");
+        let link = file.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let before = std::fs::symlink_metadata(&link).unwrap();
+        let path = std::ffi::CString::new(link.to_str().unwrap()).unwrap();
+        let mut buf = times(&[(1_000_000_000, 0)]);
+        buf.extend_from_slice(b"TEXTttxt");
+        buf.extend_from_slice(&[0; 24]);
+        let l = list(ATTR_CMN_MODTIME | ATTR_CMN_FNDRINFO, 0, 0);
+        // SAFETY: live locals of the sizes passed.
+        let rc = unsafe {
+            setattrlist(
+                path.as_ptr(),
+                &l,
+                buf.as_ptr().cast(),
+                buf.len(),
+                FSOPT_NOFOLLOW,
+            )
+        };
+        let errno = crate::errno::get();
+        let after = std::fs::symlink_metadata(&link).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(rc, -1, "Linux keeps no user attribute on a symlink");
+        assert_eq!(errno, libc::EPERM);
+        assert_eq!(
+            (after.mtime(), after.mtime_nsec()),
+            (before.mtime(), before.mtime_nsec())
+        );
+    }
+
+    /// Volume attributes, common ones included, are refused on a file that
+    /// is not the volume's root rather than applied to it.
+    #[test]
+    fn setattrlist_refuses_volume_attributes_below_the_root() {
+        use std::os::unix::fs::MetadataExt;
+        let (file, path) = scratch_file("setattrlist-volume");
+        let before = std::fs::metadata(&file).unwrap().mtime();
+        let buf = times(&[(1_000_000_000, 0)]);
+        let mut l = list(ATTR_CMN_MODTIME, 0, 0);
+        l.volattr = ATTR_VOL_INFO;
+        // SAFETY: live locals of the sizes passed.
+        let rc = unsafe { setattrlist(path.as_ptr(), &l, buf.as_ptr().cast(), buf.len(), 0) };
+        let errno = crate::errno::get();
+        let after = std::fs::metadata(&file).unwrap().mtime();
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!((rc, errno), (-1, libc::EINVAL));
+        assert_eq!(after, before);
+    }
+
+    /// Through a descriptor the Finder info lands on the open file, even once
+    /// the name it was opened by is gone.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn fsetattrlist_writes_finder_info_on_a_renamed_file() {
+        use std::os::fd::AsRawFd;
+        let (file, _) = scratch_file("fsetattrlist-finderinfo");
+        let moved = file.with_extension("moved");
+        let handle = std::fs::File::open(&file).unwrap();
+        std::fs::rename(&file, &moved).unwrap();
+        let mut info = [0u8; 32];
+        info[..8].copy_from_slice(b"TEXTttxt");
+        let l = list(ATTR_CMN_FNDRINFO, 0, 0);
+        let set = |info: &[u8; 32]| {
+            // SAFETY: an open descriptor and live locals of the sizes passed.
+            unsafe { fsetattrlist(handle.as_raw_fd(), &l, info.as_ptr().cast(), 32, 0) }
+        };
+        if set(&info) != 0 {
+            let errno = crate::errno::get();
+            std::fs::remove_file(&moved).unwrap();
+            assert_eq!(
+                errno,
+                libc::EOPNOTSUPP,
+                "only a filesystem without attributes refuses"
+            );
+            return;
+        }
+        let path = std::ffi::CString::new(moved.to_str().unwrap()).unwrap();
+        let mut read = [0u8; 32];
+        // SAFETY: the host's own call, on a path and buffer of this test's.
+        let got = unsafe {
+            libc::getxattr(
+                path.as_ptr(),
+                c"user.com.apple.FinderInfo".as_ptr(),
+                read.as_mut_ptr().cast(),
+                read.len(),
+            )
+        };
+        let cleared = set(&[0; 32]);
+        let cleared_again = set(&[0; 32]);
+        std::fs::remove_file(&moved).unwrap();
+        assert_eq!((got, read), (32, info));
+        assert_eq!((cleared, cleared_again), (0, 0));
+    }
+
     /// xnu's checks, in xnu's order: an attribute that cannot be set is
     /// `EINVAL` before anything else, a request for nothing succeeds whatever
     /// the buffer, an oversized buffer is `ENOMEM`, and a short one `EINVAL`.
@@ -1082,6 +1312,13 @@ mod tests {
             call(list(ATTR_CMN_MODTIME, 0, 0), &[0; 8], 8),
             call(list(ATTR_CMN_UUID, 0, 0), &[0; 16], 16),
             call(list(ATTR_CMN_CRTIME | ATTR_CMN_FLAGS, 0, 0), &[0; 20], 20),
+            // Linux's UTIME_OMIT, which must not be taken as "leave it".
+            call(
+                list(ATTR_CMN_MODTIME, 0, 0),
+                &times(&[(5, (1 << 30) - 2)]),
+                16,
+            ),
+            call(list(ATTR_CMN_ACCTIME, 0, 0), &times(&[(5, -1)]), 16),
         ];
         std::fs::remove_file(&file).unwrap();
         assert_eq!(
@@ -1095,6 +1332,8 @@ mod tests {
                 Err(libc::ENOTSUP),
                 // Kept nowhere here, as on a volume that has neither.
                 Ok(()),
+                Err(libc::EINVAL),
+                Err(libc::EINVAL),
             ]
         );
     }

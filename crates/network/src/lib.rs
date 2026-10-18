@@ -4,16 +4,20 @@
 //! A monitor, once given a queue and started, calls its update handler on that
 //! queue with the current path, and again each time the path changes, until it
 //! is cancelled; its cancel handler then runs once on the same queue. A path
-//! is *satisfied* when some interface that is up, running and not loopback has
-//! an address to send from, which is what this host's own interface list
-//! answers. Nothing here notices a change the moment it happens: a started
+//! is *satisfied* when the host has a route out and some interface the path
+//! may use is up with an address beyond its own link, which `starnix` answers
+//! the same way for SCNetworkReachability. Nothing here notices a change the
+//! moment it happens: a started
 //! monitor looks again every [`POLL`], so a change is reported within that.
 //!
-//! The objects are Objective-C objects, as Apple's are (`OS_nw_path_monitor`
-//! and `OS_nw_path`): ARC retains and releases them, and `nw_retain` and
+//! The objects are Objective-C objects, as Apple's are (`OS_nw_path_monitor`,
+//! `OS_nw_path` and `OS_nw_interface`): ARC retains and releases them, and `nw_retain` and
 //! `nw_release` are the same two calls.
 
-use std::ffi::c_void;
+// The entry points are C functions whose safety is the C header's contract.
+#![allow(clippy::missing_safety_doc)]
+
+use std::ffi::{CString, c_char, c_void};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -47,7 +51,39 @@ struct MonitorBody {
 #[repr(C)]
 struct PathBody {
     isa: *const c_void,
-    status: Status,
+    /// From `Box::into_raw`, freed by `-dealloc`.
+    path: *mut Path,
+}
+
+/// What a path says, compared whole to tell whether it changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Path {
+    pub status: Status,
+    /// The interfaces the path may use, the one carrying the route first.
+    pub interfaces: Vec<Interface>,
+}
+
+/// The object an `nw_interface_t` is, which owns a copy of what it names so
+/// it outlives the path it came from.
+#[repr(C)]
+struct InterfaceBody {
+    isa: *const c_void,
+    /// From `Box::into_raw`, freed by `-dealloc`.
+    data: *mut InterfaceData,
+}
+
+struct InterfaceData {
+    interface: Interface,
+    /// `name`, NUL-terminated for `nw_interface_get_name`.
+    name: CString,
+}
+
+/// One interface a path may use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Interface {
+    pub name: String,
+    pub index: u32,
+    pub kind: InterfaceType,
 }
 
 struct Monitor {
@@ -66,6 +102,9 @@ struct State {
     phase: Phase,
     /// `1 << nw_interface_type_t` for each type the path may not use.
     prohibited: u32,
+    /// The monitor object, retained from start until the cancel handler has
+    /// run: Apple's keeps a started monitor alive after its creator lets go.
+    held: usize,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -112,8 +151,12 @@ fn lock(monitor: &Monitor) -> MutexGuard<'_, State> {
 fn monitor_class() -> &'static Class {
     static CLASS: std::sync::OnceLock<&'static Class> = std::sync::OnceLock::new();
     CLASS.get_or_init(|| {
-        let class =
-            corefoundation::base::register(c"OS_nw_path_monitor", None, size_of::<MonitorBody>(), false);
+        let class = corefoundation::base::register(
+            c"OS_nw_path_monitor",
+            None,
+            size_of::<MonitorBody>(),
+            false,
+        );
         class.add_method(
             objc::sel::get("dealloc"),
             monitor_dealloc as *const c_void,
@@ -126,8 +169,56 @@ fn monitor_class() -> &'static Class {
 fn path_class() -> &'static Class {
     static CLASS: std::sync::OnceLock<&'static Class> = std::sync::OnceLock::new();
     CLASS.get_or_init(|| {
-        corefoundation::base::register(c"OS_nw_path", None, size_of::<PathBody>(), false)
+        let class =
+            corefoundation::base::register(c"OS_nw_path", None, size_of::<PathBody>(), false);
+        class.add_method(
+            objc::sel::get("dealloc"),
+            path_dealloc as *const c_void,
+            c"v16@0:8",
+        );
+        class
     })
+}
+
+fn interface_class() -> &'static Class {
+    static CLASS: std::sync::OnceLock<&'static Class> = std::sync::OnceLock::new();
+    CLASS.get_or_init(|| {
+        let class = corefoundation::base::register(
+            c"OS_nw_interface",
+            None,
+            size_of::<InterfaceBody>(),
+            false,
+        );
+        class.add_method(
+            objc::sel::get("dealloc"),
+            interface_dealloc as *const c_void,
+            c"v16@0:8",
+        );
+        class
+    })
+}
+
+/// A new interface at +1.
+fn make_interface(interface: Interface) -> Id {
+    // SAFETY: `InterfaceBody` is the layout the class was registered with.
+    let body: *mut InterfaceBody = unsafe { corefoundation::base::allocate(interface_class()) };
+    if !body.is_null() {
+        // Interface names never hold a NUL, but a lossy name is better than none.
+        let name = CString::new(interface.name.replace('\0', "")).unwrap_or_default();
+        let data = Box::new(InterfaceData { interface, name });
+        // SAFETY: freshly allocated.
+        unsafe { (*body).data = Box::into_raw(data) };
+    }
+    body as Id
+}
+
+fn interface_of<'a>(object: Id) -> Option<&'a InterfaceData> {
+    if !is_instance(object, interface_class()) {
+        return None;
+    }
+    // SAFETY: an instance of the interface class, whose body `make_interface`
+    // wrote.
+    Some(unsafe { &*(*(object as *const InterfaceBody)).data })
 }
 
 /// Whether `object` is a non-nil instance of exactly `class`.
@@ -147,14 +238,23 @@ fn monitor_of<'a>(object: Id) -> Option<&'a Monitor> {
 }
 
 /// A new path at +1.
-fn make_path(status: Status) -> Id {
+fn make_path(path: Path) -> Id {
     // SAFETY: `PathBody` is the layout the class was registered with.
     let body: *mut PathBody = unsafe { corefoundation::base::allocate(path_class()) };
     if !body.is_null() {
         // SAFETY: freshly allocated.
-        unsafe { (*body).status = status };
+        unsafe { (*body).path = Box::into_raw(Box::new(path)) };
     }
     body as Id
+}
+
+/// What an `nw_path_t` says, or `None` for anything else.
+fn path_of<'a>(object: Id) -> Option<&'a Path> {
+    if !is_instance(object, path_class()) {
+        return None;
+    }
+    // SAFETY: an instance of the path class, whose body `make_path` wrote.
+    Some(unsafe { &*(*(object as *const PathBody)).path })
 }
 
 /// `nw_interface_type_t`
@@ -168,66 +268,60 @@ pub enum InterfaceType {
     Loopback = 4,
 }
 
-/// The type Network.framework would give a host interface: loopback by its
-/// flag, Wi-Fi where the host says the interface is wireless (Linux's
-/// `/sys/class/net/<name>/wireless`), a point-to-point link as other, and the
-/// rest wired. Nothing on a desktop host is cellular.
-fn interface_type(name: &std::ffi::CStr, flags: libc::c_int) -> InterfaceType {
-    if flags & libc::IFF_LOOPBACK != 0 {
-        return InterfaceType::Loopback;
+impl InterfaceType {
+    fn of(link: starnix::net::Link) -> InterfaceType {
+        use starnix::net::Link;
+        match link {
+            Link::Wifi => InterfaceType::Wifi,
+            Link::Wired => InterfaceType::Wired,
+            Link::Cellular => InterfaceType::Cellular,
+            Link::Loopback => InterfaceType::Loopback,
+            Link::Other => InterfaceType::Other,
+        }
     }
-    let sys = std::path::Path::new("/sys/class/net").join(name.to_string_lossy().as_ref());
-    if sys.join("wireless").exists() || sys.join("phy80211").exists() {
-        return InterfaceType::Wifi;
-    }
-    match flags & libc::IFF_POINTOPOINT != 0 {
-        true => InterfaceType::Other,
-        false => InterfaceType::Wired,
+
+    /// The order a path lists interfaces in when none carries the route.
+    fn preference(self) -> u8 {
+        match self {
+            InterfaceType::Wired => 0,
+            InterfaceType::Wifi => 1,
+            InterfaceType::Cellular => 2,
+            InterfaceType::Other => 3,
+            InterfaceType::Loopback => 4,
+        }
     }
 }
 
-/// What the host's interfaces say about reaching anything, through any type
-/// but the prohibited ones (a mask over `1 << nw_interface_type_t`):
-/// satisfied if one that is up and running, and not loopback, has an IPv4
-/// address or an IPv6 one beyond link-local.
-pub fn current_status(prohibited: u32) -> Status {
-    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: a list pointer for `getifaddrs` to fill in, freed below.
-    if unsafe { libc::getifaddrs(&mut list) } != 0 {
-        return Status::Unsatisfied;
-    }
-    let mut usable = false;
-    let mut at = list;
-    while !at.is_null() {
-        // SAFETY: a node of the list `getifaddrs` returned.
-        let entry = unsafe { &*at };
-        at = entry.ifa_next;
-        let flags = entry.ifa_flags as libc::c_int;
-        let up = flags & libc::IFF_UP != 0 && flags & libc::IFF_RUNNING != 0;
-        if !up || flags & libc::IFF_LOOPBACK != 0 || entry.ifa_addr.is_null() {
-            continue;
-        }
-        // SAFETY: `getifaddrs` names every interface it lists.
-        let name = unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) };
-        if prohibited & 1 << interface_type(name, flags) as u32 != 0 {
-            continue;
-        }
-        // SAFETY: a socket address of the family it states.
-        usable |= match unsafe { (*entry.ifa_addr).sa_family } as libc::c_int {
-            libc::AF_INET => true,
-            libc::AF_INET6 => {
-                let v6 = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in6) };
-                let octets = v6.sin6_addr.s6_addr;
-                !(octets[0] == 0xfe && octets[1] & 0xc0 == 0x80)
-            }
-            _ => false,
-        };
-    }
-    // SAFETY: the list `getifaddrs` returned, freed once.
-    unsafe { libc::freeifaddrs(list) };
-    match usable {
-        true => Status::Satisfied,
-        false => Status::Unsatisfied,
+/// The path the host's interfaces describe, through any type but the
+/// prohibited ones (a mask over `1 << nw_interface_type_t`).
+pub fn current_path(prohibited: u32) -> Path {
+    let (v4, v6) = (starnix::net::route_v4(), starnix::net::route_v6());
+    let mut usable: Vec<(bool, Interface)> = starnix::net::interfaces()
+        .into_iter()
+        .filter(starnix::net::Interface::routable)
+        .map(|i| {
+            let carries =
+                v4.is_some_and(|a| i.v4.contains(&a)) || v6.is_some_and(|a| i.v6.contains(&a));
+            let interface = Interface {
+                kind: InterfaceType::of(i.link),
+                name: i.name,
+                index: i.index,
+            };
+            (carries, interface)
+        })
+        .filter(|(_, i)| prohibited & 1 << i.kind as u32 == 0)
+        .collect();
+    usable.sort_by_key(|(carries, i)| (!carries, i.kind.preference()));
+    // FIXME (ACCURACY): only the default route is probed, so a path whose
+    // route-carrying interface is prohibited counts as satisfied through any
+    // other usable one, as a host with a route per interface would be.
+    let routed = v4.is_some() || v6.is_some();
+    Path {
+        status: match routed && !usable.is_empty() {
+            true => Status::Satisfied,
+            false => Status::Unsatisfied,
+        },
+        interfaces: usable.into_iter().map(|(_, i)| i).collect(),
     }
 }
 
@@ -236,13 +330,15 @@ struct Delivery {
     handler: Block,
     /// A path at +1, or nil for the cancel handler.
     path: Id,
+    /// An object to release once the handler has run, or nil.
+    release: Id,
 }
 
 unsafe extern "C" fn deliver(context: *mut c_void) {
     // SAFETY: a `Delivery` boxed by `post`, taken back once.
     let delivery = unsafe { Box::from_raw(context as *mut Delivery) };
-    let invoke = unsafe { *((delivery.handler.id() as *const u8).add(16) as *const usize) };
-    if invoke != 0 {
+    // SAFETY: a block this module copied, alive until `delivery` drops.
+    if let Some(invoke) = unsafe { objc::block::invoke(delivery.handler.id()) } {
         // SAFETY: `nw_path_monitor_update_handler_t` is `void (^)(nw_path_t)`
         // and the cancel handler `void (^)(void)`; passing a nil second
         // argument to the latter is harmless under the C calling convention.
@@ -252,19 +348,25 @@ unsafe extern "C" fn deliver(context: *mut c_void) {
         }
     }
     objc::arc::release(delivery.path);
+    objc::arc::release(delivery.release);
 }
 
-/// Run `handler` on `queue` with `path`, which this call owns.
-fn post(queue: u64, handler: Block, path: Id) {
-    let context = Box::into_raw(Box::new(Delivery { handler, path }));
+/// Run `handler` on `queue` with `path`, then release `release`; this call
+/// owns both.
+fn post(queue: u64, handler: Block, path: Id, release: Id) {
+    let context = Box::into_raw(Box::new(Delivery {
+        handler,
+        path,
+        release,
+    }));
     // SAFETY: a live queue the monitor retains, and `deliver` takes back the
     // box it is handed.
     unsafe { darwin::dispatch::queue::async_f(queue, context as u64, deliver as *const () as u64) };
 }
 
-/// Hand the update handler a path with `status`, unless the monitor has been
-/// cancelled since.
-fn report(monitor: &Monitor, status: Status) {
+/// Hand the update handler `path`, unless the monitor has been cancelled
+/// since.
+fn report(monitor: &Monitor, path: &Path) {
     let state = lock(monitor);
     if state.phase != Phase::Started || state.queue == 0 {
         return;
@@ -272,7 +374,12 @@ fn report(monitor: &Monitor, status: Status) {
     let Some(handler) = state.update.clone() else {
         return;
     };
-    post(state.queue, handler, make_path(status));
+    post(
+        state.queue,
+        handler,
+        make_path(path.clone()),
+        std::ptr::null_mut(),
+    );
 }
 
 /// What a started monitor's thread does: report the path, then again each
@@ -281,10 +388,12 @@ fn watch(monitor: Arc<Monitor>) {
     let mut last = None;
     loop {
         let prohibited = lock(&monitor).prohibited;
-        let status = current_status(prohibited);
-        if last != Some(status) {
-            report(&monitor, status);
-            last = Some(status);
+        // Any change counts, not just one of status: Wi-Fi dropping while
+        // wired stays up is a new path that is still satisfied.
+        let path = current_path(prohibited);
+        if last.as_ref() != Some(&path) {
+            report(&monitor, &path);
+            last = Some(path);
         }
         let state = lock(&monitor);
         if state.phase != Phase::Started {
@@ -301,20 +410,28 @@ fn watch(monitor: Arc<Monitor>) {
 }
 
 /// Stop `monitor` and run its cancel handler, the first time only.
-fn cancel(monitor: &Monitor) {
+///
+/// Answers the reference a started monitor holds on itself when nothing was
+/// posted to release it; the caller releases it once `monitor` is no longer
+/// borrowed, as that release may be the last.
+#[must_use]
+fn cancel(monitor: &Monitor) -> Id {
     let mut state = lock(monitor);
     if state.phase == Phase::Cancelled {
-        return;
+        return std::ptr::null_mut();
     }
     state.phase = Phase::Cancelled;
     monitor.cancelled.notify_all();
     // No update after the cancel handler: the handler is dropped here, and a
     // report already queued runs before the cancel handler on the same queue.
     state.update = None;
-    if let (Some(handler), queue) = (state.cancel.take(), state.queue)
-        && queue != 0
-    {
-        post(queue, handler, std::ptr::null_mut());
+    let held = std::mem::take(&mut state.held) as Id;
+    match (state.cancel.take(), state.queue) {
+        (Some(handler), queue) if queue != 0 => {
+            post(queue, handler, std::ptr::null_mut(), held);
+            std::ptr::null_mut()
+        }
+        _ => held,
     }
 }
 
@@ -332,6 +449,20 @@ pub unsafe extern "C" fn nw_path_monitor_create() -> Id {
     // SAFETY: freshly allocated.
     unsafe { (*body).monitor = Arc::into_raw(monitor) };
     body as Id
+}
+
+/// `nw_path_monitor_t nw_path_monitor_create_with_type(nw_interface_type_t)`,
+/// at +1: a monitor whose paths use only interfaces of this type.
+pub unsafe extern "C" fn nw_path_monitor_create_with_type(kind: i32) -> Id {
+    // SAFETY: the entry point above.
+    let object = unsafe { nw_path_monitor_create() };
+    if let Some(monitor) = monitor_of(object) {
+        lock(monitor).prohibited = match (0..32).contains(&kind) {
+            true => !(1 << kind),
+            false => u32::MAX,
+        };
+    }
+    object
 }
 
 /// `void nw_path_monitor_set_queue(nw_path_monitor_t, dispatch_queue_t)`
@@ -392,6 +523,7 @@ pub unsafe extern "C" fn nw_path_monitor_start(object: Id) {
             return;
         }
         state.phase = Phase::Started;
+        state.held = objc::arc::retain(object) as usize;
     }
     // SAFETY: `object` is a monitor, whose `Arc` the body holds a count of.
     let shared = unsafe {
@@ -405,24 +537,84 @@ pub unsafe extern "C" fn nw_path_monitor_start(object: Id) {
     if spawned.is_err() {
         // Without a thread there is no one to report, and a monitor that will
         // never report is better told apart as cancelled.
-        cancel(monitor);
+        let held = cancel(monitor);
+        objc::arc::release(held);
     }
 }
 
 /// `void nw_path_monitor_cancel(nw_path_monitor_t)`
 pub unsafe extern "C" fn nw_path_monitor_cancel(object: Id) {
-    if let Some(monitor) = monitor_of(object) {
-        cancel(monitor);
-    }
+    let held = monitor_of(object).map_or(std::ptr::null_mut(), cancel);
+    objc::arc::release(held);
 }
 
 /// `nw_path_status_t nw_path_get_status(nw_path_t)`
 pub unsafe extern "C" fn nw_path_get_status(path: Id) -> i32 {
-    if !is_instance(path, path_class()) {
-        return Status::Invalid as i32;
+    path_of(path).map_or(Status::Invalid, |p| p.status) as i32
+}
+
+/// `bool nw_path_is_equal(nw_path_t, nw_path_t)`
+pub unsafe extern "C" fn nw_path_is_equal(path: Id, other: Id) -> bool {
+    path_of(path).is_some_and(|p| path_of(other) == Some(p))
+}
+
+/// `bool nw_path_uses_interface_type(nw_path_t, nw_interface_type_t)`
+pub unsafe extern "C" fn nw_path_uses_interface_type(path: Id, kind: i32) -> bool {
+    path_of(path).is_some_and(|p| p.interfaces.iter().any(|i| i.kind as i32 == kind))
+}
+
+/// `bool nw_path_is_expensive(nw_path_t)`: Apple's means cellular, or a
+/// hotspot it knows to be one, and only the first is visible from a host.
+pub unsafe extern "C" fn nw_path_is_expensive(path: Id) -> bool {
+    path_of(path)
+        .and_then(|p| p.interfaces.first())
+        .is_some_and(|i| i.kind == InterfaceType::Cellular)
+}
+
+/// `bool nw_path_is_constrained(nw_path_t)`: Low Data Mode, which no host
+/// here has a setting for.
+pub unsafe extern "C" fn nw_path_is_constrained(_path: Id) -> bool {
+    false
+}
+
+/// `void nw_path_enumerate_interfaces(nw_path_t,
+/// nw_path_enumerate_interfaces_block_t)`: the block is `bool (^)(nw_interface_t)`
+/// and runs before this returns, once per interface until it answers false.
+pub unsafe extern "C" fn nw_path_enumerate_interfaces(path: Id, block: Id) {
+    let Some(path) = path_of(path) else {
+        return;
+    };
+    // SAFETY: nil or the caller's block.
+    let Some(invoke) = (unsafe { objc::block::invoke(block) }) else {
+        return;
+    };
+    // SAFETY: the enumerate block's prototype.
+    let f: unsafe extern "C" fn(Id, Id) -> bool = unsafe { std::mem::transmute(invoke) };
+    for interface in &path.interfaces {
+        let object = make_interface(interface.clone());
+        // SAFETY: the caller's block, handed an interface it may retain.
+        let more = unsafe { f(block, object) };
+        objc::arc::release(object);
+        if !more {
+            break;
+        }
     }
-    // SAFETY: an instance of the path class.
-    unsafe { (*(path as *const PathBody)).status as i32 }
+}
+
+/// `nw_interface_type_t nw_interface_get_type(nw_interface_t)`
+pub unsafe extern "C" fn nw_interface_get_type(interface: Id) -> i32 {
+    interface_of(interface).map_or(InterfaceType::Other, |i| i.interface.kind) as i32
+}
+
+/// `const char *nw_interface_get_name(nw_interface_t)`, alive as long as the
+/// interface is.
+pub unsafe extern "C" fn nw_interface_get_name(interface: Id) -> *const c_char {
+    interface_of(interface).map_or(std::ptr::null(), |i| i.name.as_ptr())
+}
+
+/// `uint32_t nw_interface_get_index(nw_interface_t)`
+pub unsafe extern "C" fn nw_interface_get_index(interface: Id) -> u32 {
+    interface_of(interface).map_or(0, |i| i.interface.index)
 }
 
 /// `void *nw_retain(void *obj)`
@@ -435,6 +627,20 @@ pub unsafe extern "C" fn nw_release(object: Id) {
     objc::arc::release(object);
 }
 
+unsafe extern "C" fn path_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: `-dealloc` of a `PathBody` whose `path` came from
+    // `Box::into_raw`, taken back once.
+    drop(unsafe { Box::from_raw((*(receiver as *mut PathBody)).path) });
+    objc::arc::finalize(receiver);
+}
+
+unsafe extern "C" fn interface_dealloc(receiver: Id, _sel: Sel) {
+    // SAFETY: `-dealloc` of an `InterfaceBody` whose `data` came from
+    // `Box::into_raw`, taken back once.
+    drop(unsafe { Box::from_raw((*(receiver as *mut InterfaceBody)).data) });
+    objc::arc::finalize(receiver);
+}
+
 unsafe extern "C" fn monitor_dealloc(receiver: Id, _sel: Sel) {
     let body = receiver as *mut MonitorBody;
     // SAFETY: `-dealloc` of a `MonitorBody` whose `monitor` came from
@@ -442,8 +648,8 @@ unsafe extern "C" fn monitor_dealloc(receiver: Id, _sel: Sel) {
     let monitor = unsafe { Arc::from_raw((*body).monitor) };
     let queue = {
         let mut state = lock(&monitor);
-        // The last reference is gone, so nothing can cancel it any more; a
-        // watcher still running stops here, and the handlers go with it.
+        // A started monitor holds itself until cancelled, so this is one that
+        // never started or has already run its cancel handler.
         state.phase = Phase::Cancelled;
         monitor.cancelled.notify_all();
         state.update = None;
@@ -464,7 +670,16 @@ exports::exports! {
         "nw_path_monitor_prohibit_interface_type" => nw_path_monitor_prohibit_interface_type,
         "nw_path_monitor_start" => nw_path_monitor_start,
         "nw_path_monitor_cancel" => nw_path_monitor_cancel,
+        "nw_path_monitor_create_with_type" => nw_path_monitor_create_with_type,
         "nw_path_get_status" => nw_path_get_status,
+        "nw_path_is_equal" => nw_path_is_equal,
+        "nw_path_uses_interface_type" => nw_path_uses_interface_type,
+        "nw_path_is_expensive" => nw_path_is_expensive,
+        "nw_path_is_constrained" => nw_path_is_constrained,
+        "nw_path_enumerate_interfaces" => nw_path_enumerate_interfaces,
+        "nw_interface_get_type" => nw_interface_get_type,
+        "nw_interface_get_name" => nw_interface_get_name,
+        "nw_interface_get_index" => nw_interface_get_index,
         "nw_retain" => nw_retain,
         "nw_release" => nw_release,
     }
@@ -540,7 +755,7 @@ mod tests {
             nw_path_monitor_set_cancel_handler(monitor, cancelled.as_ref() as *const _ as Id);
             nw_path_monitor_start(monitor);
             wait_for(|| UPDATES.load(Ordering::SeqCst) == 1);
-            assert_eq!(STATUS.load(Ordering::SeqCst), current_status(0) as i32);
+            assert_eq!(STATUS.load(Ordering::SeqCst), current_path(0).status as i32);
 
             nw_path_monitor_cancel(monitor);
             nw_path_monitor_cancel(monitor);
@@ -549,6 +764,44 @@ mod tests {
             assert_eq!(CANCELS.load(Ordering::SeqCst), 1);
             assert_eq!(UPDATES.load(Ordering::SeqCst), 1);
             nw_release(monitor);
+            darwin::dispatch::object::release(queue);
+        }
+    }
+
+    static HELD_UPDATES: AtomicUsize = AtomicUsize::new(0);
+    static HELD_CANCELS: AtomicUsize = AtomicUsize::new(0);
+    static HELD_MONITOR: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn on_held_update(_block: Id, _path: Id) {
+        if HELD_UPDATES.fetch_add(1, Ordering::SeqCst) == 0 {
+            // SAFETY: the monitor the test started, still alive because it
+            // is started.
+            unsafe { nw_path_monitor_cancel(HELD_MONITOR.load(Ordering::SeqCst) as Id) };
+        }
+    }
+
+    unsafe extern "C" fn on_held_cancel(_block: Id) {
+        HELD_CANCELS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The usual C pattern: start, then let go at once. The monitor keeps
+    /// reporting until it is cancelled, and its cancel handler still runs.
+    #[test]
+    fn a_started_monitor_outlives_its_creators_reference() {
+        let update = block(on_held_update as *const c_void);
+        let cancelled = block(on_held_cancel as *const c_void);
+        let queue = darwin::dispatch::queue::create_serial("nw held test");
+        // SAFETY: the entry points, called as a guest would.
+        unsafe {
+            let monitor = nw_path_monitor_create();
+            HELD_MONITOR.store(monitor as usize, Ordering::SeqCst);
+            nw_path_monitor_set_queue(monitor, queue);
+            nw_path_monitor_set_update_handler(monitor, update.as_ref() as *const _ as Id);
+            nw_path_monitor_set_cancel_handler(monitor, cancelled.as_ref() as *const _ as Id);
+            nw_path_monitor_start(monitor);
+            nw_release(monitor);
+            wait_for(|| HELD_CANCELS.load(Ordering::SeqCst) == 1);
+            assert_eq!(HELD_UPDATES.load(Ordering::SeqCst), 1);
             darwin::dispatch::object::release(queue);
         }
     }
@@ -566,15 +819,102 @@ mod tests {
         ]
         .iter()
         .fold(0, |mask, t| mask | 1 << *t as u32);
-        assert_eq!(current_status(every), Status::Unsatisfied);
-        assert_eq!(current_status(1 << InterfaceType::Loopback as u32), current_status(0));
+        let none = current_path(every);
+        assert_eq!(none.status, Status::Unsatisfied);
+        assert!(none.interfaces.is_empty());
+        assert_eq!(
+            current_path(1 << InterfaceType::Loopback as u32),
+            current_path(0)
+        );
+    }
+
+    static SEEN: AtomicUsize = AtomicUsize::new(0);
+    static FIRST_KIND: AtomicI32 = AtomicI32::new(-1);
+    static FIRST_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn on_interface(_block: Id, interface: Id) -> bool {
+        // SAFETY: the interface the path hands over.
+        unsafe {
+            FIRST_KIND.store(nw_interface_get_type(interface), Ordering::SeqCst);
+            FIRST_INDEX.store(nw_interface_get_index(interface) as usize, Ordering::SeqCst);
+            let name = std::ffi::CStr::from_ptr(nw_interface_get_name(interface));
+            assert_eq!(name.to_bytes(), b"wwan0");
+        }
+        SEEN.fetch_add(1, Ordering::SeqCst);
+        false
+    }
+
+    /// A path answers what it uses from its interface list, in order, and
+    /// enumeration stops when the block says so.
+    #[test]
+    fn a_path_answers_for_its_interfaces() {
+        let path = make_path(Path {
+            status: Status::Satisfied,
+            interfaces: vec![
+                Interface {
+                    name: "wwan0".into(),
+                    index: 7,
+                    kind: InterfaceType::Cellular,
+                },
+                Interface {
+                    name: "wlan0".into(),
+                    index: 3,
+                    kind: InterfaceType::Wifi,
+                },
+            ],
+        });
+        let each = block(on_interface as *const c_void);
+        // SAFETY: the entry points, called as a guest would.
+        unsafe {
+            assert!(nw_path_uses_interface_type(
+                path,
+                InterfaceType::Wifi as i32
+            ));
+            assert!(!nw_path_uses_interface_type(
+                path,
+                InterfaceType::Wired as i32
+            ));
+            assert!(nw_path_is_expensive(path));
+            assert!(!nw_path_is_constrained(path));
+            assert!(nw_path_is_equal(path, path));
+            nw_path_enumerate_interfaces(path, each.as_ref() as *const _ as Id);
+            assert_eq!(SEEN.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                FIRST_KIND.load(Ordering::SeqCst),
+                InterfaceType::Cellular as i32
+            );
+            assert_eq!(FIRST_INDEX.load(Ordering::SeqCst), 7);
+            nw_release(path);
+        }
+    }
+
+    /// A monitor made for one type reports paths through that type only.
+    #[test]
+    fn a_typed_monitor_prohibits_every_other_type() {
+        // SAFETY: the entry points, called as a guest would.
+        unsafe {
+            let monitor = nw_path_monitor_create_with_type(InterfaceType::Wifi as i32);
+            let prohibited = lock(monitor_of(monitor).unwrap()).prohibited;
+            assert_eq!(prohibited & 1 << InterfaceType::Wifi as u32, 0);
+            assert_ne!(prohibited & 1 << InterfaceType::Wired as u32, 0);
+            assert!(
+                current_path(prohibited)
+                    .interfaces
+                    .iter()
+                    .all(|i| i.kind == InterfaceType::Wifi)
+            );
+            nw_release(monitor);
+        }
     }
 
     #[test]
     fn something_that_is_not_a_path_has_no_status() {
         // SAFETY: nil and a non-path object are both refused.
         unsafe {
-            assert_eq!(nw_path_get_status(std::ptr::null_mut()), Status::Invalid as i32);
+            assert_eq!(
+                nw_path_get_status(std::ptr::null_mut()),
+                Status::Invalid as i32
+            );
             let monitor = nw_path_monitor_create();
             assert_eq!(nw_path_get_status(monitor), Status::Invalid as i32);
             nw_release(monitor);

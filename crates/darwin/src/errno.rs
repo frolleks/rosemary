@@ -6,9 +6,9 @@
 ///
 /// Darwin's `EPROCLIM`, `EBADRPC`, `ERPCMISMATCH`, `EPROGUNAVAIL`,
 /// `EPROGMISMATCH`, `EPROCUNAVAIL`, `EFTYPE`, `EAUTH`, `ENEEDAUTH`, `EPWROFF`,
-/// `EDEVERR`, `EBADEXEC`, `EBADARCH`, `ESHLIBVERS`, `EBADMACHO`, `ENOATTR`,
-/// `ENOPOLICY` and `EQFULL` are absent because this host has no counterpart to
-/// pair them with.
+/// `EDEVERR`, `EBADEXEC`, `EBADARCH`, `ESHLIBVERS`, `EBADMACHO`, `ENOPOLICY`
+/// and `EQFULL` are absent because this host has no counterpart to pair them
+/// with. So is `ENOATTR` on Linux, which a shim reports with [`set_guest`].
 #[cfg(not(target_os = "macos"))]
 const NUMBERS: &[(i32, i32)] = &[
     (1, libc::EPERM),
@@ -143,13 +143,28 @@ pub fn from_host(host: i32) -> i32 {
     host
 }
 
+/// Darwin numbers this host can stand for one way only: [`to_host`] gives the
+/// nearest host number, and [`from_host`] keeps answering that number's own
+/// Darwin name.
+#[cfg(target_os = "linux")]
+const TO_HOST_ONLY: &[(i32, i32)] = &[
+    // `ENOATTR`: Linux reports a missing attribute as `ENODATA`.
+    (93, libc::ENODATA),
+];
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+const TO_HOST_ONLY: &[(i32, i32)] = &[];
+
 /// A guest's `errno` as this host's.
 #[cfg(not(target_os = "macos"))]
 pub fn to_host(darwin: i32) -> i32 {
     if darwin == 0 {
         return 0;
     }
-    match NUMBERS.iter().find(|(theirs, _)| *theirs == darwin) {
+    match NUMBERS
+        .iter()
+        .chain(TO_HOST_ONLY)
+        .find(|(theirs, _)| *theirs == darwin)
+    {
         Some((_, ours)) => *ours,
         None => libc::EINVAL,
     }
@@ -180,6 +195,10 @@ mod guest_slot {
     thread_local! {
         /// What the guest sees, in Darwin's numbering.
         pub static VALUE: Cell<libc::c_int> = const { Cell::new(0) };
+        /// The host number [`super::set_guest`] left in the host's slot, and
+        /// the Darwin number it stands for there.
+        pub static PENDING: Cell<(libc::c_int, libc::c_int)> =
+            const { Cell::new((super::UNTOUCHED, 0)) };
     }
 }
 
@@ -207,7 +226,9 @@ const UNTOUCHED: libc::c_int = i32::MIN + 0x6572;
 /// before every read *and* every write. That is the whole hook available: the
 /// write itself cannot be seen. Each call therefore does two things.
 ///
-/// 1. If the host's slot holds anything but [`UNTOUCHED`], a host call wrote it
+/// 1. If the host's slot holds the number [`set_guest`] left pending there,
+///    the guest's slot keeps the Darwin number it was set to. Otherwise, if
+///    the host's slot holds anything but [`UNTOUCHED`], a host call wrote it
 ///    since the last call; the guest's slot is refreshed from it.
 /// 2. Otherwise the guest's slot is left alone, which is what makes `errno = 0`
 ///    stick across an intervening host call that succeeded quietly.
@@ -237,8 +258,11 @@ pub fn guest_location() -> *mut libc::c_int {
     #[cfg(not(target_os = "macos"))]
     {
         let host = get();
+        let (pending, darwin) = guest_slot::PENDING.with(|p| p.replace((UNTOUCHED, 0)));
         guest_slot::VALUE.with(|value| {
-            if host != UNTOUCHED {
+            if host == pending && pending != UNTOUCHED {
+                value.set(darwin);
+            } else if host != UNTOUCHED {
                 value.set(from_host(host));
             }
             set(UNTOUCHED);
@@ -251,15 +275,22 @@ pub fn guest_location() -> *mut libc::c_int {
 ///
 /// For an error a shim decides on that has no host number to [`set`], or whose
 /// host number means more than one Darwin error: Linux's `ENODATA` is Darwin's
-/// `ENODATA` from most calls but its `ENOATTR` from the attribute ones. The
-/// host's slot is left untouched, so the next [`guest_location`] keeps this.
+/// `ENODATA` from most calls but its `ENOATTR` from the attribute ones.
+///
+/// The host's slot gets the host's nearest number, as callers in this crate
+/// read it back with [`get`], and is remembered as pending: the next
+/// [`guest_location`] that still finds it there gives the guest `darwin`
+/// rather than renaming it. Only that one reconciliation is affected, so a
+/// repeated host error is still seen after it.
 pub fn set_guest(darwin: i32) {
     #[cfg(target_os = "macos")]
     set(darwin);
     #[cfg(not(target_os = "macos"))]
     {
+        let host = to_host(darwin);
         guest_slot::VALUE.with(|value| value.set(darwin));
-        set(UNTOUCHED);
+        guest_slot::PENDING.with(|p| p.set((host, darwin)));
+        set(host);
     }
 }
 
@@ -425,6 +456,18 @@ mod tests {
             35,
             "the second EAGAIN was taken for no change"
         );
+        set(0);
+    }
+
+    /// A number this host cannot name survives to the guest, and is not
+    /// renamed by the next reconciliation.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn a_darwin_only_number_reaches_the_guest() {
+        set(libc::ENOENT);
+        set_guest(93);
+        assert_eq!(guest_errno(), 93);
+        assert_eq!(guest_errno(), 93, "and stays after a second read");
         set(0);
     }
 

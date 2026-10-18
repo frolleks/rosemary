@@ -16,15 +16,25 @@ const REPLACE: i32 = 0x0004;
 #[cfg(target_os = "linux")]
 const ENOATTR: i32 = 93;
 
+/// Whether this host's `errno` means the attribute named is not on the file.
+///
+/// Linux has no `ENOATTR` and reports a missing attribute as `ENODATA`.
+pub(crate) fn is_absent(errno: i32) -> bool {
+    #[cfg(target_os = "linux")]
+    return errno == libc::ENODATA;
+    #[cfg(not(target_os = "linux"))]
+    return errno == libc::ENOATTR;
+}
+
 /// `rc` from one of the attribute calls, as the guest should see its failure.
 ///
-/// Linux has no `ENOATTR`: a missing attribute is `ENODATA`, which is a different
-/// error on Darwin (96, "no message available on STREAM"). From these calls it
-/// can only mean the attribute is absent, so it is reported as Darwin's number
-/// for that - the one a guest compares against.
+/// Linux's `ENODATA` is a different error on Darwin (96, "no message available
+/// on STREAM"). From these calls it can only mean the attribute is absent, so
+/// it is reported as Darwin's number for that - the one a guest compares
+/// against. The host slot keeps `ENODATA`, so [`is_absent`] still answers.
 #[cfg(target_os = "linux")]
 fn absent_as_enoattr<T: Copy + PartialOrd + From<i8>>(rc: T) -> T {
-    if rc < T::from(0) && crate::errno::get() == libc::ENODATA {
+    if rc < T::from(0) && is_absent(crate::errno::get()) {
         crate::errno::set_guest(ENOATTR);
     }
     rc
@@ -121,6 +131,22 @@ mod host {
                 true => libc::lremovexattr(path, name.as_ptr()),
             }
         }
+    }
+
+    /// [`set`] on an open descriptor, neither creating nor replacing only.
+    ///
+    /// # Safety
+    ///
+    /// `value` is `size` readable bytes.
+    pub unsafe fn set_fd(fd: libc::c_int, name: &CStr, value: *const c_void, size: usize) -> i32 {
+        // SAFETY: the caller's descriptor and buffer, with a name this module owns.
+        unsafe { libc::fsetxattr(fd, name.as_ptr(), value, size, 0) }
+    }
+
+    /// [`remove`] on an open descriptor.
+    pub fn remove_fd(fd: libc::c_int, name: &CStr) -> i32 {
+        // SAFETY: the caller's descriptor, with a name this module owns.
+        unsafe { libc::fremovexattr(fd, name.as_ptr()) }
     }
 
     /// Every attribute on `path` the guest could have written, in its own
@@ -301,6 +327,26 @@ mod host {
         }
     }
 
+    /// [`set`] on an open descriptor, neither creating nor replacing only.
+    ///
+    /// # Safety
+    ///
+    /// `value` is `size` readable bytes.
+    pub unsafe fn set_fd(fd: libc::c_int, name: &CStr, value: *const c_void, size: usize) -> i32 {
+        // SAFETY: the caller's descriptor and buffer, with a name this module owns.
+        let rc = unsafe { libc::extattr_set_fd(fd, NAMESPACE, name.as_ptr(), value, size) };
+        match rc < 0 {
+            true => -1,
+            false => 0,
+        }
+    }
+
+    /// [`remove`] on an open descriptor.
+    pub fn remove_fd(fd: libc::c_int, name: &CStr) -> i32 {
+        // SAFETY: the caller's descriptor, with a name this module owns.
+        unsafe { libc::extattr_delete_fd(fd, NAMESPACE, name.as_ptr()) }
+    }
+
     /// Every attribute on `path` the guest could have written. `None` leaves
     /// `errno` set.
     ///
@@ -360,6 +406,14 @@ mod host {
 
     pub unsafe fn remove(path: *const c_char, name: &CStr, nofollow: bool) -> i32 {
         unsafe { libc::removexattr(path, name.as_ptr(), if nofollow { NOFOLLOW } else { 0 }) }
+    }
+
+    pub unsafe fn set_fd(fd: libc::c_int, name: &CStr, value: *const c_void, size: usize) -> i32 {
+        unsafe { libc::fsetxattr(fd, name.as_ptr(), value, size, 0, 0) }
+    }
+
+    pub fn remove_fd(fd: libc::c_int, name: &CStr) -> i32 {
+        unsafe { libc::fremovexattr(fd, name.as_ptr(), 0) }
     }
 
     pub unsafe fn list(path: *const c_char, nofollow: bool) -> Option<Vec<Vec<u8>>> {
@@ -559,7 +613,7 @@ pub(crate) unsafe fn set_on_host(
         crate::errno::set(libc::EINVAL);
         return -1;
     };
-    match value {
+    let rc = match value {
         // SAFETY: the caller's path, and a buffer of the length given.
         #[cfg(target_os = "macos")]
         Some(value) => unsafe {
@@ -588,7 +642,27 @@ pub(crate) unsafe fn set_on_host(
         },
         // SAFETY: the caller's path.
         None => unsafe { host::remove(path.as_ptr(), &host, nofollow) },
-    }
+    };
+    absent_as_enoattr(rc)
+}
+
+/// [`set_on_host`] for the file open on `fd`: the descriptor itself, so the
+/// attribute lands on that file whatever it is now called.
+///
+/// # Safety
+///
+/// `name` is NUL-terminated.
+pub(crate) unsafe fn set_on_fd(fd: libc::c_int, name: &CStr, value: Option<&[u8]>) -> i32 {
+    let Some(host) = (unsafe { host_name(name.as_ptr()) }) else {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    };
+    let rc = match value {
+        // SAFETY: the caller's descriptor, and a buffer of the length given.
+        Some(value) => unsafe { host::set_fd(fd, &host, value.as_ptr().cast(), value.len()) },
+        None => host::remove_fd(fd, &host),
+    };
+    absent_as_enoattr(rc)
 }
 
 /// Whether `name`, as the guest spells it, is the runtime's own record of who

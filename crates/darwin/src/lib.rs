@@ -100,6 +100,7 @@ pub mod stdio;
 pub mod stdlib;
 pub mod strict;
 pub mod string;
+pub mod strtofp;
 pub mod sysctl;
 pub mod sysdir;
 pub mod sysinfo;
@@ -337,6 +338,7 @@ static SHARED_MODULES: &[exports::Module] = &[
     regex::MODULE,
     resolv::MODULE,
     string::MODULE,
+    strtofp::MODULE,
     stdlib::MODULE,
     stat::MODULE,
     fcntl::entry::MODULE,
