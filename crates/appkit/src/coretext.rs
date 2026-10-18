@@ -769,6 +769,15 @@ pub unsafe extern "C" fn CTFontCopyTraits(font: CFTypeRef) -> CFTypeRef {
     }
 }
 
+/// `bool CGFontRenderingGetFontSmoothingDisabled(void)`: whether the user
+/// turned off "Use font smoothing when available". They have not: that
+/// setting (`AppleFontSmoothing`) is on until changed, and there is no pane
+/// here to change it in.
+#[expect(non_snake_case, reason = "the C spelling is the interface")]
+pub extern "C" fn CGFontRenderingGetFontSmoothingDisabled() -> bool {
+    false
+}
+
 /// An unresolved descriptor is its attributes.
 pub unsafe extern "C" fn CTFontDescriptorCreateWithAttributes(attributes: CFTypeRef) -> CFTypeRef {
     if attributes.is_null() {

@@ -6,6 +6,22 @@ use objc::object::Id;
 use objc::sel::Sel;
 use static_init::dynamic;
 
+/// `bool CGPreflightScreenCaptureAccess(void)`: whether this process may
+/// record the screen. No: nothing here grants Screen Recording, and there is
+/// no capture to grant it to.
+#[expect(non_snake_case, reason = "the C spelling is the interface")]
+pub extern "C" fn CGPreflightScreenCaptureAccess() -> bool {
+    false
+}
+
+/// `bool CGRequestScreenCaptureAccess(void)`: the same answer, after the
+/// prompt Apple's shows the first time - which has no pane here to send the
+/// user to.
+#[expect(non_snake_case, reason = "the C spelling is the interface")]
+pub extern "C" fn CGRequestScreenCaptureAccess() -> bool {
+    false
+}
+
 /// `CGSessionCopyCurrentDictionary`.
 ///
 /// There is no WindowServer login session on this host. An empty dictionary is
