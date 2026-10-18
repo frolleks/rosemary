@@ -13,3 +13,13 @@ darwin.workspace = true
 prefix.workspace = true
 libc.workspace = true
 ureq.workspace = true
+
+[dev-dependencies]
+machish.workspace = true
+
+# XCTest runs a case on the main thread, and two of the ported cases depend on
+# it; this suite's own `main` runs each case there.
+[[test]]
+name = "runloop_conformance"
+harness = false
+>>>>>>> 587f5d6 (foundation: run a run loop, and time it)
