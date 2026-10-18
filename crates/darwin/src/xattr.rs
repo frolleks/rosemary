@@ -19,7 +19,7 @@ const ENOATTR: i32 = 93;
 /// Whether this host's `errno` means the attribute named is not on the file.
 ///
 /// Linux has no `ENOATTR` and reports a missing attribute as `ENODATA`.
-pub(crate) fn is_absent(errno: i32) -> bool {
+pub fn is_absent(errno: i32) -> bool {
     #[cfg(target_os = "linux")]
     return errno == libc::ENODATA;
     #[cfg(not(target_os = "linux"))]
@@ -450,7 +450,7 @@ mod host {
 ///
 /// `path` and `name` are NUL-terminated; `value` is `size` writable bytes, or
 /// `size` is zero.
-unsafe extern "C" fn getxattr(
+pub unsafe extern "C" fn getxattr(
     path: *const c_char,
     name: *const c_char,
     value: *mut c_void,
@@ -484,7 +484,7 @@ unsafe extern "C" fn getxattr(
 /// # Safety
 ///
 /// As [`getxattr`], with `value` readable rather than writable.
-unsafe extern "C" fn setxattr(
+pub unsafe extern "C" fn setxattr(
     path: *const c_char,
     name: *const c_char,
     value: *const c_void,
@@ -526,7 +526,11 @@ unsafe extern "C" fn setxattr(
 /// # Safety
 ///
 /// `path` and `name` are NUL-terminated.
-unsafe extern "C" fn removexattr(path: *const c_char, name: *const c_char, options: i32) -> i32 {
+pub unsafe extern "C" fn removexattr(
+    path: *const c_char,
+    name: *const c_char,
+    options: i32,
+) -> i32 {
     let Some(host) = (unsafe { host_name(name) }) else {
         crate::errno::set(libc::EINVAL);
         return -1;
