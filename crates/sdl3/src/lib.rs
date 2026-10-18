@@ -2121,7 +2121,7 @@ pub mod video {
     /// for a display connection.
     pub fn init_video() -> bool {
         let mut up = VIDEO_UP.lock().unwrap_or_else(|e| e.into_inner());
-        if !*up {
+        if !*up && !DENIED.load(std::sync::atomic::Ordering::Acquire) {
             *up = super::init(super::init::VIDEO).is_ok();
             if *up {
                 // This thread now owns the event queue: see [`super::pump`].
@@ -2132,6 +2132,23 @@ pub mod video {
     }
 
     static VIDEO_UP: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+    /// Set while this process refuses display connections: see
+    /// [`deny_connections`].
+    static DENIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// Refuse every later connection to the display, as a sandboxed process
+    /// asks the window server to, or allow them again. Refusing fails while a
+    /// connection is open, as the window server's does: the process would
+    /// keep the one it has.
+    pub fn deny_connections(deny: bool) -> bool {
+        let up = VIDEO_UP.lock().unwrap_or_else(|e| e.into_inner());
+        if deny && *up {
+            return false;
+        }
+        DENIED.store(deny, std::sync::atomic::Ordering::Release);
+        true
+    }
 
     /// Whether the video subsystem is running.
     pub fn video_up() -> bool {
