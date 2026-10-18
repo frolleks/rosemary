@@ -83,6 +83,7 @@ fn query(file: &File) -> Result<Vec<Region>, Errno> {
             execute: q.vma_flags & VMA_EXECUTABLE != 0,
             shared: q.vma_flags & VMA_SHARED != 0,
             offset: q.vma_offset,
+            file: (q.inode != 0).then(|| (libc::makedev(q.dev_major, q.dev_minor), q.inode)),
         });
         addr = q.vma_end;
     }
@@ -94,6 +95,13 @@ fn parse_line(line: &str) -> Option<Region> {
     let (low, high) = fields.next()?.split_once('-')?;
     let perms = fields.next()?.as_bytes();
     let offset = u64::from_str_radix(fields.next()?, 16).ok()?;
+    let file = fields.next().zip(fields.next()).and_then(|(device, inode)| {
+        let (major, minor) = device.split_once(':')?;
+        let inode = inode.parse::<u64>().ok().filter(|&inode| inode != 0)?;
+        let major = u32::from_str_radix(major, 16).ok()?;
+        let minor = u32::from_str_radix(minor, 16).ok()?;
+        Some((libc::makedev(major, minor), inode))
+    });
     Some(Region {
         start: u64::from_str_radix(low, 16).ok()?,
         end: u64::from_str_radix(high, 16).ok()?,
@@ -102,6 +110,7 @@ fn parse_line(line: &str) -> Option<Region> {
         execute: perms.get(2) == Some(&b'x'),
         shared: perms.get(3) == Some(&b's'),
         offset,
+        file,
     })
 }
 
@@ -117,6 +126,9 @@ mod tests {
             (0x7f00, 0x7f80, 0x1000)
         );
         assert!(region.read && !region.write && region.execute && region.shared);
+        assert_eq!(region.file, Some((libc::makedev(8, 1), 1234)));
+        let anonymous = parse_line("7f00-7f80 rw-p 00000000 00:00 0").unwrap();
+        assert_eq!(anonymous.file, None);
     }
 
     #[test]
