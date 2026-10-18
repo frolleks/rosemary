@@ -291,6 +291,121 @@ pub fn subject_summary(certificate: &Certificate<'_>) -> Option<String> {
     summary
 }
 
+/// The contents of a certificate's `issuer` and `subject` Names: the bytes
+/// inside each `SEQUENCE`, which is what `SecCertificate.c` keeps.
+pub fn names(der: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut input = der;
+    let mut outer = expect(&mut input, SEQUENCE)?;
+    let mut tbs = expect(&mut outer, SEQUENCE)?;
+    let mut field = next(&mut tbs)?;
+    if field.tag == 0xa0 {
+        field = next(&mut tbs)?;
+    }
+    if field.tag != 0x02 {
+        return None;
+    }
+    expect(&mut tbs, SEQUENCE)?; // signature
+    let issuer = expect(&mut tbs, SEQUENCE)?;
+    expect(&mut tbs, SEQUENCE)?; // validity
+    let subject = expect(&mut tbs, SEQUENCE)?;
+    Some((issuer, subject))
+}
+
+/// `PrintableString`.
+const PRINTABLE_STRING: u8 = 0x13;
+
+/// DER's definite length for `length`, in the fewest bytes, as
+/// `DEREncodeLength` writes it.
+fn encode_length(length: usize, out: &mut Vec<u8>) {
+    if length < 0x80 {
+        out.push(length as u8);
+        return;
+    }
+    let bytes = length.to_be_bytes();
+    let first = bytes.iter().position(|&b| b != 0).unwrap_or(bytes.len() - 1);
+    out.push(0x80 | (bytes.len() - first) as u8);
+    out.extend_from_slice(&bytes[first..]);
+}
+
+/// One TLV, encoded.
+fn encode(tag: u8, value: &[u8], out: &mut Vec<u8>) {
+    out.push(tag);
+    encode_length(value.len(), out);
+    out.extend_from_slice(value);
+}
+
+/// `content` wrapped in a `SEQUENCE`: `SecDERItemCopySequence`.
+pub fn sequence(content: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(content.len() + 6);
+    encode(SEQUENCE, content, &mut out);
+    out
+}
+
+/// `createNormalizedX501Name` (Security, `SecCertificate.c`): the content of a
+/// Name with every `PrintableString` value upper-cased and its blanks - spaces
+/// and tabs, `isblank`'s set - collapsed to single spaces and trimmed, as RFC
+/// 5280's comparison rules (c) and (d) have it. Everything else is kept byte
+/// for byte, and the lengths around a shortened value are re-encoded.
+///
+/// `None` for what Apple's refuses: anything but sets of type-and-value
+/// sequences, an empty RDN, or an attribute with an empty type.
+pub fn normalized_name(content: &[u8]) -> Option<Vec<u8>> {
+    let mut rdns = content;
+    let mut out = Vec::with_capacity(content.len());
+    while !rdns.is_empty() {
+        let mut set = expect(&mut rdns, SET)?;
+        if set.is_empty() {
+            return None;
+        }
+        let mut normalized_set = Vec::with_capacity(set.len());
+        while !set.is_empty() {
+            let mut pair = expect(&mut set, SEQUENCE)?;
+            let whole = pair;
+            let kind = next(&mut pair)?;
+            if kind.value.is_empty() {
+                return None;
+            }
+            let value = next(&mut pair)?;
+            let mut normalized_pair = Vec::with_capacity(whole.len());
+            if value.tag == PRINTABLE_STRING {
+                encode(kind.tag, kind.value, &mut normalized_pair);
+                encode(value.tag, &normalize_printable(value.value), &mut normalized_pair);
+                // Anything after the value is copied as it was.
+                normalized_pair.extend_from_slice(pair);
+            } else {
+                normalized_pair.extend_from_slice(whole);
+            }
+            encode(SEQUENCE, &normalized_pair, &mut normalized_set);
+        }
+        encode(SET, &normalized_set, &mut out);
+    }
+    Some(out)
+}
+
+/// A `PrintableString`'s bytes, upper-cased, with each run of blanks one space
+/// and none at either end.
+fn normalize_printable(value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(value.len());
+    let mut last_was_blank = false;
+    for &ch in value {
+        if ch == b' ' || ch == b'\t' {
+            if !last_was_blank {
+                if !out.is_empty() {
+                    out.push(b' ');
+                }
+                last_was_blank = true;
+            }
+        } else {
+            last_was_blank = false;
+            out.push(ch.to_ascii_uppercase());
+        }
+    }
+    if last_was_blank && out.last() == Some(&b' ') {
+        out.pop();
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +443,57 @@ mod tests {
         assert_eq!(days_from_civil(1970, 1, 1), 0);
         assert_eq!(days_from_civil(2000, 3, 1), 11_017);
         assert_eq!(days_from_civil(2020, 9, 1) * 86_400, 1_598_918_400);
+    }
+
+    /// `createNormalizedX501Name`'s rules: a `PrintableString` is upper-cased
+    /// with its blanks collapsed and trimmed, and the lengths around it shrink
+    /// to match; a `UTF8String` is left exactly as it was.
+    #[test]
+    fn a_printable_name_is_normalized_and_other_strings_are_not() {
+        let mut name = Vec::new();
+        // SET { SEQUENCE { OID 2.5.4.3, PrintableString "  Example \t  Root " } }
+        let mut pair = Vec::new();
+        encode(OID, oid::COMMON_NAME, &mut pair);
+        encode(PRINTABLE_STRING, b"  Example \t  Root ", &mut pair);
+        let mut set = Vec::new();
+        encode(SEQUENCE, &pair, &mut set);
+        encode(SET, &set, &mut name);
+        // SET { SEQUENCE { OID 2.5.4.10, UTF8String "mixed Case" } }
+        let mut pair = Vec::new();
+        encode(OID, oid::ORGANIZATION, &mut pair);
+        encode(0x0c, b"mixed  Case", &mut pair);
+        let mut set = Vec::new();
+        encode(SEQUENCE, &pair, &mut set);
+        encode(SET, &set, &mut name);
+
+        let mut expected = Vec::new();
+        let mut pair = Vec::new();
+        encode(OID, oid::COMMON_NAME, &mut pair);
+        encode(PRINTABLE_STRING, b"EXAMPLE ROOT", &mut pair);
+        let mut set = Vec::new();
+        encode(SEQUENCE, &pair, &mut set);
+        encode(SET, &set, &mut expected);
+        let mut pair = Vec::new();
+        encode(OID, oid::ORGANIZATION, &mut pair);
+        encode(0x0c, b"mixed  Case", &mut pair);
+        let mut set = Vec::new();
+        encode(SEQUENCE, &pair, &mut set);
+        encode(SET, &set, &mut expected);
+
+        assert_eq!(normalized_name(&name), Some(expected));
+    }
+
+    #[test]
+    fn an_empty_rdn_is_refused() {
+        assert_eq!(normalized_name(&[SET, 0]), None);
+    }
+
+    #[test]
+    fn long_lengths_are_encoded_in_the_fewest_bytes() {
+        let mut out = Vec::new();
+        encode_length(0x7f, &mut out);
+        encode_length(0x80, &mut out);
+        encode_length(0x1234, &mut out);
+        assert_eq!(out, [0x7f, 0x81, 0x80, 0x82, 0x12, 0x34]);
     }
 }
