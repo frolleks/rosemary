@@ -215,7 +215,7 @@ unsafe extern "C" fn resize_with_old_superview_size(receiver: Id, _sel: Sel, old
 /// Nothing flexible means nothing moves: `NSViewNotSizable` is a real answer
 /// and a view that asked for it keeps its frame.
 #[allow(clippy::too_many_arguments)]
-fn distribute(
+pub(crate) fn distribute(
     leading: bool,
     sizable: bool,
     trailing: bool,
@@ -332,6 +332,11 @@ unsafe extern "C" fn set_layer(receiver: Id, _sel: Sel, layer: Id) {
         crate::layer::set_view(previous, std::ptr::null_mut());
         crate::layer::set_view(layer, receiver);
     }
+    // A view's layer is the size of its bounds, a program's layer included.
+    if !layer.is_null() {
+        crate::layer::set_bounds_of(layer, bounds_of(receiver));
+    }
+    let view = view_of(receiver);
     if view.layer_backing & CLIPS_TO_BOUNDS != 0 && !layer.is_null() {
         crate::layer::set_masks_to_bounds_of(layer, true);
     }
