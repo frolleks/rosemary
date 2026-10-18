@@ -390,6 +390,14 @@ fn send_object(receiver: Id, name: &str, object: Id) {
     }
 }
 
+fn send_void(receiver: Id, name: &str) {
+    // SAFETY: a `void (id, SEL)` method on a live view.
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(objc::msg::entry());
+        f(receiver, objc::sel::get(name));
+    }
+}
+
 /// The view's `-layerContentsPlacement`, sent so an override answers.
 fn contents_placement(view: Id) -> isize {
     // SAFETY: `-layerContentsPlacement` is `NSInteger (id, SEL)`.
@@ -1482,6 +1490,13 @@ unsafe extern "C" fn add_subview(receiver: Id, sel: Sel, subview: Id) {
         // SAFETY: `-removeFromSuperview` is `void (id, SEL)`.
         unsafe { remove_from_superview(subview, objc::sel::get("removeFromSuperview")) };
     }
+    // SAFETY: both are views this crate made.
+    let (old_window, new_window) = unsafe { (window_of(subview), window_of(receiver)) };
+    let moves = old_window != new_window;
+    if moves {
+        will_move_to_window(subview, new_window);
+    }
+    send_object(subview, "viewWillMoveToSuperview:", receiver);
     view_of(subview).superview = receiver;
     // A window's content view that becomes a subview is in its new parent's
     // window, and a link left here would win over the superview chain.
@@ -1493,11 +1508,100 @@ unsafe extern "C" fn add_subview(receiver: Id, sel: Sel, subview: Id) {
             .values
             .push(array.policy.retain(subview as *const c_void));
     }
-    objc::arc::release(subview);
     // SAFETY: a view this crate made, now in a window.
     unsafe { update_tracking_areas(subview) };
     crate::backing::needs_display_in_tree(subview, 0);
     crate::layout::solve();
+    if moves {
+        did_move_to_window(subview);
+    }
+    send_void(subview, "viewDidMoveToSuperview");
+    send_object(receiver, "didAddSubview:", subview);
+    objc::arc::release(subview);
+}
+
+/// Every view in the tree under `view`, `view` first, as it is now: the hooks
+/// sent over it are a guest's to override, and one may change the tree.
+fn tree_of(view: Id) -> Vec<Id> {
+    let mut views = Vec::new();
+    let mut pending = vec![(view, 0usize)];
+    while let Some((current, depth)) = pending.pop() {
+        if !is_view(current) || depth > 64 {
+            continue;
+        }
+        views.push(current);
+        let list = view_of(current).subviews;
+        // SAFETY: an array this module made, or null.
+        if let Some(array) = unsafe { corefoundation::collections::array(list as *const c_void) } {
+            pending.extend(array.values.iter().rev().map(|v| (*v as Id, depth + 1)));
+        }
+    }
+    views
+}
+
+/// `-viewWillMoveToWindow:`, sent to `view` and every view under it.
+pub(crate) fn will_move_to_window(view: Id, window: Id) {
+    for each in tree_of(view) {
+        send_object(each, "viewWillMoveToWindow:", window);
+    }
+}
+
+/// `-viewDidMoveToWindow`, sent to `view` and every view under it.
+pub(crate) fn did_move_to_window(view: Id) {
+    for each in tree_of(view) {
+        send_void(each, "viewDidMoveToWindow");
+    }
+}
+
+/// The base of the hooks AppKit sends as a view moves; a subclass overrides
+/// what it cares about.
+unsafe extern "C" fn ignore_view(_receiver: Id, _sel: Sel, _view: Id) {}
+
+unsafe extern "C" fn ignore(_receiver: Id, _sel: Sel) {}
+
+/// `NSComparisonResult (*)(NSView *, NSView *, void *)`.
+type SubviewComparator = unsafe extern "C" fn(Id, Id, *mut c_void) -> isize;
+
+/// `-sortSubviewsUsingFunction:context:`: the subviews reordered by `compare`,
+/// stably. An insertion sort, which a comparator that is not a total order
+/// cannot make fail, over a list that is short.
+unsafe extern "C" fn sort_subviews_using_function(
+    receiver: Id,
+    _sel: Sel,
+    compare: Option<SubviewComparator>,
+    context: *mut c_void,
+) {
+    let Some(compare) = compare else {
+        return;
+    };
+    let list = view_of(receiver).subviews;
+    // SAFETY: an array this module made, or null.
+    let Some(array) = (unsafe { corefoundation::collections::array(list as *const c_void) }) else {
+        return;
+    };
+    let mut values = array.values.clone();
+    for i in 1..values.len() {
+        let mut j = i;
+        // SAFETY: the guest's comparator, given two of the receiver's subviews.
+        while j > 0 && unsafe { compare(values[j - 1] as Id, values[j] as Id, context) } > 0 {
+            values.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+    // The comparator may have changed the list; only a reordering of what is
+    // there now is applied.
+    // SAFETY: as above.
+    let Some(array) = (unsafe { corefoundation::collections::array(list as *const c_void) }) else {
+        return;
+    };
+    let mut now = array.values.clone();
+    now.sort();
+    let mut sorted = values.clone();
+    sorted.sort();
+    if now == sorted {
+        array.values = values;
+        crate::backing::needs_display_in_tree(receiver, 0);
+    }
 }
 
 /// `NSWindowOrderingMode`'s `NSWindowBelow`; `NSWindowAbove` is everything else.
@@ -1572,26 +1676,42 @@ pub(crate) fn convert_rect(rect: NSRect, from: Id, to: Id) -> NSRect {
 }
 
 unsafe extern "C" fn remove_from_superview(receiver: Id, _sel: Sel) {
-    let view = view_of(receiver);
-    let parent = view.superview;
-    view.superview = std::ptr::null_mut();
+    let parent = view_of(receiver).superview;
     if !is_view(parent) {
+        view_of(receiver).superview = std::ptr::null_mut();
         return;
     }
-    let list = view_of(parent).subviews;
-    if list.is_null() {
-        return;
+    // Held across the hooks, as the parent's list may own the only reference.
+    objc::arc::retain(receiver);
+    send_object(parent, "willRemoveSubview:", receiver);
+    // SAFETY: a view this crate made.
+    let in_window = unsafe { !window_of(receiver).is_null() };
+    if in_window {
+        will_move_to_window(receiver, std::ptr::null_mut());
     }
-    // SAFETY: an array this module made.
+    send_object(receiver, "viewWillMoveToSuperview:", std::ptr::null_mut());
+    // A hook may itself have moved the view.
+    let parent = std::mem::replace(&mut view_of(receiver).superview, std::ptr::null_mut());
+    let list = match is_view(parent) {
+        true => view_of(parent).subviews,
+        false => std::ptr::null_mut(),
+    };
+    // SAFETY: an array this module made, or null.
     if let Some(array) = unsafe { corefoundation::collections::array(list as *const c_void) } {
         let before = array.values.len();
         array.values.retain(|v| *v != receiver as *const c_void);
         // The list retained the view once per `-addSubview:`, which now moves
-        // out of a single entry at most; last, as it may free the receiver.
+        // out of a single entry at most.
         for _ in array.values.len()..before {
             array.policy.release(receiver as *const c_void);
         }
     }
+    if in_window {
+        did_move_to_window(receiver);
+    }
+    send_void(receiver, "viewDidMoveToSuperview");
+    // Last, as it may free the receiver.
+    objc::arc::release(receiver);
 }
 
 /// `-dealloc`. Subviews are told their superview is gone before the list that
@@ -1920,6 +2040,13 @@ pub(crate) fn install() {
             c"v20@0:8c16";
         "translatesAutoresizingMaskIntoConstraints" => translates_autoresizing_mask, c"c16@0:8";
         "removeFromSuperview" => remove_from_superview, c"v16@0:8";
+        "sortSubviewsUsingFunction:context:" => sort_subviews_using_function, c"v32@0:8^?16^v24";
+        "viewWillMoveToWindow:" => ignore_view, c"v24@0:8@16";
+        "viewDidMoveToWindow" => ignore, c"v16@0:8";
+        "viewWillMoveToSuperview:" => ignore_view, c"v24@0:8@16";
+        "viewDidMoveToSuperview" => ignore, c"v16@0:8";
+        "didAddSubview:" => ignore_view, c"v24@0:8@16";
+        "willRemoveSubview:" => ignore_view, c"v24@0:8@16";
         "dealloc" => dealloc, c"v16@0:8";
         "setWantsBestResolutionOpenGLSurface:" => set_wants_best_resolution, c"v20@0:8c16";
         "wantsBestResolutionOpenGLSurface" => wants_best_resolution, c"c16@0:8";
@@ -2357,6 +2484,154 @@ mod tests {
         assert!(OVERRIDE_RAN.load(std::sync::atomic::Ordering::Relaxed));
         // The override did not call through, so nothing moved the frame.
         assert_eq!(view_of(subview).frame, rect(0.0, 0.0, 100.0, 100.0));
+    }
+
+    thread_local! {
+        static MOVES: std::cell::RefCell<Vec<(&'static str, Id, Id)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn record(name: &'static str, receiver: Id, argument: Id) {
+        MOVES.with(|moves| moves.borrow_mut().push((name, receiver, argument)));
+    }
+
+    fn take_moves() -> Vec<(&'static str, Id, Id)> {
+        MOVES.with(|moves| std::mem::take(&mut *moves.borrow_mut()))
+    }
+
+    unsafe extern "C" fn will_window(receiver: Id, _: Sel, window: Id) {
+        record("viewWillMoveToWindow:", receiver, window);
+    }
+    unsafe extern "C" fn did_window(receiver: Id, _: Sel) {
+        record("viewDidMoveToWindow", receiver, std::ptr::null_mut());
+    }
+    unsafe extern "C" fn will_superview(receiver: Id, _: Sel, superview: Id) {
+        record("viewWillMoveToSuperview:", receiver, superview);
+    }
+    unsafe extern "C" fn did_superview(receiver: Id, _: Sel) {
+        record("viewDidMoveToSuperview", receiver, std::ptr::null_mut());
+    }
+    unsafe extern "C" fn did_add(receiver: Id, _: Sel, subview: Id) {
+        record("didAddSubview:", receiver, subview);
+    }
+    unsafe extern "C" fn will_remove(receiver: Id, _: Sel, subview: Id) {
+        record("willRemoveSubview:", receiver, subview);
+    }
+
+    fn recording_view() -> Id {
+        static REGISTERING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        crate::bootstrap();
+        let class = {
+            let _guard = REGISTERING.lock().unwrap();
+            objc::class::lookup(c"RosemaryTestMoveView").unwrap_or_else(|| {
+                let class = corefoundation::base::register(
+                    c"RosemaryTestMoveView",
+                    objc::class::lookup(c"NSView"),
+                    INSTANCE_SIZE,
+                    false,
+                );
+                methods!(class, {
+                    "viewWillMoveToWindow:" => will_window, c"v24@0:8@16";
+                    "viewDidMoveToWindow" => did_window, c"v16@0:8";
+                    "viewWillMoveToSuperview:" => will_superview, c"v24@0:8@16";
+                    "viewDidMoveToSuperview" => did_superview, c"v16@0:8";
+                    "didAddSubview:" => did_add, c"v24@0:8@16";
+                    "willRemoveSubview:" => will_remove, c"v24@0:8@16";
+                });
+                class
+            })
+        };
+        let object = objc::object::create_instance(class, 0);
+        // SAFETY: `-initWithFrame:` is `id (id, SEL, NSRect)`.
+        unsafe { init_with_frame(object, objc::sel::get("initWithFrame:"), NSRect::default()) }
+    }
+
+    /// AppKit's order: the will-hooks, the move, the did-hooks, and the
+    /// window ones over the whole moved tree but only when the window changes.
+    #[test]
+    fn moving_a_view_sends_the_hooks_in_order() {
+        let parent = recording_view();
+        let child = recording_view();
+        let grandchild = recording_view();
+        let nil = std::ptr::null_mut();
+        // SAFETY: `-addSubview:` is `void (id, SEL, id)`.
+        unsafe { add_subview(child, objc::sel::get("addSubview:"), grandchild) };
+        // No window either side: only the superview hooks.
+        assert_eq!(
+            take_moves(),
+            [
+                ("viewWillMoveToSuperview:", grandchild, child),
+                ("viewDidMoveToSuperview", grandchild, nil),
+                ("didAddSubview:", child, grandchild),
+            ]
+        );
+        let window =
+            objc::object::create_instance(objc::class::lookup(c"NSWindow").expect("NSWindow"), 0);
+        // SAFETY: both are objects this runtime allocated.
+        unsafe { set_window(parent, window) };
+
+        // SAFETY: as above.
+        unsafe { add_subview(parent, objc::sel::get("addSubview:"), child) };
+        assert_eq!(
+            take_moves(),
+            [
+                ("viewWillMoveToWindow:", child, window),
+                ("viewWillMoveToWindow:", grandchild, window),
+                ("viewWillMoveToSuperview:", child, parent),
+                ("viewDidMoveToWindow", child, nil),
+                ("viewDidMoveToWindow", grandchild, nil),
+                ("viewDidMoveToSuperview", child, nil),
+                ("didAddSubview:", parent, child),
+            ]
+        );
+
+        objc::arc::retain(child);
+        // SAFETY: `-removeFromSuperview` is `void (id, SEL)`.
+        unsafe { remove_from_superview(child, objc::sel::get("removeFromSuperview")) };
+        assert_eq!(
+            take_moves(),
+            [
+                ("willRemoveSubview:", parent, child),
+                ("viewWillMoveToWindow:", child, nil),
+                ("viewWillMoveToWindow:", grandchild, nil),
+                ("viewWillMoveToSuperview:", child, nil),
+                ("viewDidMoveToWindow", child, nil),
+                ("viewDidMoveToWindow", grandchild, nil),
+                ("viewDidMoveToSuperview", child, nil),
+            ]
+        );
+        // SAFETY: as above.
+        assert!(unsafe { window_of(grandchild) }.is_null());
+        objc::arc::release(child);
+    }
+
+    unsafe extern "C" fn by_rank(a: Id, b: Id, context: *mut c_void) -> isize {
+        // SAFETY: the test passes its order as the context.
+        let order = unsafe { &*(context as *const Vec<Id>) };
+        let rank = |v| order.iter().position(|x| *x == v).unwrap_or(usize::MAX);
+        rank(a).cmp(&rank(b)) as isize
+    }
+
+    #[test]
+    fn subviews_sort_by_a_function_with_its_context() {
+        let parent = view(NSRect::default());
+        let views: Vec<Id> = (0..4).map(|_| view(NSRect::default())).collect();
+        for each in &views {
+            // SAFETY: `-addSubview:` is `void (id, SEL, id)`.
+            unsafe { add_subview(parent, objc::sel::get("addSubview:"), *each) };
+        }
+        let order = vec![views[2], views[0], views[3], views[1]];
+        // SAFETY: a comparator of the declared type and the context it reads.
+        unsafe {
+            sort_subviews_using_function(
+                parent,
+                objc::sel::get("sortSubviewsUsingFunction:context:"),
+                Some(by_rank),
+                (&raw const order).cast_mut().cast(),
+            )
+        };
+        assert_eq!(children(parent), order);
+        objc::arc::release(parent);
     }
 
     /// A view with no window scales by one, whatever it was asked - which is
