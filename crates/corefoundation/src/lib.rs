@@ -200,6 +200,7 @@ exports::exports! {
         "CFRunLoopStop" => api::CFRunLoopStop,
         "CFRunLoopWakeUp" => api::CFRunLoopWakeUp,
         "CFRunLoopSourceCreate" => api::CFRunLoopSourceCreate,
+        "CFRunLoopPerformBlock" => api::CFRunLoopPerformBlock,
         "CFRunLoopSourceSignal" => api::CFRunLoopSourceSignal,
         "CFRunLoopSourceInvalidate" => api::CFRunLoopSourceInvalidate,
         "CFRunLoopSourceIsValid" => api::CFRunLoopSourceIsValid,
@@ -243,6 +244,8 @@ exports::exports! {
         "CFRunLoopTimerInvalidate" => api::CFRunLoopTimerInvalidate,
         "CFRunLoopTimerIsValid" => api::CFRunLoopTimerIsValid,
         "CFRunLoopGetNextTimerFireDate" => api::CFRunLoopGetNextTimerFireDate,
+        "CFRunLoopTimerGetNextFireDate" => api::CFRunLoopTimerGetNextFireDate,
+        "CFRunLoopCopyCurrentMode" => api::CFRunLoopCopyCurrentMode,
     }
     groups {
         calendar,

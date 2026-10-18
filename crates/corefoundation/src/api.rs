@@ -2663,6 +2663,36 @@ pub unsafe extern "C" fn CFRunLoopWakeUp(loop_: CFTypeRef) {
     }
 }
 
+/// `void CFRunLoopPerformBlock(CFRunLoopRef, CFTypeRef mode, void (^)(void))`:
+/// queue a copy of `block` to run when the loop next passes through `mode` -
+/// a mode name, the common-modes alias, or an array or set of names. Anything
+/// else as the mode, or no block, queues nothing, as CF's does. The loop is
+/// not woken.
+///
+/// # Safety
+///
+/// `loop_` and `mode` are null or live objects; `block` is null or a block.
+pub unsafe extern "C" fn CFRunLoopPerformBlock(loop_: CFTypeRef, mode: CFTypeRef, block: u64) {
+    let Some(l) = (unsafe { borrow::<RunLoop>(loop_) }) else {
+        return;
+    };
+    let modes = if mode.is_null() {
+        None
+    } else if let Some(name) = unsafe { string::as_string(mode) } {
+        Some(vec![String::from_utf8_lossy(&name.utf8()).into_owned()])
+    } else if let Some(contents) = unsafe { crate::collections::array(mode) } {
+        Some(contents.values.iter().map(|&m| unsafe { mode_name(m) }).collect())
+    } else if let Some(contents) = unsafe { crate::collections::set(mode) } {
+        Some(contents.values.iter().map(|&m| unsafe { mode_name(m) }).collect())
+    } else {
+        None
+    };
+    let (Some(modes), Some(block)) = (modes, darwin::dispatch::block::copy(block)) else {
+        return;
+    };
+    l.perform_block(runloop::BlockItem { modes, block });
+}
+
 pub unsafe extern "C" fn CFRunLoopSourceCreate(
     _allocator: CFAllocatorRef,
     _order: CFIndex,
@@ -2880,12 +2910,9 @@ pub unsafe extern "C" fn CFRunLoopTimerCreate(
     let info = unsafe { context.as_ref() }.map_or(0, |c| c.info as usize);
     // An interval of zero or less is a one-shot, which is what Apple's does.
     let repeat = (interval > 0.0).then(|| Duration::from_secs_f64(interval.min(1e9)));
-    leak(runloop::new_timer(
-        delay_until(fire_date),
-        repeat,
-        callback,
-        info,
-    ))
+    let timer = runloop::new_timer(delay_until(fire_date), repeat, callback, info);
+    timer.set_next_date(timer.next_fire(), fire_date);
+    leak(timer)
 }
 
 pub unsafe extern "C" fn CFRunLoopAddTimer(loop_: CFTypeRef, timer: CFTypeRef, mode: CFTypeRef) {
@@ -2955,8 +2982,47 @@ pub unsafe extern "C" fn CFRunLoopTimerSetNextFireDate(timer: CFTypeRef, fire_da
     if let Some(t) = unsafe { borrow::<Timer>(timer) } {
         // `delay_until` is a delay from now, which is the form the creator takes;
         // the timer wants the instant it lands on.
-        t.set_next(std::time::Instant::now() + delay_until(fire_date));
+        t.set_next_date(instant_of(fire_date), fire_date);
     }
+}
+
+/// The monotonic instant an absolute time falls on, past or future.
+fn instant_of(date: f64) -> std::time::Instant {
+    let (now, ahead) = (std::time::Instant::now(), date - absolute_time());
+    let span = Duration::from_secs_f64(ahead.abs().min(1e9));
+    match ahead >= 0.0 {
+        true => now.checked_add(span),
+        false => now.checked_sub(span),
+    }
+    .unwrap_or(now)
+}
+
+/// The absolute time a monotonic instant falls on.
+fn date_of_instant(when: std::time::Instant) -> f64 {
+    let now = std::time::Instant::now();
+    match when.checked_duration_since(now) {
+        Some(ahead) => absolute_time() + ahead.as_secs_f64(),
+        None => absolute_time() - now.duration_since(when).as_secs_f64(),
+    }
+}
+
+/// `CFAbsoluteTime CFRunLoopTimerGetNextFireDate(CFRunLoopTimerRef)`: the date
+/// as it was set, while the timer is still due then.
+pub unsafe extern "C" fn CFRunLoopTimerGetNextFireDate(timer: CFTypeRef) -> f64 {
+    unsafe { borrow::<Timer>(timer) }.map_or(0.0, |t| {
+        t.next_date().unwrap_or_else(|| date_of_instant(t.next_fire()))
+    })
+}
+
+/// `CFRunLoopMode CFRunLoopCopyCurrentMode(CFRunLoopRef)`: the mode the loop is
+/// running, or null when it is not.
+pub unsafe extern "C" fn CFRunLoopCopyCurrentMode(loop_: CFTypeRef) -> CFTypeRef {
+    let Some(mode) = unsafe { borrow::<RunLoop>(loop_) }.and_then(|l| l.current_mode()) else {
+        return std::ptr::null();
+    };
+    let name = crate::base::interned_name(&mode) as CFTypeRef;
+    // SAFETY: a live string; the copy is the caller's to release.
+    unsafe { CFRetain(name) }
 }
 
 pub unsafe extern "C" fn CFRunLoopTimerInvalidate(timer: CFTypeRef) {
@@ -2975,11 +3041,7 @@ pub unsafe extern "C" fn CFRunLoopGetNextTimerFireDate(loop_: CFTypeRef, mode: C
     let Some(next) = l.next_timer(&unsafe { mode_name(mode) }) else {
         return 0.0;
     };
-    let now = std::time::Instant::now();
-    match next.checked_duration_since(now) {
-        Some(ahead) => absolute_time() + ahead.as_secs_f64(),
-        None => absolute_time() - now.duration_since(next).as_secs_f64(),
-    }
+    date_of_instant(next)
 }
 
 pub unsafe extern "C" fn CFRunLoopTimerIsValid(timer: CFTypeRef) -> Boolean {
