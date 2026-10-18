@@ -2486,14 +2486,10 @@ mod tests {
         crate::frameworks::provider();
         let handle = open_native(crate::opengl::INSTALL_PATHS[0]).expect("host OpenGL framework");
         // Prove the host really has the entry point that the guest must not see.
-        let host = unsafe {
-            libc::dlsym(
-                handle as *mut libc::c_void,
-                c"CGLDescribePixelFormat".as_ptr(),
-            )
-        };
+        let host =
+            unsafe { libc::dlsym(handle as *mut libc::c_void, c"CGLCreatePBuffer".as_ptr()) };
         assert!(!host.is_null());
-        assert!(lookup(handle, "CGLDescribePixelFormat").is_none());
+        assert!(lookup(handle, "CGLCreatePBuffer").is_none());
         assert!(lookup(handle, "gluPerspective").is_none());
         let expected = appkit::symbol("CGLGetCurrentContext").unwrap();
         assert_eq!(
