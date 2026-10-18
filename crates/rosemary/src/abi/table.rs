@@ -1573,6 +1573,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("__stpcpy_chk", P, P, P, U64),
     sig!("__strcat_chk", P, P, P, U64),
     sig!("__strcpy_chk", P, P, P, U64),
+    sig!("res_9_getservers", I32, P, P, I32),
+    sig!("res_9_setservers", V, P, P, I32),
     sig!("__strlcat_chk", U64, P, P, U64, U64),
     sig!("__strlcpy_chk", U64, P, P, U64, U64),
     sig!("__strncat_chk", P, P, P, U64, U64),
