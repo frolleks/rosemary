@@ -2223,6 +2223,7 @@ unsafe extern "C" fn is_miniaturized(receiver: Id, _sel: Sel) -> u8 {
 /// otherwise off the screen.
 unsafe extern "C" fn miniaturize(receiver: Id, sel: Sel, sender: Id) {
     let window = window_of(receiver);
+    trace!("{receiver:p} miniaturized (shown {})", window.shown);
     window.miniaturized = 1;
     if window.sdl.is_null() || !sdl3::video::minimize_window(window.sdl) {
         // SAFETY: `-orderOut:` is `void (id, SEL, id)`.
@@ -2232,6 +2233,7 @@ unsafe extern "C" fn miniaturize(receiver: Id, sel: Sel, sender: Id) {
 
 unsafe extern "C" fn deminiaturize(receiver: Id, sel: Sel, sender: Id) {
     let window = window_of(receiver);
+    trace!("{receiver:p} deminiaturized");
     window.miniaturized = 0;
     if !window.sdl.is_null() {
         sdl3::video::restore_window(window.sdl);
