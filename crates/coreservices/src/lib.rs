@@ -4,6 +4,7 @@
     non_snake_case
 )]
 
+pub mod backup;
 pub mod collator;
 pub mod events;
 pub mod files;
@@ -13,6 +14,7 @@ pub mod resources;
 pub mod uti;
 
 exports::group! {
+    backup,
     collator,
     events,
     files,
