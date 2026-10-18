@@ -2,6 +2,7 @@ pub mod block;
 pub mod data;
 pub mod object;
 pub mod queue;
+pub mod source;
 pub mod sync;
 pub mod time;
 
@@ -92,9 +93,52 @@ fn main_queue() -> u64 {
     queue::main_queue()
 }
 
+/// `void dispatch_suspend(dispatch_object_t)`.
+unsafe extern "C" fn suspend(handle: u64) {
+    // SAFETY: the guest's live object.
+    match unsafe { object::header(handle) }.map(object::Header::kind) {
+        Some(object::Kind::Queue) => queue::suspend(handle),
+        Some(object::Kind::Source) => source::suspend(handle),
+        _ => {}
+    }
+}
+
+/// `void dispatch_resume(dispatch_object_t)`.
+unsafe extern "C" fn resume(handle: u64) {
+    // SAFETY: the guest's live object.
+    match unsafe { object::header(handle) }.map(object::Header::kind) {
+        Some(object::Kind::Queue) => queue::resume(handle),
+        Some(object::Kind::Source) => source::resume(handle),
+        _ => {}
+    }
+}
+
+/// `void dispatch_activate(dispatch_object_t)`. Queues here are never created
+/// inactive, so only a source has anything to do.
+unsafe extern "C" fn activate(handle: u64) {
+    source::activate(handle);
+}
+
+/// `boolean_t voucher_mach_msg_set(mach_msg_header_t *)`: put the current
+/// voucher in an outgoing message.
+///
+/// There are no Mach vouchers here, which makes this libdispatch's own
+/// `!VOUCHER_USE_MACH_VOUCHER` build of it: false, and the message untouched -
+/// the answer Apple's gives a message that already carries a voucher, and so
+/// one every caller handles.
+unsafe extern "C" fn voucher_mach_msg_set(_msg: *mut std::ffi::c_void) -> u32 {
+    0
+}
+
+/// `void voucher_mach_msg_clear(mach_msg_header_t *)`: the build above's
+/// does nothing, there being no voucher it could have set.
+unsafe extern "C" fn voucher_mach_msg_clear(_msg: *mut std::ffi::c_void) {}
+
 exports::exports! {
     functions {
         "dispatch_queue_create" => queue::queue_create,
+        "voucher_mach_msg_set" => voucher_mach_msg_set,
+        "voucher_mach_msg_clear" => voucher_mach_msg_clear,
         "dispatch_queue_create_with_target" => queue::queue_create_with_target,
         "dispatch_queue_get_label" => queue::queue_get_label,
         "dispatch_queue_set_specific" => queue::queue_set_specific,
@@ -123,6 +167,29 @@ exports::exports! {
         "dispatch_semaphore_signal" => sync::semaphore_signal,
         "dispatch_semaphore_wait" => sync::semaphore_wait,
         "dispatch_time" => time::time,
+        "dispatch_walltime" => time::walltime,
+        "dispatch_queue_attr_make_with_qos_class" => queue::attr_make_with_qos_class,
+        "dispatch_main" => queue::dispatch_main,
+        "dispatch_suspend" => suspend,
+        "dispatch_resume" => resume,
+        "dispatch_activate" => activate,
+        "dispatch_source_create" => source::create,
+        "dispatch_source_cancel" => source::cancel,
+        "dispatch_source_testcancel" => source::testcancel,
+        "dispatch_source_get_data" => source::get_data,
+        "dispatch_source_get_extended_data" => source::get_extended_data,
+        "dispatch_source_get_mask" => source::get_mask,
+        "dispatch_source_get_handle" => source::get_handle,
+        "dispatch_source_merge_data" => source::merge_data,
+        "dispatch_source_set_timer" => source::set_timer,
+        "dispatch_source_set_event_handler" => source::set_event_handler,
+        "dispatch_source_set_event_handler_f" => source::set_event_handler_f,
+        "dispatch_source_set_cancel_handler" => source::set_cancel_handler,
+        "dispatch_source_set_cancel_handler_f" => source::set_cancel_handler_f,
+        "dispatch_source_set_mandatory_cancel_handler" => source::set_mandatory_cancel_handler,
+        "dispatch_source_set_mandatory_cancel_handler_f" => source::set_mandatory_cancel_handler_f,
+        "dispatch_source_set_registration_handler" => source::set_registration_handler,
+        "dispatch_source_set_registration_handler_f" => source::set_registration_handler_f,
         "dispatch_data_create" => data::create,
         "dispatch_data_get_size" => data::get_size,
         "dispatch_retain" => object::retain_entry,
@@ -135,6 +202,18 @@ exports::exports! {
         "__dispatch_main_q" => main_queue(),
         "__dispatch_queue_attr_concurrent" => queue::concurrent_attr(),
         "__dispatch_data_destructor_free" => data::destructor_free(),
+        "__dispatch_source_type_data_add" => source::type_address(source::Type::DataAdd),
+        "__dispatch_source_type_data_or" => source::type_address(source::Type::DataOr),
+        "__dispatch_source_type_data_replace" => source::type_address(source::Type::DataReplace),
+        "__dispatch_source_type_mach_send" => source::type_address(source::Type::MachSend),
+        "__dispatch_source_type_mach_recv" => source::type_address(source::Type::MachRecv),
+        "__dispatch_source_type_memorypressure" => source::type_address(source::Type::MemoryPressure),
+        "__dispatch_source_type_proc" => source::type_address(source::Type::Proc),
+        "__dispatch_source_type_read" => source::type_address(source::Type::Read),
+        "__dispatch_source_type_signal" => source::type_address(source::Type::Signal),
+        "__dispatch_source_type_timer" => source::type_address(source::Type::Timer),
+        "__dispatch_source_type_vnode" => source::type_address(source::Type::Vnode),
+        "__dispatch_source_type_write" => source::type_address(source::Type::Write),
     }
 }
 
