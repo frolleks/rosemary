@@ -215,6 +215,7 @@ pub fn regions() -> io::Result<Vec<Region>> {
             // it stands for it reliably.
             shared: false,
             offset: entry.kve_offset,
+            file: None,
         })
         .collect())
 }

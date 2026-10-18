@@ -4,6 +4,7 @@ pub mod bootstrap;
 pub mod clock;
 pub mod info;
 pub mod kern;
+pub mod memory;
 pub mod msg;
 pub mod senders;
 pub mod space;
@@ -177,6 +178,12 @@ exports::exports! {
         "vm_deallocate" | "mach_vm_deallocate" => vm::vm_deallocate,
         "mach_vm_region" => vm::vm_region_64,
         "vm_read_overwrite" => vm::vm_read_overwrite,
+        "mach_make_memory_entry_64" | "mach_make_memory_entry" => memory::mach_make_memory_entry_64,
+        "mach_vm_map" | "vm_map" | "vm_map_64" => memory::mach_vm_map,
+        "mach_vm_remap" | "vm_remap" => memory::mach_vm_remap,
+        "mach_vm_read" | "vm_read" => memory::mach_vm_read,
+        "mach_memory_object_memory_entry_64" | "mach_memory_object_memory_entry" => memory::mach_memory_object_memory_entry_64,
+        "mach_memory_entry_get_page_counts" => memory::mach_memory_entry_get_page_counts,
 
         "mach_msg" => msg::mach_msg,
         "mach_msg_overwrite" => msg::mach_msg_overwrite,
