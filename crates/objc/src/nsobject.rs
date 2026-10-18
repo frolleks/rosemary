@@ -490,6 +490,137 @@ mod tests {
         assert_eq!(DESTRUCTED.with(|d| d.borrow().clone()), ["derived", "base"]);
     }
 
+    thread_local! {
+        /// objc4's `ctors1`, `dtors1`, `ctors2` and `dtors2`.
+        static CDTORS: std::cell::Cell<[u32; 4]> = const { std::cell::Cell::new([0; 4]) };
+    }
+
+    fn bump(which: usize) {
+        CDTORS.with(|c| {
+            let mut counts = c.get();
+            counts[which] += 1;
+            c.set(counts);
+        });
+    }
+
+    fn cdtors() -> [u32; 4] {
+        CDTORS.with(|c| c.replace([0; 4]))
+    }
+
+    unsafe extern "C" fn construct1(receiver: Id, _sel: Sel) -> Id {
+        bump(0);
+        receiver
+    }
+    unsafe extern "C" fn destruct1(_receiver: Id, _sel: Sel) {
+        bump(1);
+    }
+    unsafe extern "C" fn construct2(receiver: Id, _sel: Sel) -> Id {
+        bump(2);
+        receiver
+    }
+    unsafe extern "C" fn destruct2(_receiver: Id, _sel: Sel) {
+        bump(3);
+    }
+    unsafe extern "C" fn construct_fails(_receiver: Id, _sel: Sel) -> Id {
+        bump(2);
+        std::ptr::null_mut()
+    }
+
+    /// objc4's `cdtors.mm` hierarchy over `NSObject`, as `nscdtors.mm` builds
+    /// it: two classes with C++ ivars and one without between them.
+    fn cdtors_classes(prefix: &str, sub_construct: Imp) -> [&'static crate::class::Class; 3] {
+        crate::bootstrap();
+        let construct = sel::get(".cxx_construct");
+        let destruct = sel::get(".cxx_destruct");
+        let name = |n: &str| std::ffi::CString::new(format!("{prefix}{n}")).unwrap();
+        let nsobject = crate::class::lookup(c"NSObject").expect("NSObject");
+        let base = crate::class::allocate_pair(Some(nsobject), &name("CXXBase"), 0).unwrap();
+        assert!(base.add_ivar(c"baseIvar", 8, 3, c"Q"));
+        assert!(base.add_method(construct, construct1 as Imp, c"@16@0:8"));
+        assert!(base.add_method(destruct, destruct1 as Imp, c"v16@0:8"));
+        crate::class::register_pair(base);
+        let middle = crate::class::allocate_pair(Some(base), &name("NoCXXSub"), 0).unwrap();
+        assert!(middle.add_ivar(c"nocxxIvar", 4, 2, c"i"));
+        crate::class::register_pair(middle);
+        let sub = crate::class::allocate_pair(Some(middle), &name("CXXSub"), 0).unwrap();
+        assert!(sub.add_ivar(c"subIvar", 8, 3, c"Q"));
+        assert!(sub.add_method(construct, sub_construct, c"@16@0:8"));
+        assert!(sub.add_method(destruct, destruct2 as Imp, c"v16@0:8"));
+        crate::class::register_pair(sub);
+        [base, middle, sub]
+    }
+
+    /// `cdtors.mm`'s `test_single`: `+new` runs each class's constructor once,
+    /// and the last release each destructor once.
+    #[test]
+    fn cdtors_single_allocation() {
+        let [base, middle, sub] = cdtors_classes("Single", construct2 as Imp);
+        let nsobject = crate::class::lookup(c"NSObject").unwrap();
+        cdtors();
+        for (class, made, unmade) in [
+            (nsobject, [0, 0, 0, 0], [0, 0, 0, 0]),
+            (base, [1, 0, 0, 0], [0, 1, 0, 0]),
+            (middle, [1, 0, 0, 0], [0, 1, 0, 0]),
+            (sub, [1, 0, 1, 0], [0, 1, 0, 1]),
+        ] {
+            let object = send(crate::class::ptr(class) as Id, "new", std::ptr::null()) as Id;
+            assert!(!object.is_null());
+            assert_eq!(cdtors(), made, "{}", class.name_str());
+            // SAFETY: a live instance.
+            assert!(std::ptr::eq(unsafe { crate::object::class_of(object) }.unwrap(), class));
+            crate::arc::release(object);
+            assert_eq!(cdtors(), unmade, "{}", class.name_str());
+        }
+    }
+
+    /// `cdtors.mm`'s `test_inplace`: `objc_constructInstance` and
+    /// `objc_destructInstance` on the caller's own 64 bytes.
+    #[test]
+    fn cdtors_in_place_allocation() {
+        let [base, middle, sub] = cdtors_classes("InPlace", construct2 as Imp);
+        let nsobject = crate::class::lookup(c"NSObject").unwrap();
+        cdtors();
+        let mut bytes = [0u64; 8];
+        for (class, made, unmade) in [
+            (nsobject, [0, 0, 0, 0], [0, 0, 0, 0]),
+            (base, [1, 0, 0, 0], [0, 1, 0, 0]),
+            (middle, [1, 0, 0, 0], [0, 1, 0, 0]),
+            (sub, [1, 0, 1, 0], [0, 1, 0, 1]),
+        ] {
+            bytes = [0; 8];
+            let at = bytes.as_mut_ptr() as *mut c_void;
+            // SAFETY: 64 bytes, more than any of these classes' instances.
+            let object = unsafe {
+                crate::api::objc_constructInstance(crate::class::ptr(class) as *const c_void, at)
+            };
+            assert_eq!(object, at);
+            assert_eq!(cdtors(), made, "{}", class.name_str());
+            // SAFETY: the instance made above, ended without being freed.
+            unsafe { crate::api::objc_destructInstance(object) };
+            assert_eq!(cdtors(), unmade, "{}", class.name_str());
+        }
+        let _ = bytes;
+    }
+
+    /// objc4's `object_cxxConstructFromClass` on a constructor that fails: no
+    /// instance, and the superclass that did construct is destructed - the
+    /// failing class's own destructor is not run.
+    #[test]
+    fn a_failed_constructor_unwinds_its_superclasses() {
+        let [_, _, sub] = cdtors_classes("Failing", construct_fails as Imp);
+        cdtors();
+        let object = send(crate::class::ptr(sub) as Id, "new", std::ptr::null()) as Id;
+        assert!(object.is_null());
+        assert_eq!(cdtors(), [1, 1, 1, 0]);
+        let mut bytes = [0u64; 8];
+        let at = bytes.as_mut_ptr() as *mut c_void;
+        // SAFETY: 64 bytes, more than the instance.
+        let object =
+            unsafe { crate::api::objc_constructInstance(crate::class::ptr(sub) as *const c_void, at) };
+        assert!(object.is_null());
+        assert_eq!(cdtors(), [1, 1, 1, 0]);
+    }
+
     #[test]
     fn method_for_selector_answers_the_installed_imp() {
         let object = instance(c"RosemaryMethodForA");

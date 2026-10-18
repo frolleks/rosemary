@@ -36,7 +36,82 @@ pub fn create_instance(class: &'static Class, extra: usize) -> Id {
     // debug tail when enabled.
     unsafe { crate::debug::allocated(memory, class, size) };
     crate::census::allocated(class);
-    memory
+    // SAFETY: a zeroed instance of `class` with its `isa` set.
+    if unsafe { construct_instance(memory, class) } {
+        return memory;
+    }
+    // objc4's `OBJECT_CONSTRUCT_FREE_ONFAILURE`: a constructor that failed
+    // leaves nothing to hand out. The destructors that apply have run.
+    // SAFETY: the instance is intact and no one else has it.
+    unsafe { crate::census::freed(memory) };
+    if !crate::debug::finalized(memory) {
+        // SAFETY: allocated above from the same allocator.
+        unsafe { crate::allocator::guest_free(memory) };
+    }
+    std::ptr::null_mut()
+}
+
+/// Run every `.cxx_construct` of `class` and its superclasses on `object`,
+/// **root class first**, as objc4's `object_cxxConstructFromClass` does: the
+/// compiler puts a class's C++ ivar constructors in that method, and an
+/// instance whose constructors never ran holds C++ objects that were never
+/// made - a list head of zeroes, say, that the first insertion follows.
+///
+/// Each class's own method only: an inherited one is its class's, and runs
+/// once, for that class. Every way of making an instance comes here -
+/// `+alloc`, `class_createInstance`, `objc_constructInstance` and this
+/// runtime's own allocations - because objc4 constructs in all of them.
+///
+/// A constructor answers its object, or nil when it failed. On a failure the
+/// classes above it that did construct are destructed, nearest first, and the
+/// answer is false.
+///
+/// # Safety
+///
+/// `object` must be a fresh, zeroed instance of `class` whose `isa` is set.
+pub unsafe fn construct_instance(object: Id, class: &'static Class) -> bool {
+    let construct = crate::sel::get(".cxx_construct");
+    let chain: Vec<&'static Class> = class.chain().collect();
+    for (at, current) in chain.iter().enumerate().rev() {
+        let Some(method) = current.own_method(construct) else {
+            continue;
+        };
+        // SAFETY: `.cxx_construct` is `id (*)(id, SEL)`, compiled for this
+        // class's ivars, which `object` has.
+        let constructed = unsafe {
+            let f: unsafe extern "C" fn(Id, crate::sel::Sel) -> Id =
+                std::mem::transmute(method.implementation());
+            f(object, construct)
+        };
+        if constructed.is_null() {
+            // SAFETY: the classes past `at` are its superclasses, each of
+            // which constructed.
+            unsafe { destruct_classes(object, &chain[at + 1..]) };
+            return false;
+        }
+    }
+    true
+}
+
+/// Run the own `.cxx_destruct` of each of `classes`, in order.
+///
+/// # Safety
+///
+/// `object` is an instance whose ivars of each of `classes` were constructed.
+unsafe fn destruct_classes(object: Id, classes: &[&'static Class]) {
+    let destruct = crate::sel::get(".cxx_destruct");
+    for class in classes {
+        let Some(method) = class.own_method(destruct) else {
+            continue;
+        };
+        // SAFETY: `.cxx_destruct` is `void (*)(id, SEL)`, compiled for this
+        // class's ivars, which `object` has.
+        unsafe {
+            let f: unsafe extern "C" fn(Id, crate::sel::Sel) =
+                std::mem::transmute(method.implementation());
+            f(object, destruct);
+        }
+    }
 }
 
 /// Run every `.cxx_destruct` of `object`'s classes, nearest first, as Apple's
@@ -52,20 +127,10 @@ pub unsafe fn destruct_instance(object: Id) {
     let Some(class) = (unsafe { class_of(object) }) else {
         return;
     };
-    let destruct = crate::sel::get(".cxx_destruct");
-    for class in class.chain() {
-        // Only a class's own: an inherited one runs once, for its own class.
-        let Some(method) = class.own_method(destruct) else {
-            continue;
-        };
-        // SAFETY: `.cxx_destruct` is `void (*)(id, SEL)`, compiled for this
-        // class's ivars, which `object` has.
-        unsafe {
-            let f: unsafe extern "C" fn(Id, crate::sel::Sel) =
-                std::mem::transmute(method.implementation());
-            f(object, destruct);
-        }
-    }
+    // Only a class's own: an inherited one runs once, for its own class.
+    let chain: Vec<&'static Class> = class.chain().collect();
+    // SAFETY: the caller's obligation.
+    unsafe { destruct_classes(object, &chain) };
 }
 
 /// Free an instance [`create_instance`] returned.
