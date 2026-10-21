@@ -10,7 +10,10 @@
 
 use std::ffi::c_void;
 
-use corefoundation::base::CFTypeRef;
+use corefoundation::{
+    base::{CFRuntimeBase, CFTypeRef},
+    string::to_rust_string,
+};
 use objc::class::Class;
 use objc::object::Id;
 use rustls_pki_types::{CertificateDer, UnixTime};
@@ -35,11 +38,32 @@ const ALLOW_EXPIRED: u32 = 0x1;
 /// `kSecTrustOptionAllowExpiredRoot`.
 const ALLOW_EXPIRED_ROOT: u32 = 0x8;
 
-enum Payload {
-    Certificate(Vec<u8>),
+#[repr(C)]
+pub struct SecPolicy {
+    base: CFRuntimeBase,      // must stay first
+    server: bool,             // true: evaluating a server's certificate
+    hostname: Option<String>, // converted once, ready for X509_check_host
+}
+
+pub type SecPolicyRef = *const SecPolicy;
+
+#[derive(Clone)]
+enum Policy {
     /// `SecPolicyCreateBasicX509`: a chain to a trusted root, no name and no
     /// extended key usage required.
     BasicX509,
+    /// `SecPolicyCreateSSL`. `server` true evaluates a server's certificate
+    /// (serverAuth usage, and the name when one is given); false evaluates a
+    /// client's (clientAuth usage, no name).
+    Ssl {
+        server: bool,
+        hostname: Option<String>,
+    },
+}
+
+enum Payload {
+    Certificate(Vec<u8>),
+    Policy(Policy),
     Trust {
         chain: Vec<Vec<u8>>,
         options: u32,
@@ -271,7 +295,7 @@ pub unsafe extern "C" fn SecCertificateGetData(
 ///
 /// None beyond being called as the C function it is.
 pub unsafe extern "C" fn SecPolicyCreateBasicX509() -> CFTypeRef {
-    new(Payload::BasicX509)
+    new(Payload::Policy(Policy::BasicX509))
 }
 
 /// `OSStatus SecTrustCreateWithCertificates(CFTypeRef certificates, CFTypeRef
@@ -304,7 +328,10 @@ pub unsafe extern "C" fn SecTrustCreateWithCertificates(
     // SAFETY: the caller's guarantee.
     for policy in unsafe { one_or_many(policies) } {
         // SAFETY: as above.
-        if !matches!(unsafe { payload(policy) }, Some(Payload::BasicX509)) {
+        if !matches!(
+            unsafe { payload(policy) },
+            Some(Payload::Policy(Policy::BasicX509))
+        ) {
             eprintln!(
                 "rosemary: security: SecTrustCreateWithCertificates: only the basic X.509 policy is supported"
             );
@@ -315,8 +342,29 @@ pub unsafe extern "C" fn SecTrustCreateWithCertificates(
         return PARAM;
     }
     // SAFETY: writable, checked above.
-    unsafe { trust.write(new(Payload::Trust { chain, options: 0 })) };
+    unsafe {
+        trust.write(new(Payload::Trust {
+            chain,
+            options: 0,
+        }))
+    };
     SUCCESS
+}
+
+pub unsafe extern "C" fn SecPolicyCreateSSL(server: u8, hostname: CFTypeRef) -> CFTypeRef {
+    let hostname = if hostname.is_null() {
+        None
+    } else {
+        // SAFETY: a live string, per the caller.
+        match unsafe { to_rust_string(hostname) } {
+            Some(name) => Some(name),
+            None => return std::ptr::null(),
+        }
+    };
+    new(Payload::Policy(Policy::Ssl {
+        server: server != 0,
+        hostname,
+    }))
 }
 
 /// `OSStatus SecTrustSetOptions(SecTrustRef, SecTrustOptionFlags)`.
@@ -396,7 +444,11 @@ fn evaluate(chain: &[Vec<u8>], options: u32) -> u32 {
 /// `trust` is null or a live object, and `out` is null or writable.
 pub unsafe extern "C" fn SecTrustEvaluate(trust: CFTypeRef, out: *mut u32) -> OSStatus {
     // SAFETY: the caller's guarantee.
-    let Some(Payload::Trust { chain, options }) = (unsafe { payload(trust) }) else {
+    let Some(Payload::Trust {
+        chain,
+        options,
+    }) = (unsafe { payload(trust) })
+    else {
         return PARAM;
     };
     let verdict = evaluate(chain, *options);
@@ -432,6 +484,7 @@ exports::exports! {
     functions {
         "SecCertificateCreateWithData" => SecCertificateCreateWithData,
         "SecPolicyCreateBasicX509" => SecPolicyCreateBasicX509,
+        "SecPolicyCreateSSL" => SecPolicyCreateSSL,
         "SecTrustCreateWithCertificates" => SecTrustCreateWithCertificates,
         "SecTrustSetOptions" => SecTrustSetOptions,
         "SecTrustEvaluate" => SecTrustEvaluate,

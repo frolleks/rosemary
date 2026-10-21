@@ -19,6 +19,8 @@ const OWNED: u64 = 0x1000_0000;
 /// `isKindOfClass:` disagrees with the object it is holding.
 const MUTABLE: u64 = 0x2000_0000;
 
+pub type CFStringRef = *const CFString;
+
 /// The four words a `CFString` is.
 #[repr(C)]
 pub struct CFString {
@@ -692,4 +694,9 @@ pub unsafe fn release_storage(object: *mut CFString) {
 /// `p` must be null or NUL-terminated.
 pub unsafe fn cstr_bytes<'a>(p: *const c_char) -> Option<&'a [u8]> {
     (!p.is_null()).then(|| unsafe { CStr::from_ptr(p) }.to_bytes())
+}
+
+pub unsafe fn to_rust_string(string: CFTypeRef) -> Option<String> {
+    let s = unsafe { as_string(string) }?;
+    String::from_utf8(s.utf8()).ok()
 }

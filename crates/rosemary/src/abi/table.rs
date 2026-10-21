@@ -1419,6 +1419,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("SecItemUpdate", I32, P, P),
     sig!("SecCertificateCreateWithData", P, P, P),
     sig!("SecPolicyCreateBasicX509", P),
+    sig!("SecPolicyCreateSSL", P, U8, P),
     sig!("SecTrustCreateWithCertificates", I32, P, P, P),
     sig!("SecTrustSetOptions", I32, P, U32),
     sig!("SecTrustEvaluate", I32, P, P),
