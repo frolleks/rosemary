@@ -579,7 +579,7 @@ pub unsafe extern "C" fn CGPathAddArc(
     radius: f64,
     start: f64,
     end: f64,
-    clockwise: u8,
+    clockwise: i32,
 ) {
     if let Some(e) = elements_of(path) {
         e.arc(transform(m), x, y, radius, start, end, clockwise != 0);
