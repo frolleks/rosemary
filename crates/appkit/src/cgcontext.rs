@@ -6,22 +6,14 @@
 use std::ffi::{c_char, c_void};
 
 use corefoundation::base::CFTypeRef;
+use coregraphics::{CGAffineTransformMakeScale, CGAffineTransformMakeTranslation};
 use foundation::geometry::{NSPoint, NSRect, NSSize};
 use tiny_skia as sk;
 
 use crate::cgpath::Elements;
 use crate::quartz::{self, BitmapContext, Ink, Retained, State, context_of, state_of};
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CGAffineTransform {
-    pub a: f64,
-    pub b: f64,
-    pub c: f64,
-    pub d: f64,
-    pub tx: f64,
-    pub ty: f64,
-}
+pub use coregraphics::CGAffineTransform;
 
 pub const IDENTITY: CGAffineTransform = CGAffineTransform {
     a: 1.0,
@@ -31,27 +23,6 @@ pub const IDENTITY: CGAffineTransform = CGAffineTransform {
     tx: 0.0,
     ty: 0.0,
 };
-
-impl CGAffineTransform {
-    /// `self` then `then`, as `CGAffineTransformConcat(self, then)`.
-    pub fn then(self, then: CGAffineTransform) -> CGAffineTransform {
-        CGAffineTransform {
-            a: self.a * then.a + self.b * then.c,
-            b: self.a * then.b + self.b * then.d,
-            c: self.c * then.a + self.d * then.c,
-            d: self.c * then.b + self.d * then.d,
-            tx: self.tx * then.a + self.ty * then.c + then.tx,
-            ty: self.tx * then.b + self.ty * then.d + then.ty,
-        }
-    }
-
-    pub fn apply(self, x: f64, y: f64) -> (f64, f64) {
-        (
-            self.a * x + self.c * y + self.tx,
-            self.b * x + self.d * y + self.ty,
-        )
-    }
-}
 
 #[repr(C)]
 struct Color {
@@ -1246,69 +1217,6 @@ unsafe extern "C" fn CGPDFContextCreateWithURL(
     std::ptr::null()
 }
 
-//
-// Affine transforms
-//
-
-pub unsafe extern "C" fn CGAffineTransformMake(
-    a: f64,
-    b: f64,
-    c: f64,
-    d: f64,
-    tx: f64,
-    ty: f64,
-) -> CGAffineTransform {
-    CGAffineTransform { a, b, c, d, tx, ty }
-}
-
-pub unsafe extern "C" fn CGAffineTransformMakeScale(x: f64, y: f64) -> CGAffineTransform {
-    CGAffineTransform {
-        a: x,
-        d: y,
-        ..IDENTITY
-    }
-}
-
-pub unsafe extern "C" fn CGAffineTransformMakeTranslation(x: f64, y: f64) -> CGAffineTransform {
-    CGAffineTransform {
-        tx: x,
-        ty: y,
-        ..IDENTITY
-    }
-}
-
-pub unsafe extern "C" fn CGAffineTransformConcat(
-    first: CGAffineTransform,
-    second: CGAffineTransform,
-) -> CGAffineTransform {
-    first.then(second)
-}
-
-pub unsafe extern "C" fn CGAffineTransformScale(
-    transform: CGAffineTransform,
-    x: f64,
-    y: f64,
-) -> CGAffineTransform {
-    unsafe { CGAffineTransformMakeScale(x, y) }.then(transform)
-}
-
-pub unsafe extern "C" fn CGAffineTransformTranslate(
-    transform: CGAffineTransform,
-    x: f64,
-    y: f64,
-) -> CGAffineTransform {
-    unsafe { CGAffineTransformMakeTranslation(x, y) }.then(transform)
-}
-
-pub unsafe extern "C" fn CGAffineTransformInvert(t: CGAffineTransform) -> CGAffineTransform {
-    // A singular transform is returned unchanged, as Quartz documents.
-    t.inverse().unwrap_or(t)
-}
-
-pub unsafe extern "C" fn CGAffineTransformIsIdentity(t: CGAffineTransform) -> u8 {
-    u8::from(t == IDENTITY)
-}
-
 pub unsafe extern "C" fn CGRectApplyAffineTransform(rect: NSRect, t: CGAffineTransform) -> NSRect {
     let (x0, y0) = (rect.origin.x, rect.origin.y);
     let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
@@ -1545,14 +1453,6 @@ exports::exports! {
         "CGContextFlush" | "CGContextSynchronize" | "CGContextEndPage" => ignored_context,
         "CGContextBeginPage" => CGContextBeginPage,
         "CGPDFContextCreateWithURL" => CGPDFContextCreateWithURL,
-        "CGAffineTransformMake" => CGAffineTransformMake,
-        "CGAffineTransformMakeScale" => CGAffineTransformMakeScale,
-        "CGAffineTransformMakeTranslation" => CGAffineTransformMakeTranslation,
-        "CGAffineTransformConcat" => CGAffineTransformConcat,
-        "CGAffineTransformScale" => CGAffineTransformScale,
-        "CGAffineTransformTranslate" => CGAffineTransformTranslate,
-        "CGAffineTransformInvert" => CGAffineTransformInvert,
-        "CGAffineTransformIsIdentity" => CGAffineTransformIsIdentity,
         "CGRectApplyAffineTransform" => CGRectApplyAffineTransform,
         "CGColorCreate" => CGColorCreate,
         "CGColorCreateGenericRGB" => CGColorCreateGenericRGB,
@@ -1676,7 +1576,8 @@ mod tests {
             assert_eq!(CGContextGetCTM(context).d, 3.0);
             CGContextRestoreGState(context);
             assert_eq!(CGContextGetCTM(context), IDENTITY);
-            let inverse = CGAffineTransformInvert(CGAffineTransformMakeScale(2.0, 4.0));
+            let inverse =
+                coregraphics::CGAffineTransformInvert(CGAffineTransformMakeScale(2.0, 4.0));
             assert_eq!(inverse.a, 0.5);
             assert_eq!(inverse.d, 0.25);
             CGContextRelease(context);

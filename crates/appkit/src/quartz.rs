@@ -401,8 +401,20 @@ fn write_out(
     }
 }
 
-impl CGAffineTransform {
-    pub(crate) fn sk(self) -> sk::Transform {
+/// `CGAffineTransform` as tiny-skia wants it.
+///
+/// A trait rather than an inherent method because the type lives in
+/// `coregraphics`, and an inherent impl on a foreign type is not allowed.
+trait SkTransform {
+    fn sk(self) -> sk::Transform;
+
+    /// The factor lengths grow by, for sizing a raster that will be drawn
+    /// through this transform.
+    fn scale_factor(self) -> f64;
+}
+
+impl SkTransform for CGAffineTransform {
+    fn sk(self) -> sk::Transform {
         sk::Transform::from_row(
             self.a as f32,
             self.b as f32,
@@ -413,25 +425,7 @@ impl CGAffineTransform {
         )
     }
 
-    pub(crate) fn inverse(self) -> Option<CGAffineTransform> {
-        let det = self.a * self.d - self.b * self.c;
-        if det == 0.0 || !det.is_finite() {
-            return None;
-        }
-        let (a, b, c, d) = (self.d / det, -self.b / det, -self.c / det, self.a / det);
-        Some(CGAffineTransform {
-            a,
-            b,
-            c,
-            d,
-            tx: -(self.tx * a + self.ty * c),
-            ty: -(self.tx * b + self.ty * d),
-        })
-    }
-
-    /// The factor lengths grow by, for sizing a raster that will be drawn
-    /// through this transform.
-    pub(crate) fn scale_factor(self) -> f64 {
+    fn scale_factor(self) -> f64 {
         (self.a * self.d - self.b * self.c).abs().sqrt()
     }
 }
