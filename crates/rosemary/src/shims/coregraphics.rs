@@ -1,6 +1,6 @@
 use microlift::arch::x86_64::context::RegisterContext;
 
-use crate::abi::{AbiError, GuestMemory, Result};
+use crate::abi::{AbiError, Callbacks, GuestMemory, Result};
 
 use super::host::host_or_refuse;
 
@@ -635,6 +635,40 @@ fn path_contains_point(
     Ok(())
 }
 
+/// `void CGPathApplyWithBlock(CGPathRef path, CGPathApplierBlock block)`
+///
+/// The block's invoke pointer is a guest address until it is substituted, and
+/// the host would call it as host code. `substitute_block` writes the thunk
+/// into the block first, which is what every other block-taking shim does.
+fn path_apply_with_block(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    let (path, block) = (ctx.rdi, ctx.rsi);
+    crate::shims::block::substitute_block(symbol, block, mem, callbacks)?;
+    // SAFETY: the symbol [`callback_shim_for`] matched, which is
+    // `void (*)(CGPathRef, CGPathApplierBlock)`.
+    let f: extern "C" fn(u64, u64) =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u64, u64)>(host) };
+    f(path, block);
+    Ok(())
+}
+
+/// One of this module's implementations that needs [`Callbacks`].
+pub type CallbackShim = crate::signal::Shim;
+
+/// Whether `name` (underscore already stripped) is one of this module's
+/// callback-taking shims.
+pub fn callback_shim_for(name: &str) -> Option<CallbackShim> {
+    match name {
+        "CGPathApplyWithBlock" => Some(path_apply_with_block),
+        _ => None,
+    }
+}
+
 /// `CGPoint`, as both ABIs return one: two floating-point registers.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -788,6 +822,15 @@ mod tests {
         ] {
             assert!(shim_for(name).is_some(), "{name} has no shim");
         }
+    }
+
+    #[test]
+    fn the_applier_forms_are_reachable() {
+        match crate::abi::table::lookup(0, "CGPathApply") {
+            crate::abi::Lookup::Known(abi) => assert!(abi.callbacks.contains(&2)),
+            other => panic!("CGPathApply is not described: {other:?}"),
+        }
+        assert!(callback_shim_for("CGPathApplyWithBlock").is_some());
     }
 
     /// Against the host, so the claim is about CoreGraphics rather than about this

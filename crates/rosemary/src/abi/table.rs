@@ -785,6 +785,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
         I32,
         F64
     ),
+    // The applier is argument two, and the host calls it once per element.
+    cbsig!([2], "CGPathApply", V, P, P, P),
     // Everything SDL3's Cocoa backend asks about a screen: which displays
     // exist, what modes each has, and which one is in use.
     sig!("CGAcquireDisplayFadeReservation", I32, F32, P),
@@ -4259,17 +4261,6 @@ pub static REFUSED: &[(&str, &str)] = &[
     (
         "malloc_zone_enumerate_discharged_pointers",
         "passes a guest block to a zone, which would call it as host code",
-    ),
-    // `CGPathApply` hands the applier a `CGPathElement` whose `points` array
-    // must be readable by the guest, and the implementation builds both in
-    // host memory. A shim that stages them in guest memory does not exist yet.
-    (
-        "CGPathApply",
-        "the element it hands the callback must live in guest memory; no shim stages it yet",
-    ),
-    (
-        "CGPathApplyWithBlock",
-        "the element it hands the block must live in guest memory; no shim stages it yet",
     ),
 ];
 
