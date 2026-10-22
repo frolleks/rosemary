@@ -665,7 +665,9 @@ pub type CallbackShim = crate::signal::Shim;
 /// callback-taking shims.
 pub fn callback_shim_for(name: &str) -> Option<CallbackShim> {
     match name {
-        "CGPathApplyWithBlock" => Some(path_apply_with_block),
+        "CGPathApplyWithBlock" => {
+            Some(bind!(callback "CGPathApplyWithBlock" => path_apply_with_block))
+        },
         _ => None,
     }
 }
