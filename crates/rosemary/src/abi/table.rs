@@ -765,11 +765,26 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     ),
     sig!("CGPathCloseSubpath", V, P),
     sig!("CGPathAddRects", V, P, P, P, U64),
-    sig!("CGPathAddArc", V, P, P, F64, F64, F64, F64, F64, I32),
+    sig!("CGPathAddArc", V, P, P, F64, F64, F64, F64, F64, BOOL),
     sig!("CGPathAddArcToPoint", V, P, P, F64, F64, F64, F64, F64),
     sig!("CGPathAddLines", V, P, P, P, U64),
     sig!("CGPathAddPath", V, P, P, P),
     sig!("CGPathIsEmpty", U8, P),
+    sig!("CGPathIsRect", U8, P, P),
+    sig!("CGPathEqualToPath", U8, P, P),
+    sig!("CGPathGetTypeID", U64),
+    sig!("CGPathAddRelativeArc", V, P, P, F64, F64, F64, F64, F64),
+    sig!("CGPathCreateCopyByDashingPath", P, P, P, F64, P, U64),
+    sig!(
+        "CGPathCreateCopyByStrokingPath",
+        P,
+        P,
+        P,
+        F64,
+        I32,
+        I32,
+        F64
+    ),
     // Everything SDL3's Cocoa backend asks about a screen: which displays
     // exist, what modes each has, and which one is in use.
     sig!("CGAcquireDisplayFadeReservation", I32, F32, P),
@@ -4244,6 +4259,17 @@ pub static REFUSED: &[(&str, &str)] = &[
     (
         "malloc_zone_enumerate_discharged_pointers",
         "passes a guest block to a zone, which would call it as host code",
+    ),
+    // `CGPathApply` hands the applier a `CGPathElement` whose `points` array
+    // must be readable by the guest, and the implementation builds both in
+    // host memory. A shim that stages them in guest memory does not exist yet.
+    (
+        "CGPathApply",
+        "the element it hands the callback must live in guest memory; no shim stages it yet",
+    ),
+    (
+        "CGPathApplyWithBlock",
+        "the element it hands the block must live in guest memory; no shim stages it yet",
     ),
 ];
 

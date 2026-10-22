@@ -498,6 +498,143 @@ fn rect_apply_transform(
     Ok(())
 }
 
+/// `CGPathRef CGPathCreateWithRect(CGRect rect, const CGAffineTransform *m)`
+///
+/// The rectangle is MEMORY class to a guest, so it is on the guest's stack and
+/// the transform is the first integer register. The path is a pointer, so it
+/// comes back in `rax` with no hidden buffer.
+fn path_create_with_rect(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    let rect = rect_argument(symbol, ctx, mem, 0)?;
+    // SAFETY: the symbol [`shim_for`] matched, which is
+    // `CGPathRef (*)(CGRect, const CGAffineTransform *)`.
+    let f: extern "C" fn(CgRect, u64) -> u64 =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(CgRect, u64) -> u64>(host) };
+    ctx.rax = f(rect, ctx.rdi);
+    Ok(())
+}
+
+/// `CGPathRef CGPathCreateWithRoundedRect(CGRect rect, CGFloat cornerWidth,
+/// CGFloat cornerHeight, const CGAffineTransform *m)`
+fn path_create_with_rounded_rect(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    let rect = rect_argument(symbol, ctx, mem, 0)?;
+    let (width, height) = (f64::from_bits(ctx.xmm[0][0]), f64::from_bits(ctx.xmm[1][0]));
+    // SAFETY: the symbol [`shim_for`] matched, which is
+    // `CGPathRef (*)(CGRect, CGFloat, CGFloat, const CGAffineTransform *)`.
+    let f: extern "C" fn(CgRect, f64, f64, u64) -> u64 =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(CgRect, f64, f64, u64) -> u64>(host) };
+    ctx.rax = f(rect, width, height, ctx.rdi);
+    Ok(())
+}
+
+/// `void CGPathAddRect(CGMutablePathRef path, const CGAffineTransform *m,
+/// CGRect rect)`
+fn path_add_rect(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemory) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    let rect = rect_argument(symbol, ctx, mem, 0)?;
+    // SAFETY: the symbol [`shim_for`] matched, which is
+    // `void (*)(CGMutablePathRef, const CGAffineTransform *, CGRect)`.
+    let f: extern "C" fn(u64, u64, CgRect) =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u64, u64, CgRect)>(host) };
+    f(ctx.rdi, ctx.rsi, rect);
+    Ok(())
+}
+
+/// `void CGPathAddRoundedRect(CGMutablePathRef path, const CGAffineTransform
+/// *m, CGRect rect, CGFloat cornerWidth, CGFloat cornerHeight)`
+fn path_add_rounded_rect(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    let rect = rect_argument(symbol, ctx, mem, 0)?;
+    let (width, height) = (f64::from_bits(ctx.xmm[0][0]), f64::from_bits(ctx.xmm[1][0]));
+    // SAFETY: the symbol [`shim_for`] matched, which is
+    // `void (*)(CGMutablePathRef, const CGAffineTransform *, CGRect, CGFloat, CGFloat)`.
+    let f: extern "C" fn(u64, u64, CgRect, f64, f64) =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u64, u64, CgRect, f64, f64)>(host) };
+    f(ctx.rdi, ctx.rsi, rect, width, height);
+    Ok(())
+}
+
+/// `CGRect CGPathGetBoundingBox(CGPathRef path)`
+///
+/// A MEMORY-class return: the guest passes the buffer in `rdi` and the path
+/// moves to `rsi`.
+fn path_bounding_box(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    let (buffer, path) = (ctx.rdi, ctx.rsi);
+    if buffer == 0 {
+        return Err(AbiError::Memory {
+            symbol: symbol.to_string(),
+            addr: 0,
+        });
+    }
+    // SAFETY: the symbol [`shim_for`] matched, which is `CGRect (*)(CGPathRef)`.
+    let f: extern "C" fn(u64) -> CgRect =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u64) -> CgRect>(host) };
+    let rect = f(path);
+    mem.write_bytes(buffer, &rect.to_le_bytes(), symbol)?;
+    ctx.rax = buffer;
+    Ok(())
+}
+
+/// `CGPoint CGPathGetCurrentPoint(CGPathRef path)`
+///
+/// Sixteen bytes of two `double`s, which the two ABIs agree about: `xmm0` and
+/// `xmm1` to a guest, `v0` and `v1` to a host.
+fn path_current_point(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    // SAFETY: the symbol [`shim_for`] matched, which is `CGPoint (*)(CGPathRef)`.
+    let f: extern "C" fn(u64) -> CgPoint =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u64) -> CgPoint>(host) };
+    let point = f(ctx.rdi);
+    ctx.xmm[0] = [point.x.to_bits(), 0];
+    ctx.xmm[1] = [point.y.to_bits(), 0];
+    Ok(())
+}
+
+/// `bool CGPathContainsPoint(CGPathRef path, const CGAffineTransform *m,
+/// CGPoint point, bool eoFill)`
+///
+/// The point takes the two SSE registers, so the flag takes the next *integer*
+/// register - `rdx`, after the path and the transform.
+fn path_contains_point(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    _mem: &mut dyn GuestMemory,
+) -> Result<()> {
+    let host = host_or_refuse(symbol)?;
+    let point = CgPoint {
+        x: f64::from_bits(ctx.xmm[0][0]),
+        y: f64::from_bits(ctx.xmm[1][0]),
+    };
+    // SAFETY: the symbol [`shim_for`] matched, which is
+    // `bool (*)(CGPathRef, const CGAffineTransform *, CGPoint, bool)`.
+    let f: extern "C" fn(u64, u64, CgPoint, u8) -> u8 =
+        unsafe { core::mem::transmute::<u64, extern "C" fn(u64, u64, CgPoint, u8) -> u8>(host) };
+    ctx.rax = u64::from(f(ctx.rdi, ctx.rsi, point, ctx.rdx as u8));
+    Ok(())
+}
+
 /// `CGPoint`, as both ABIs return one: two floating-point registers.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -578,6 +715,15 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         "CGAffineTransformInvert" => Some(transform_invert),
         "CGAffineTransformIsIdentity" => Some(transform_is_identity),
         "CGRectApplyAffineTransform" => Some(rect_apply_transform),
+        // `CGPath`'s aggregate forms. The rectangle is MEMORY class to a guest
+        // and the point is two SSE eightbytes; neither can be a table entry.
+        "CGPathCreateWithRect" | "CGPathCreateWithEllipseInRect" => Some(path_create_with_rect),
+        "CGPathCreateWithRoundedRect" => Some(path_create_with_rounded_rect),
+        "CGPathAddRect" | "CGPathAddEllipseInRect" => Some(path_add_rect),
+        "CGPathAddRoundedRect" => Some(path_add_rounded_rect),
+        "CGPathGetBoundingBox" | "CGPathGetPathBoundingBox" => Some(path_bounding_box),
+        "CGPathGetCurrentPoint" => Some(path_current_point),
+        "CGPathContainsPoint" => Some(path_contains_point),
         _ => None,
     }
 }
@@ -623,6 +769,24 @@ mod tests {
             let mut word = [0u8; 8];
             word.copy_from_slice(&bytes[i * 8..(i + 1) * 8]);
             assert_eq!(f64::from_le_bytes(word), *expected);
+        }
+    }
+
+    #[test]
+    fn the_path_aggregates_are_shimmed() {
+        for name in [
+            "CGPathCreateWithRect",
+            "CGPathCreateWithEllipseInRect",
+            "CGPathCreateWithRoundedRect",
+            "CGPathAddRect",
+            "CGPathAddEllipseInRect",
+            "CGPathAddRoundedRect",
+            "CGPathGetBoundingBox",
+            "CGPathGetPathBoundingBox",
+            "CGPathGetCurrentPoint",
+            "CGPathContainsPoint",
+        ] {
+            assert!(shim_for(name).is_some(), "{name} has no shim");
         }
     }
 
