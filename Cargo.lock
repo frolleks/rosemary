@@ -621,6 +621,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "coregraphics"
+version = "0.3.0"
+dependencies = [
+ "corefoundation",
+ "exports",
+]
+
+[[package]]
 name = "coreservices"
 version = "0.4.0"
 dependencies = [
@@ -2254,6 +2262,7 @@ dependencies = [
  "contacts",
  "coreaudio",
  "corefoundation",
+ "coregraphics",
  "coreservices",
  "corevideo",
  "darwin",

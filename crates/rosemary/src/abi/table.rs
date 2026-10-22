@@ -729,7 +729,11 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CFURLGetFileSystemRepresentation", U8, P, U8, P, I64),
     sig!("CFUUIDCreate", P, P),
     sig!("CFUUIDCreateString", P, P, P),
-    //
+    // CoreGraphics
+    sig!("CGAffineTransformMake", F64, F64, F64, F64, F64, F64),
+    sig!("CGAffineTransformMakeRotation", F64),
+    sig!("CGAffineTransformMakeScale", F64, F64),
+    sig!("CGAffineTransformMakeTranslation", F64, F64),
     // Everything SDL3's Cocoa backend asks about a screen: which displays
     // exist, what modes each has, and which one is in use.
     sig!("CGAcquireDisplayFadeReservation", I32, F32, P),
