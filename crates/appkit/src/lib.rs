@@ -90,6 +90,7 @@ pub fn bootstrap() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         foundation::bootstrap();
+        coregraphics::bootstrap();
         decor::install();
         classes::install();
         alert::install();
@@ -321,7 +322,6 @@ exports::exports! {
         hitheme,
         launchservices,
         cgcontext,
-        cgpath,
         cgpaint,
         cgl,
     }
@@ -331,9 +331,6 @@ pub fn ns_app_cell() -> u64 {
     corefoundation::base::global_cell("_NSApp", 0)
 }
 
-// CoreGraphics exports these structures themselves, rather than pointers to
-// them. A guest loads their addresses from its GOT and copies the fields.
-static CG_AFFINE_TRANSFORM_IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 /// `{{-CGFLOAT_MAX / 2, -CGFLOAT_MAX / 2}, {CGFLOAT_MAX, CGFLOAT_MAX}}`.
 static CG_RECT_INFINITE: [f64; 4] = [f64::MAX / -2.0, f64::MAX / -2.0, f64::MAX, f64::MAX];
 
@@ -343,10 +340,6 @@ pub fn data_symbols() -> Vec<(String, u64)> {
     out.extend(coretext::data_symbols());
     out.extend(cgcontext::data_symbols());
     out.push(("_NSApp".to_string(), ns_app_cell()));
-    out.push((
-        "_CGAffineTransformIdentity".to_string(),
-        CG_AFFINE_TRANSFORM_IDENTITY.as_ptr() as usize as u64,
-    ));
     out.push((
         "_CGRectInfinite".to_string(),
         CG_RECT_INFINITE.as_ptr() as usize as u64,
@@ -715,17 +708,5 @@ mod tests {
             unsafe { foundation::string::bytes(object) },
             window::DID_CHANGE_SCREEN.as_bytes()
         );
-    }
-
-    #[test]
-    fn core_graphics_structure_globals_point_at_their_fields() {
-        let symbols = data_symbols();
-        let (_, identity) = symbols
-            .iter()
-            .find(|(name, _)| name == "_CGAffineTransformIdentity")
-            .expect("published");
-        // SAFETY: the symbol points at the six-double static above.
-        let fields = unsafe { std::slice::from_raw_parts(*identity as *const f64, 6) };
-        assert_eq!(fields, &[1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
     }
 }

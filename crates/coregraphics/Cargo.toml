@@ -1,0 +1,12 @@
+[package]
+name = "coregraphics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+corefoundation.workspace = true
+exports.workspace = true
+objc.workspace = true
+tiny-skia.workspace = true
+i_overlay.workspace = true

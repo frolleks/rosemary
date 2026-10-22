@@ -588,7 +588,7 @@ pub unsafe extern "C" fn CGFontGetGlyphPath(
     };
     let mut outline = crate::cgpath::Elements::default();
     crate::cgpath::glyph_outline(face.face(), glyph, m, &mut outline);
-    crate::cgpath::path_from(outline)
+    crate::cgpath::path_from(outline).cast()
 }
 
 /// `CGRect CGFontGetFontBBox(CGFontRef)`, the `head` table's, in font units.

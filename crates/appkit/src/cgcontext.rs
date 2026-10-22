@@ -6,22 +6,14 @@
 use std::ffi::{c_char, c_void};
 
 use corefoundation::base::CFTypeRef;
+use coregraphics::{CGAffineTransformMakeScale, CGAffineTransformMakeTranslation};
 use foundation::geometry::{NSPoint, NSRect, NSSize};
 use tiny_skia as sk;
 
-use crate::cgpath::Elements;
+use crate::cgpath::{Elements, cg_rect, ns_rect};
 use crate::quartz::{self, BitmapContext, Ink, Retained, State, context_of, state_of};
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CGAffineTransform {
-    pub a: f64,
-    pub b: f64,
-    pub c: f64,
-    pub d: f64,
-    pub tx: f64,
-    pub ty: f64,
-}
+pub use coregraphics::CGAffineTransform;
 
 pub const IDENTITY: CGAffineTransform = CGAffineTransform {
     a: 1.0,
@@ -31,27 +23,6 @@ pub const IDENTITY: CGAffineTransform = CGAffineTransform {
     tx: 0.0,
     ty: 0.0,
 };
-
-impl CGAffineTransform {
-    /// `self` then `then`, as `CGAffineTransformConcat(self, then)`.
-    pub fn then(self, then: CGAffineTransform) -> CGAffineTransform {
-        CGAffineTransform {
-            a: self.a * then.a + self.b * then.c,
-            b: self.a * then.b + self.b * then.d,
-            c: self.c * then.a + self.d * then.c,
-            d: self.c * then.b + self.d * then.d,
-            tx: self.tx * then.a + self.ty * then.c + then.tx,
-            ty: self.tx * then.b + self.ty * then.d + then.ty,
-        }
-    }
-
-    pub fn apply(self, x: f64, y: f64) -> (f64, f64) {
-        (
-            self.a * x + self.c * y + self.tx,
-            self.b * x + self.d * y + self.ty,
-        )
-    }
-}
 
 #[repr(C)]
 struct Color {
@@ -68,7 +39,6 @@ pub fn install() {
         c"v16@0:8",
     );
     corefoundation::base::register(c"__CGColor", None, size_of::<Color>(), true);
-    crate::cgpath::install();
     crate::cgpaint::install();
 }
 
@@ -683,7 +653,7 @@ pub unsafe extern "C" fn CGContextClosePath(context: CFTypeRef) {
 
 pub unsafe extern "C" fn CGContextAddRect(context: CFTypeRef, rect: NSRect) {
     if let Some((path, ctm)) = path(context) {
-        path.rect(ctm, rect);
+        path.rect(ctm, cg_rect(rect));
     }
 }
 
@@ -696,13 +666,13 @@ pub unsafe extern "C" fn CGContextAddRects(context: CFTypeRef, rects: *const NSR
     }
     // SAFETY: the caller supplies `count` rectangles.
     for rect in unsafe { std::slice::from_raw_parts(rects, count) } {
-        path.rect(ctm, *rect);
+        path.rect(ctm, cg_rect(*rect));
     }
 }
 
 pub unsafe extern "C" fn CGContextAddEllipseInRect(context: CFTypeRef, rect: NSRect) {
     if let Some((path, ctm)) = path(context) {
-        path.ellipse(ctm, rect);
+        path.ellipse(ctm, cg_rect(rect));
     }
 }
 
@@ -754,7 +724,7 @@ pub unsafe extern "C" fn CGContextAddLines(
 }
 
 pub unsafe extern "C" fn CGContextAddPath(context: CFTypeRef, other: CFTypeRef) {
-    let Some(source) = crate::cgpath::elements_of(other).map(|e| e.clone()) else {
+    let Some(source) = crate::cgpath::elements_of(other.cast()).map(|e| e.clone()) else {
         return;
     };
     if let Some((path, ctm)) = path(context) {
@@ -789,7 +759,7 @@ pub unsafe extern "C" fn CGContextGetPathBoundingBox(context: CFTypeRef) -> NSRe
     };
     let mut user = Elements::default();
     user.append(inverse, path);
-    user.bounds().unwrap_or(NULL_RECT)
+    user.bounds().map_or(NULL_RECT, ns_rect)
 }
 
 pub unsafe extern "C" fn CGContextReplacePathWithStrokedPath(context: CFTypeRef) {
@@ -858,7 +828,7 @@ fn shape(
 }
 
 pub unsafe extern "C" fn CGContextFillRect(context: CFTypeRef, rect: NSRect) {
-    if let Some(shape) = shape(context, |e, m| e.rect(m, rect)) {
+    if let Some(shape) = shape(context, |e, m| e.rect(m, cg_rect(rect))) {
         quartz::fill(context, &shape, sk::FillRule::Winding, false);
     }
 }
@@ -873,13 +843,15 @@ pub unsafe extern "C" fn CGContextFillRects(
     }
     // SAFETY: the caller supplies `count` rectangles.
     let rects = unsafe { std::slice::from_raw_parts(rects, count) };
-    if let Some(shape) = shape(context, |e, m| rects.iter().for_each(|r| e.rect(m, *r))) {
+    if let Some(shape) = shape(context, |e, m| {
+        rects.iter().for_each(|r| e.rect(m, cg_rect(*r)))
+    }) {
         quartz::fill(context, &shape, sk::FillRule::Winding, false);
     }
 }
 
 pub unsafe extern "C" fn CGContextStrokeRect(context: CFTypeRef, rect: NSRect) {
-    if let Some(shape) = shape(context, |e, m| e.rect(m, rect)) {
+    if let Some(shape) = shape(context, |e, m| e.rect(m, cg_rect(rect))) {
         quartz::stroke(context, &shape);
     }
 }
@@ -901,13 +873,13 @@ pub unsafe extern "C" fn CGContextStrokeRectWithWidth(
 }
 
 pub unsafe extern "C" fn CGContextFillEllipseInRect(context: CFTypeRef, rect: NSRect) {
-    if let Some(shape) = shape(context, |e, m| e.ellipse(m, rect)) {
+    if let Some(shape) = shape(context, |e, m| e.ellipse(m, cg_rect(rect))) {
         quartz::fill(context, &shape, sk::FillRule::Winding, false);
     }
 }
 
 pub unsafe extern "C" fn CGContextStrokeEllipseInRect(context: CFTypeRef, rect: NSRect) {
-    if let Some(shape) = shape(context, |e, m| e.ellipse(m, rect)) {
+    if let Some(shape) = shape(context, |e, m| e.ellipse(m, cg_rect(rect))) {
         quartz::stroke(context, &shape);
     }
 }
@@ -955,7 +927,7 @@ pub unsafe extern "C" fn CGContextEOClip(context: CFTypeRef) {
 }
 
 pub unsafe extern "C" fn CGContextClipToRect(context: CFTypeRef, rect: NSRect) {
-    if let Some(shape) = shape(context, |e, m| e.rect(m, rect)) {
+    if let Some(shape) = shape(context, |e, m| e.rect(m, cg_rect(rect))) {
         quartz::clip(context, &shape, sk::FillRule::Winding);
     }
 }
@@ -970,7 +942,9 @@ pub unsafe extern "C" fn CGContextClipToRects(
     }
     // SAFETY: the caller supplies `count` rectangles.
     let rects = unsafe { std::slice::from_raw_parts(rects, count) };
-    if let Some(shape) = shape(context, |e, m| rects.iter().for_each(|r| e.rect(m, *r))) {
+    if let Some(shape) = shape(context, |e, m| {
+        rects.iter().for_each(|r| e.rect(m, cg_rect(*r)))
+    }) {
         quartz::clip(context, &shape, sk::FillRule::Winding);
     }
 }
@@ -1246,69 +1220,6 @@ unsafe extern "C" fn CGPDFContextCreateWithURL(
     std::ptr::null()
 }
 
-//
-// Affine transforms
-//
-
-pub unsafe extern "C" fn CGAffineTransformMake(
-    a: f64,
-    b: f64,
-    c: f64,
-    d: f64,
-    tx: f64,
-    ty: f64,
-) -> CGAffineTransform {
-    CGAffineTransform { a, b, c, d, tx, ty }
-}
-
-pub unsafe extern "C" fn CGAffineTransformMakeScale(x: f64, y: f64) -> CGAffineTransform {
-    CGAffineTransform {
-        a: x,
-        d: y,
-        ..IDENTITY
-    }
-}
-
-pub unsafe extern "C" fn CGAffineTransformMakeTranslation(x: f64, y: f64) -> CGAffineTransform {
-    CGAffineTransform {
-        tx: x,
-        ty: y,
-        ..IDENTITY
-    }
-}
-
-pub unsafe extern "C" fn CGAffineTransformConcat(
-    first: CGAffineTransform,
-    second: CGAffineTransform,
-) -> CGAffineTransform {
-    first.then(second)
-}
-
-pub unsafe extern "C" fn CGAffineTransformScale(
-    transform: CGAffineTransform,
-    x: f64,
-    y: f64,
-) -> CGAffineTransform {
-    unsafe { CGAffineTransformMakeScale(x, y) }.then(transform)
-}
-
-pub unsafe extern "C" fn CGAffineTransformTranslate(
-    transform: CGAffineTransform,
-    x: f64,
-    y: f64,
-) -> CGAffineTransform {
-    unsafe { CGAffineTransformMakeTranslation(x, y) }.then(transform)
-}
-
-pub unsafe extern "C" fn CGAffineTransformInvert(t: CGAffineTransform) -> CGAffineTransform {
-    // A singular transform is returned unchanged, as Quartz documents.
-    t.inverse().unwrap_or(t)
-}
-
-pub unsafe extern "C" fn CGAffineTransformIsIdentity(t: CGAffineTransform) -> u8 {
-    u8::from(t == IDENTITY)
-}
-
 pub unsafe extern "C" fn CGRectApplyAffineTransform(rect: NSRect, t: CGAffineTransform) -> NSRect {
     let (x0, y0) = (rect.origin.x, rect.origin.y);
     let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
@@ -1545,14 +1456,6 @@ exports::exports! {
         "CGContextFlush" | "CGContextSynchronize" | "CGContextEndPage" => ignored_context,
         "CGContextBeginPage" => CGContextBeginPage,
         "CGPDFContextCreateWithURL" => CGPDFContextCreateWithURL,
-        "CGAffineTransformMake" => CGAffineTransformMake,
-        "CGAffineTransformMakeScale" => CGAffineTransformMakeScale,
-        "CGAffineTransformMakeTranslation" => CGAffineTransformMakeTranslation,
-        "CGAffineTransformConcat" => CGAffineTransformConcat,
-        "CGAffineTransformScale" => CGAffineTransformScale,
-        "CGAffineTransformTranslate" => CGAffineTransformTranslate,
-        "CGAffineTransformInvert" => CGAffineTransformInvert,
-        "CGAffineTransformIsIdentity" => CGAffineTransformIsIdentity,
         "CGRectApplyAffineTransform" => CGRectApplyAffineTransform,
         "CGColorCreate" => CGColorCreate,
         "CGColorCreateGenericRGB" => CGColorCreateGenericRGB,
@@ -1676,7 +1579,8 @@ mod tests {
             assert_eq!(CGContextGetCTM(context).d, 3.0);
             CGContextRestoreGState(context);
             assert_eq!(CGContextGetCTM(context), IDENTITY);
-            let inverse = CGAffineTransformInvert(CGAffineTransformMakeScale(2.0, 4.0));
+            let inverse =
+                coregraphics::CGAffineTransformInvert(CGAffineTransformMakeScale(2.0, 4.0));
             assert_eq!(inverse.a, 0.5);
             assert_eq!(inverse.d, 0.25);
             CGContextRelease(context);

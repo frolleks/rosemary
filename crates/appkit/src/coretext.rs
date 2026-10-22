@@ -731,7 +731,7 @@ pub unsafe extern "C" fn CTFontCreatePathForGlyph(
     };
     let mut outline = crate::cgpath::Elements::default();
     crate::cgpath::glyph_outline(face.face(), glyph, m, &mut outline);
-    crate::cgpath::path_from(outline)
+    crate::cgpath::path_from(outline).cast()
 }
 
 pub unsafe extern "C" fn CTFontDescriptorCopyAttribute(
