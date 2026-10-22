@@ -90,6 +90,7 @@ pub fn bootstrap() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         foundation::bootstrap();
+        coregraphics::bootstrap();
         decor::install();
         classes::install();
         alert::install();
@@ -321,7 +322,6 @@ exports::exports! {
         hitheme,
         launchservices,
         cgcontext,
-        cgpath,
         cgpaint,
         cgl,
     }

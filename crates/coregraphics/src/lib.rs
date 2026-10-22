@@ -1,5 +1,13 @@
-#![allow(non_camel_case_types, non_snake_case)]
+#![allow(
+    clippy::missing_safety_doc,
+    clippy::not_unsafe_ptr_arg_deref,
+    non_camel_case_types,
+    non_snake_case,
+    non_upper_case_globals
+)]
 use corefoundation::base::CFRuntimeBase;
+
+pub mod cgpath;
 
 pub type CGFloat = f64;
 
@@ -15,7 +23,7 @@ fn concat(t1: CGAffineTransform, t2: CGAffineTransform) -> CGAffineTransform {
 }
 
 #[repr(C)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CGPathElementType {
     kCGPathElementMoveToPoint,
     kCGPathElementAddLineToPoint,
@@ -110,18 +118,24 @@ pub struct CGAffineTransformComponents {
     pub translation: CGVector,
 }
 
+/// `CGPathElement`: a type and a pointer to its points, as `CGPathApply`
+/// hands one to an applier.
 #[repr(C)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct CGPathElement {
     pub element_type: CGPathElementType,
-    pub points: Vec<CGPoint>,
+    pub points: *const CGPoint,
 }
 
+/// A `CGPath`: its elements, in the coordinates they were added in.
+///
+/// `base` is first so the object is an Objective-C one, which is what
+/// `CFRetain`/`CFRelease` and `-isEqual:` go through.
 #[repr(C)]
 pub struct CGPath {
-    base: CFRuntimeBase,
-    mutable: bool,
-    elements: Vec<CGPathElement>,
+    pub(crate) base: CFRuntimeBase,
+    pub(crate) mutable: bool,
+    pub(crate) elements: cgpath::Elements,
 }
 
 pub type CGPathRef = *const CGPath;
@@ -247,11 +261,11 @@ pub unsafe extern "C" fn CGAffineTransformEqualToTransform(
 pub fn bootstrap() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
+        cgpath::install();
         // Each module that owns a class registers it here as it arrives:
         //   graphics::install()   __CGColorSpace, __CGDataProvider,
         //                         __CGImage, __CGImageSource
         //   cgcontext::install()  __CGContext, __CGColor
-        //   cgpath::install()     __CGPath
         //   cgpaint::install()    __CGPattern, __CGFunction, __CGShading,
         //                         __CGLayer
     });
@@ -283,7 +297,9 @@ exports::exports! {
         "CGAffineTransformIsIdentity" => CGAffineTransformIsIdentity,
         "CGAffineTransformEqualToTransform" => CGAffineTransformEqualToTransform,
     }
-
+    groups {
+        cgpath,
+    }
 }
 
 #[cfg(test)]

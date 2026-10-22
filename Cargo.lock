@@ -161,6 +161,7 @@ version = "0.4.0"
 dependencies = [
  "chrome",
  "corefoundation",
+ "coregraphics",
  "darwin",
  "exports",
  "foundation",
@@ -622,10 +623,12 @@ dependencies = [
 
 [[package]]
 name = "coregraphics"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "corefoundation",
  "exports",
+ "objc",
+ "tiny-skia",
 ]
 
 [[package]]

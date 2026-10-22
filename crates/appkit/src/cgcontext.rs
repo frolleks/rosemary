@@ -10,7 +10,7 @@ use coregraphics::{CGAffineTransformMakeScale, CGAffineTransformMakeTranslation}
 use foundation::geometry::{NSPoint, NSRect, NSSize};
 use tiny_skia as sk;
 
-use crate::cgpath::Elements;
+use crate::cgpath::{Elements, cg_rect, ns_rect};
 use crate::quartz::{self, BitmapContext, Ink, Retained, State, context_of, state_of};
 
 pub use coregraphics::CGAffineTransform;
@@ -39,7 +39,6 @@ pub fn install() {
         c"v16@0:8",
     );
     corefoundation::base::register(c"__CGColor", None, size_of::<Color>(), true);
-    crate::cgpath::install();
     crate::cgpaint::install();
 }
 
@@ -654,7 +653,7 @@ pub unsafe extern "C" fn CGContextClosePath(context: CFTypeRef) {
 
 pub unsafe extern "C" fn CGContextAddRect(context: CFTypeRef, rect: NSRect) {
     if let Some((path, ctm)) = path(context) {
-        path.rect(ctm, rect);
+        path.rect(ctm, cg_rect(rect));
     }
 }
 
@@ -667,13 +666,13 @@ pub unsafe extern "C" fn CGContextAddRects(context: CFTypeRef, rects: *const NSR
     }
     // SAFETY: the caller supplies `count` rectangles.
     for rect in unsafe { std::slice::from_raw_parts(rects, count) } {
-        path.rect(ctm, *rect);
+        path.rect(ctm, cg_rect(*rect));
     }
 }
 
 pub unsafe extern "C" fn CGContextAddEllipseInRect(context: CFTypeRef, rect: NSRect) {
     if let Some((path, ctm)) = path(context) {
-        path.ellipse(ctm, rect);
+        path.ellipse(ctm, cg_rect(rect));
     }
 }
 
@@ -725,7 +724,7 @@ pub unsafe extern "C" fn CGContextAddLines(
 }
 
 pub unsafe extern "C" fn CGContextAddPath(context: CFTypeRef, other: CFTypeRef) {
-    let Some(source) = crate::cgpath::elements_of(other).map(|e| e.clone()) else {
+    let Some(source) = crate::cgpath::elements_of(other.cast()).map(|e| e.clone()) else {
         return;
     };
     if let Some((path, ctm)) = path(context) {
@@ -760,7 +759,7 @@ pub unsafe extern "C" fn CGContextGetPathBoundingBox(context: CFTypeRef) -> NSRe
     };
     let mut user = Elements::default();
     user.append(inverse, path);
-    user.bounds().unwrap_or(NULL_RECT)
+    user.bounds().map_or(NULL_RECT, ns_rect)
 }
 
 pub unsafe extern "C" fn CGContextReplacePathWithStrokedPath(context: CFTypeRef) {
@@ -829,7 +828,7 @@ fn shape(
 }
 
 pub unsafe extern "C" fn CGContextFillRect(context: CFTypeRef, rect: NSRect) {
-    if let Some(shape) = shape(context, |e, m| e.rect(m, rect)) {
+    if let Some(shape) = shape(context, |e, m| e.rect(m, cg_rect(rect))) {
         quartz::fill(context, &shape, sk::FillRule::Winding, false);
     }
 }
@@ -844,13 +843,15 @@ pub unsafe extern "C" fn CGContextFillRects(
     }
     // SAFETY: the caller supplies `count` rectangles.
     let rects = unsafe { std::slice::from_raw_parts(rects, count) };
-    if let Some(shape) = shape(context, |e, m| rects.iter().for_each(|r| e.rect(m, *r))) {
+    if let Some(shape) = shape(context, |e, m| {
+        rects.iter().for_each(|r| e.rect(m, cg_rect(*r)))
+    }) {
         quartz::fill(context, &shape, sk::FillRule::Winding, false);
     }
 }
 
 pub unsafe extern "C" fn CGContextStrokeRect(context: CFTypeRef, rect: NSRect) {
-    if let Some(shape) = shape(context, |e, m| e.rect(m, rect)) {
+    if let Some(shape) = shape(context, |e, m| e.rect(m, cg_rect(rect))) {
         quartz::stroke(context, &shape);
     }
 }
@@ -872,13 +873,13 @@ pub unsafe extern "C" fn CGContextStrokeRectWithWidth(
 }
 
 pub unsafe extern "C" fn CGContextFillEllipseInRect(context: CFTypeRef, rect: NSRect) {
-    if let Some(shape) = shape(context, |e, m| e.ellipse(m, rect)) {
+    if let Some(shape) = shape(context, |e, m| e.ellipse(m, cg_rect(rect))) {
         quartz::fill(context, &shape, sk::FillRule::Winding, false);
     }
 }
 
 pub unsafe extern "C" fn CGContextStrokeEllipseInRect(context: CFTypeRef, rect: NSRect) {
-    if let Some(shape) = shape(context, |e, m| e.ellipse(m, rect)) {
+    if let Some(shape) = shape(context, |e, m| e.ellipse(m, cg_rect(rect))) {
         quartz::stroke(context, &shape);
     }
 }
@@ -926,7 +927,7 @@ pub unsafe extern "C" fn CGContextEOClip(context: CFTypeRef) {
 }
 
 pub unsafe extern "C" fn CGContextClipToRect(context: CFTypeRef, rect: NSRect) {
-    if let Some(shape) = shape(context, |e, m| e.rect(m, rect)) {
+    if let Some(shape) = shape(context, |e, m| e.rect(m, cg_rect(rect))) {
         quartz::clip(context, &shape, sk::FillRule::Winding);
     }
 }
@@ -941,7 +942,9 @@ pub unsafe extern "C" fn CGContextClipToRects(
     }
     // SAFETY: the caller supplies `count` rectangles.
     let rects = unsafe { std::slice::from_raw_parts(rects, count) };
-    if let Some(shape) = shape(context, |e, m| rects.iter().for_each(|r| e.rect(m, *r))) {
+    if let Some(shape) = shape(context, |e, m| {
+        rects.iter().for_each(|r| e.rect(m, cg_rect(*r)))
+    }) {
         quartz::clip(context, &shape, sk::FillRule::Winding);
     }
 }

@@ -7,3 +7,5 @@ license.workspace = true
 [dependencies]
 corefoundation.workspace = true
 exports.workspace = true
+objc.workspace = true
+tiny-skia.workspace = true

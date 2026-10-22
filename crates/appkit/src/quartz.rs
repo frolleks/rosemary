@@ -1108,7 +1108,7 @@ pub(crate) fn draw_shading(context: CFTypeRef, shading: Shading) {
                 match shading.extend.1 {
                     true => region.rect(
                         IDENTITY,
-                        NSRect {
+                        crate::cgpath::cg_rect(NSRect {
                             origin: NSPoint {
                                 x: -reach,
                                 y: -reach,
@@ -1117,11 +1117,11 @@ pub(crate) fn draw_shading(context: CFTypeRef, shading: Shading) {
                                 width: reach * 2.0,
                                 height: reach * 2.0,
                             },
-                        },
+                        }),
                     ),
                     false => region.ellipse(
                         IDENTITY,
-                        NSRect {
+                        crate::cgpath::cg_rect(NSRect {
                             origin: NSPoint {
                                 x: shading.end.0 - r1,
                                 y: shading.end.1 - r1,
@@ -1130,7 +1130,7 @@ pub(crate) fn draw_shading(context: CFTypeRef, shading: Shading) {
                                 width: r1 * 2.0,
                                 height: r1 * 2.0,
                             },
-                        },
+                        }),
                     ),
                 }
                 // Concentric circles are exact: the gradient runs from the
