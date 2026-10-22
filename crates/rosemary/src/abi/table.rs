@@ -785,6 +785,12 @@ pub static SIGNATURES: &[FunctionAbi] = &[
         I32,
         F64
     ),
+    sig!("CGPathCreateCopyByFlattening", P, P, F64),
+    sig!("CGPathCreateCopyByNormalizing", P, P, BOOL),
+    sig!("CGPathCreateCopyByUnioningPath", P, P, P, BOOL),
+    sig!("CGPathCreateCopyByIntersectingPath", P, P, P, BOOL),
+    sig!("CGPathCreateCopyBySubtractingPath", P, P, P, BOOL),
+    sig!("CGPathCreateCopyBySymmetricDifferenceOfPath", P, P, P, BOOL),
     // The applier is argument two, and the host calls it once per element.
     cbsig!([2], "CGPathApply", V, P, P, P),
     // Everything SDL3's Cocoa backend asks about a screen: which displays

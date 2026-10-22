@@ -8,6 +8,8 @@
 
 use std::ffi::c_void;
 
+use i_overlay::float::single::SingleFloatOverlay;
+
 use crate::{
     CGAffineTransform, CGAffineTransformIdentity, CGMutablePathRef, CGPath, CGPathElement,
     CGPathElementType, CGPathRef, CGPoint, CGRect, CGSize,
@@ -388,6 +390,156 @@ impl Elements {
         }
         out
     }
+
+    /// `CGPathCreateCopyByFlattening`: every curve replaced by line segments
+    /// no further than `threshold` from it.
+    pub fn flattened(&self, threshold: f64) -> Elements {
+        let mut out = Elements::default();
+        let mut pen: Option<Point> = None;
+        let mut subpath: Option<Point> = None;
+        for element in &self.list {
+            match *element {
+                Element::Move(p) => {
+                    out.move_to(CGAffineTransformIdentity, p.0, p.1);
+                    pen = Some(p);
+                    subpath = Some(p);
+                }
+                Element::Line(p) => {
+                    out.line_to(CGAffineTransformIdentity, p.0, p.1);
+                    pen = Some(p);
+                }
+                Element::Quad(c, p) => {
+                    if let Some(start) = pen {
+                        flatten_quad(&mut out, start, c, p, threshold);
+                    }
+                    pen = Some(p);
+                }
+                Element::Cubic(c1, c2, p) => {
+                    if let Some(start) = pen {
+                        flatten_cubic(&mut out, start, c1, c2, p, threshold, 0);
+                    }
+                    pen = Some(p);
+                }
+                Element::Close => {
+                    out.close();
+                    pen = subpath;
+                }
+            }
+        }
+        out
+    }
+
+    /// The path as closed contours of line segments, which is what the boolean
+    /// engine takes. Curves are flattened at `threshold`, and an open subpath
+    /// is closed because a boolean operation treats a path as a filled region.
+    pub fn contours(&self, threshold: f64) -> Vec<Vec<[f64; 2]>> {
+        let flat = self.flattened(threshold);
+        let mut out: Vec<Vec<[f64; 2]>> = Vec::new();
+        let mut current: Vec<[f64; 2]> = Vec::new();
+        for element in &flat.list {
+            match *element {
+                Element::Move(p) => {
+                    if current.len() > 2 {
+                        out.push(std::mem::take(&mut current));
+                    } else {
+                        current.clear();
+                    }
+                    current.push([p.0, p.1]);
+                }
+                Element::Line(p) => current.push([p.0, p.1]),
+                Element::Close => {
+                    if current.len() > 2 {
+                        out.push(std::mem::take(&mut current));
+                    } else {
+                        current.clear();
+                    }
+                }
+                // `flattened` emits no curves.
+                Element::Quad(..) | Element::Cubic(..) => {}
+            }
+        }
+        if current.len() > 2 {
+            out.push(current);
+        }
+        out
+    }
+
+    /// The elements of a boolean result: one closed contour per shape contour.
+    pub fn from_contours(shapes: &[Vec<Vec<[f64; 2]>>]) -> Elements {
+        let mut out = Elements::default();
+        for shape in shapes {
+            for contour in shape {
+                let Some((first, rest)) = contour.split_first() else {
+                    continue;
+                };
+                out.move_to(CGAffineTransformIdentity, first[0], first[1]);
+                for p in rest {
+                    out.line_to(CGAffineTransformIdentity, p[0], p[1]);
+                }
+                out.close();
+            }
+        }
+        out
+    }
+}
+
+/// The most subdivisions a curve may take before it is accepted as flat.
+///
+/// Totality: a curve whose control points never converge would otherwise
+/// recurse until the stack runs out.
+const MAX_FLATTEN_DEPTH: u32 = 24;
+
+fn midpoint(a: Point, b: Point) -> Point {
+    ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0)
+}
+
+/// The distance from `p` to the line through `a` and `b`, or to `a` when the
+/// line has no length.
+fn distance_to_line(p: Point, a: Point, b: Point) -> f64 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let length = dx.hypot(dy);
+    if length == 0.0 {
+        return (p.0 - a.0).hypot(p.1 - a.1);
+    }
+    ((p.0 - a.0) * dy - (p.1 - a.1) * dx).abs() / length
+}
+
+fn flatten_cubic(
+    out: &mut Elements,
+    p0: Point,
+    p1: Point,
+    p2: Point,
+    p3: Point,
+    threshold: f64,
+    depth: u32,
+) {
+    let flat =
+        distance_to_line(p1, p0, p3) <= threshold && distance_to_line(p2, p0, p3) <= threshold;
+    if flat || depth >= MAX_FLATTEN_DEPTH {
+        out.line_to(CGAffineTransformIdentity, p3.0, p3.1);
+        return;
+    }
+    let p01 = midpoint(p0, p1);
+    let p12 = midpoint(p1, p2);
+    let p23 = midpoint(p2, p3);
+    let p012 = midpoint(p01, p12);
+    let p123 = midpoint(p12, p23);
+    let p0123 = midpoint(p012, p123);
+    flatten_cubic(out, p0, p01, p012, p0123, threshold, depth + 1);
+    flatten_cubic(out, p0123, p123, p23, p3, threshold, depth + 1);
+}
+
+fn flatten_quad(out: &mut Elements, p0: Point, c: Point, p2: Point, threshold: f64) {
+    // Degree elevation: the same curve as a cubic.
+    let c1 = (
+        p0.0 + 2.0 / 3.0 * (c.0 - p0.0),
+        p0.1 + 2.0 / 3.0 * (c.1 - p0.1),
+    );
+    let c2 = (
+        p2.0 + 2.0 / 3.0 * (c.0 - p2.0),
+        p2.1 + 2.0 / 3.0 * (c.1 - p2.1),
+    );
+    flatten_cubic(out, p0, c1, c2, p2, threshold, 0);
 }
 
 /// A new path object holding `elements`, which the caller owns.
@@ -605,6 +757,128 @@ pub unsafe extern "C" fn CGPathCreateCopyByStrokingPath(
     new_path(
         Elements::from_skia(&outline, CGAffineTransformIdentity),
         false,
+    )
+}
+
+/// `CGPathRef CGPathCreateCopyByFlattening(CGPathRef path, CGFloat threshold)`
+pub unsafe extern "C" fn CGPathCreateCopyByFlattening(
+    path: CGPathRef,
+    threshold: f64,
+) -> CGPathRef {
+    let Some(source) = elements_of(path) else {
+        return std::ptr::null();
+    };
+    new_path(source.flattened(threshold), false)
+}
+
+/// The tolerance the boolean forms flatten curves at.
+///
+/// FIXME (ACCURACY): Apple intersects the curves exactly; this flattens them
+/// first, so a result can differ by up to this much.
+const BOOLEAN_FLATTENING: f64 = 0.05;
+
+/// The fill rule a boolean call names.
+fn fill_rule(even_odd: bool) -> i_overlay::core::fill_rule::FillRule {
+    match even_odd {
+        true => i_overlay::core::fill_rule::FillRule::EvenOdd,
+        false => i_overlay::core::fill_rule::FillRule::NonZero,
+    }
+}
+
+/// `CGPathCreateCopyBy{Unioning,Intersecting,Subtracting,SymmetricDifference}Path`
+fn boolean(
+    path: CGPathRef,
+    mask: CGPathRef,
+    even_odd: bool,
+    rule: i_overlay::core::overlay_rule::OverlayRule,
+) -> CGPathRef {
+    let Some(subject) = elements_of(path) else {
+        return std::ptr::null();
+    };
+    let Some(clip) = elements_of(mask) else {
+        return std::ptr::null();
+    };
+    let subject = subject.contours(BOOLEAN_FLATTENING);
+    let clip = clip.contours(BOOLEAN_FLATTENING);
+    let shapes = subject.overlay(&clip, rule, fill_rule(even_odd));
+    new_path(Elements::from_contours(&shapes), false)
+}
+
+/// `CGPathRef CGPathCreateCopyByNormalizing(CGPathRef path, bool evenOddFillRule)`
+pub unsafe extern "C" fn CGPathCreateCopyByNormalizing(
+    path: CGPathRef,
+    even_odd: bool,
+) -> CGPathRef {
+    let Some(subject) = elements_of(path) else {
+        return std::ptr::null();
+    };
+    let contours = subject.contours(BOOLEAN_FLATTENING);
+    let empty: Vec<Vec<[f64; 2]>> = Vec::new();
+    let shapes = contours.overlay(
+        &empty,
+        i_overlay::core::overlay_rule::OverlayRule::Subject,
+        fill_rule(even_odd),
+    );
+    new_path(Elements::from_contours(&shapes), false)
+}
+
+/// `CGPathRef CGPathCreateCopyByUnioningPath(CGPathRef path, CGPathRef mask,
+/// bool evenOddFillRule)`
+pub unsafe extern "C" fn CGPathCreateCopyByUnioningPath(
+    path: CGPathRef,
+    mask: CGPathRef,
+    even_odd: bool,
+) -> CGPathRef {
+    boolean(
+        path,
+        mask,
+        even_odd,
+        i_overlay::core::overlay_rule::OverlayRule::Union,
+    )
+}
+
+/// `CGPathRef CGPathCreateCopyByIntersectingPath(CGPathRef path,
+/// CGPathRef mask, bool evenOddFillRule)`
+pub unsafe extern "C" fn CGPathCreateCopyByIntersectingPath(
+    path: CGPathRef,
+    mask: CGPathRef,
+    even_odd: bool,
+) -> CGPathRef {
+    boolean(
+        path,
+        mask,
+        even_odd,
+        i_overlay::core::overlay_rule::OverlayRule::Intersect,
+    )
+}
+
+/// `CGPathRef CGPathCreateCopyBySubtractingPath(CGPathRef path,
+/// CGPathRef mask, bool evenOddFillRule)`
+pub unsafe extern "C" fn CGPathCreateCopyBySubtractingPath(
+    path: CGPathRef,
+    mask: CGPathRef,
+    even_odd: bool,
+) -> CGPathRef {
+    boolean(
+        path,
+        mask,
+        even_odd,
+        i_overlay::core::overlay_rule::OverlayRule::Difference,
+    )
+}
+
+/// `CGPathRef CGPathCreateCopyBySymmetricDifferenceOfPath(CGPathRef path,
+/// CGPathRef mask, bool evenOddFillRule)`
+pub unsafe extern "C" fn CGPathCreateCopyBySymmetricDifferenceOfPath(
+    path: CGPathRef,
+    mask: CGPathRef,
+    even_odd: bool,
+) -> CGPathRef {
+    boolean(
+        path,
+        mask,
+        even_odd,
+        i_overlay::core::overlay_rule::OverlayRule::Xor,
     )
 }
 
@@ -1015,6 +1289,12 @@ exports::exports! {
         "CGPathCreateWithRoundedRect" => CGPathCreateWithRoundedRect,
         "CGPathCreateCopyByDashingPath" => CGPathCreateCopyByDashingPath,
         "CGPathCreateCopyByStrokingPath" => CGPathCreateCopyByStrokingPath,
+        "CGPathCreateCopyByFlattening" => CGPathCreateCopyByFlattening,
+        "CGPathCreateCopyByNormalizing" => CGPathCreateCopyByNormalizing,
+        "CGPathCreateCopyByUnioningPath" => CGPathCreateCopyByUnioningPath,
+        "CGPathCreateCopyByIntersectingPath" => CGPathCreateCopyByIntersectingPath,
+        "CGPathCreateCopyBySubtractingPath" => CGPathCreateCopyBySubtractingPath,
+        "CGPathCreateCopyBySymmetricDifferenceOfPath" => CGPathCreateCopyBySymmetricDifferenceOfPath,
         "CGPathRetain" => CGPathRetain,
         "CGPathRelease" => CGPathRelease,
         "CGPathMoveToPoint" => CGPathMoveToPoint,
@@ -1187,5 +1467,77 @@ mod tests {
         triangle.line_to(CGAffineTransformIdentity, 0.0, 1.0);
         triangle.close();
         assert_eq!(triangle.as_rect(), None);
+    }
+
+    #[test]
+    fn flattening_leaves_only_lines_and_keeps_the_endpoints() {
+        let mut e = Elements::default();
+        e.move_to(CGAffineTransformIdentity, 0.0, 0.0);
+        e.cubic_to(CGAffineTransformIdentity, 0.0, 10.0, 10.0, 10.0, 10.0, 0.0);
+        let flat = e.flattened(0.1);
+        assert!(flat.list.iter().all(|element| matches!(
+            element,
+            Element::Move(_) | Element::Line(_) | Element::Close
+        )));
+        assert!(flat.list.len() > 2, "a curve should become several lines");
+        assert_eq!(flat.current, Some((10.0, 0.0)));
+    }
+
+    #[test]
+    fn a_rect_is_one_contour_of_four_points() {
+        let mut e = Elements::default();
+        e.rect(
+            CGAffineTransformIdentity,
+            crate::CGRect {
+                origin: crate::CGPoint { x: 0.0, y: 0.0 },
+                size: crate::CGSize {
+                    width: 10.0,
+                    height: 20.0,
+                },
+            },
+        );
+        let contours = e.contours(0.1);
+        assert_eq!(contours.len(), 1);
+        assert_eq!(contours[0].len(), 4);
+    }
+
+    #[test]
+    fn intersecting_two_rects_is_their_overlap() {
+        crate::bootstrap();
+        let a = unsafe {
+            CGPathCreateWithRect(
+                crate::CGRect {
+                    origin: crate::CGPoint { x: 0.0, y: 0.0 },
+                    size: crate::CGSize {
+                        width: 10.0,
+                        height: 10.0,
+                    },
+                },
+                std::ptr::null(),
+            )
+        };
+        let b = unsafe {
+            CGPathCreateWithRect(
+                crate::CGRect {
+                    origin: crate::CGPoint { x: 5.0, y: 5.0 },
+                    size: crate::CGSize {
+                        width: 10.0,
+                        height: 10.0,
+                    },
+                },
+                std::ptr::null(),
+            )
+        };
+        let overlap = unsafe { CGPathCreateCopyByIntersectingPath(a, b, false) };
+        let bounds = unsafe { CGPathGetBoundingBox(overlap) };
+        assert!((bounds.origin.x - 5.0).abs() < 1e-6);
+        assert!((bounds.origin.y - 5.0).abs() < 1e-6);
+        assert!((bounds.size.width - 5.0).abs() < 1e-6);
+        assert!((bounds.size.height - 5.0).abs() < 1e-6);
+        unsafe {
+            CGPathRelease(a);
+            CGPathRelease(b);
+            CGPathRelease(overlap);
+        }
     }
 }
