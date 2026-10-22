@@ -1069,7 +1069,7 @@ pub(crate) fn draw_shading(context: CFTypeRef, shading: Shading) {
         .map(|(x, y)| device_to_user.apply(x, y));
         let reach = corners
             .iter()
-            .flat_map(|(x, y)| [x.abs(), y.abs()])
+            .flat_map(|p| [p.x.abs(), p.y.abs()])
             .fold(0.0f64, f64::max)
             * 4.0
             + 1.0;
@@ -1252,7 +1252,7 @@ mod tests {
             ty: -7.0,
         };
         let back = t.then(t.inverse().expect("invertible"));
-        let (x, y) = back.apply(1.25, -3.5);
-        assert!((x - 1.25).abs() < 1e-9 && (y + 3.5).abs() < 1e-9);
+        let p = back.apply(1.25, -3.5);
+        assert!((p.x - 1.25).abs() < 1e-9 && (p.y + 3.5).abs() < 1e-9);
     }
 }

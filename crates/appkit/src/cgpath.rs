@@ -1,7 +1,7 @@
 //! The path type, from `coregraphics`, and the glyph outlines this crate
 //! builds with it.
 
-pub use coregraphics::cgpath::{Element, Elements, Point, elements_of, path_from};
+pub use coregraphics::cgpath::{Elements, elements_of, path_from};
 
 use coregraphics::{CGPoint, CGRect, CGSize};
 use foundation::geometry::{NSPoint, NSRect, NSSize};

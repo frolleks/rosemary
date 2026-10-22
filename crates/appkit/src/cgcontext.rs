@@ -741,9 +741,9 @@ pub unsafe extern "C" fn CGContextGetPathCurrentPoint(context: CFTypeRef) -> NSP
         return NSPoint::default();
     };
     match (path.current, ctm.inverse()) {
-        (Some((x, y)), Some(inverse)) => {
-            let (x, y) = inverse.apply(x, y);
-            NSPoint { x, y }
+        (Some(p), Some(inverse)) => {
+            let p = inverse.apply(p.x, p.y);
+            NSPoint { x: p.x, y: p.y }
         }
         _ => NSPoint::default(),
     }
@@ -1096,9 +1096,9 @@ fn show_glyphs(context: CFTypeRef, glyphs: &[u16], advances: &[(f64, f64)]) {
     }
     quartz::draw_glyphs(context, &face, size, glyphs, &positions);
     if let Some(state) = gstate(context) {
-        let (tx, ty) = state.text_matrix.apply(pen.0, pen.1);
-        state.text_matrix.tx = tx;
-        state.text_matrix.ty = ty;
+        let p = state.text_matrix.apply(pen.0, pen.1);
+        state.text_matrix.tx = p.x;
+        state.text_matrix.ty = p.y;
     }
 }
 
@@ -1231,7 +1231,7 @@ pub unsafe extern "C" fn CGRectApplyAffineTransform(rect: NSRect, t: CGAffineTra
     ];
     let [left, bottom, right, top] = corners.iter().fold(
         [f64::MAX, f64::MAX, f64::MIN, f64::MIN],
-        |[l, b, r, t], &(x, y)| [l.min(x), b.min(y), r.max(x), t.max(y)],
+        |[l, b, r, t], p| [l.min(p.x), b.min(p.y), r.max(p.x), t.max(p.y)],
     );
     NSRect {
         origin: NSPoint { x: left, y: bottom },

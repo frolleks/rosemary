@@ -25,10 +25,10 @@ fn concat(t1: CGAffineTransform, t2: CGAffineTransform) -> CGAffineTransform {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CGPathElementType {
-    kCGPathElementMoveToPoint,
-    kCGPathElementAddLineToPoint,
-    kCGPathElementAddQuadCurveToPoint,
-    kCGPathElementAddCurveToPoint,
+    kCGPathElementMoveToPoint(CGPoint),
+    kCGPathElementAddLineToPoint(CGPoint),
+    kCGPathElementAddQuadCurveToPoint(CGPoint, CGPoint),
+    kCGPathElementAddCurveToPoint(CGPoint, CGPoint, CGPoint),
     kCGPathElementCloseSubpath,
 }
 
@@ -84,11 +84,11 @@ impl CGAffineTransform {
         }
     }
 
-    pub fn apply(self, x: f64, y: f64) -> (f64, f64) {
-        (
-            self.a * x + self.c * y + self.tx,
-            self.b * x + self.d * y + self.ty,
-        )
+    pub fn apply(self, x: CGFloat, y: CGFloat) -> CGPoint {
+        CGPoint {
+            x: self.a * x + self.c * y + self.tx,
+            y: self.b * x + self.d * y + self.ty,
+        }
     }
 
     /// The inverse, or `None` for a singular transform.

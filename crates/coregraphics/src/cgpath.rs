@@ -11,29 +11,18 @@ use std::ffi::c_void;
 use i_overlay::float::single::SingleFloatOverlay;
 
 use crate::{
-    CGAffineTransform, CGAffineTransformIdentity, CGMutablePathRef, CGPath, CGPathElement,
+    CGAffineTransform, CGAffineTransformIdentity, CGFloat, CGMutablePathRef, CGPath, CGPathElement,
     CGPathElementType, CGPathRef, CGPoint, CGRect, CGSize,
 };
-
-pub type Point = (f64, f64);
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Element {
-    Move(Point),
-    Line(Point),
-    Quad(Point, Point),
-    Cubic(Point, Point, Point),
-    Close,
-}
 
 /// A sequence of elements, with the point the next element starts from.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Elements {
-    pub list: Vec<Element>,
+    pub list: Vec<CGPathElementType>,
     /// The current point, if there is one.
-    pub current: Option<Point>,
+    pub current: Option<CGPoint>,
     /// Where the current subpath began, which a close returns to.
-    start: Option<Point>,
+    start: Option<CGPoint>,
 }
 
 /// `4/3 * (sqrt(2) - 1)`: the control distance that makes a cubic a quarter
@@ -49,30 +38,43 @@ impl Elements {
         *self = Elements::default();
     }
 
-    pub fn move_to(&mut self, m: CGAffineTransform, x: f64, y: f64) {
+    pub fn move_to(&mut self, m: CGAffineTransform, x: CGFloat, y: CGFloat) {
         let p = m.apply(x, y);
-        self.list.push(Element::Move(p));
+        self.list
+            .push(CGPathElementType::kCGPathElementMoveToPoint(p));
         self.current = Some(p);
         self.start = Some(p);
     }
 
     /// A line, or a move when there is nowhere to draw from - which is what
     /// Quartz does rather than refuse.
-    pub fn line_to(&mut self, m: CGAffineTransform, x: f64, y: f64) {
+    pub fn line_to(&mut self, m: CGAffineTransform, x: CGFloat, y: CGFloat) {
         if self.current.is_none() {
             return self.move_to(m, x, y);
         }
         let p = m.apply(x, y);
-        self.list.push(Element::Line(p));
+        self.list
+            .push(CGPathElementType::kCGPathElementAddLineToPoint(p));
         self.current = Some(p);
     }
 
-    pub fn quad_to(&mut self, m: CGAffineTransform, cx: f64, cy: f64, x: f64, y: f64) {
+    pub fn quad_to(
+        &mut self,
+        m: CGAffineTransform,
+        cx: CGFloat,
+        cy: CGFloat,
+        x: CGFloat,
+        y: CGFloat,
+    ) {
         if self.current.is_none() {
             self.move_to(m, cx, cy);
         }
         let p = m.apply(x, y);
-        self.list.push(Element::Quad(m.apply(cx, cy), p));
+        self.list
+            .push(CGPathElementType::kCGPathElementAddQuadCurveToPoint(
+                m.apply(cx, cy),
+                p,
+            ));
         self.current = Some(p);
     }
 
@@ -92,15 +94,25 @@ impl Elements {
         }
         let p = m.apply(x, y);
         self.list
-            .push(Element::Cubic(m.apply(c1x, c1y), m.apply(c2x, c2y), p));
+            .push(CGPathElementType::kCGPathElementAddCurveToPoint(
+                m.apply(c1x, c1y),
+                m.apply(c2x, c2y),
+                p,
+            ));
         self.current = Some(p);
     }
 
     pub fn close(&mut self) {
-        if self.current.is_none() || matches!(self.list.last(), Some(Element::Close) | None) {
+        if self.current.is_none()
+            || matches!(
+                self.list.last(),
+                Some(CGPathElementType::kCGPathElementCloseSubpath) | None
+            )
+        {
             return;
         }
-        self.list.push(Element::Close);
+        self.list
+            .push(CGPathElementType::kCGPathElementCloseSubpath);
         self.current = self.start;
     }
 
@@ -128,56 +140,42 @@ impl Elements {
         let rx = corner_width.clamp(0.0, r.size.width.abs() / 2.0);
         let ry = corner_height.clamp(0.0, r.size.height.abs() / 2.0);
         let (kx, ky) = (rx * KAPPA, ry * KAPPA);
-        self.move_to(m, x0 + rx, y0);
-        self.line_to(m, x1 - rx, y0);
-        self.cubic_to(m, x1 - rx + kx, y0, x1, y0 + ry - ky, x1, y0 + ry);
+        // Quartz starts at the middle of the right edge and goes
+        // counterclockwise, which is what `CGPathApply` reports and what a
+        // dashed or stroked copy inherits.
+        self.move_to(m, x1, (y0 + y1) / 2.0);
         self.line_to(m, x1, y1 - ry);
         self.cubic_to(m, x1, y1 - ry + ky, x1 - rx + kx, y1, x1 - rx, y1);
         self.line_to(m, x0 + rx, y1);
         self.cubic_to(m, x0 + rx - kx, y1, x0, y1 - ry + ky, x0, y1 - ry);
         self.line_to(m, x0, y0 + ry);
         self.cubic_to(m, x0, y0 + ry - ky, x0 + rx - kx, y0, x0 + rx, y0);
+        self.line_to(m, x1 - rx, y0);
+        self.cubic_to(m, x1 - rx + kx, y0, x1, y0 + ry - ky, x1, y0 + ry);
         self.close();
     }
 
-    /// The rectangle this path is, if it is exactly one: a move, three lines
-    /// and a close (or four lines, the last returning to the start), with
-    /// every side axis-aligned.
+    /// The rectangle this path is, if it is exactly one in the order
+    /// `CGPathCreateWithRect` emits: the minimum corner, then +x, +y, -x.
     pub fn as_rect(&self) -> Option<CGRect> {
-        let (a, c) = match self.list.as_slice() {
-            [
-                Element::Move(a),
-                Element::Line(_),
-                Element::Line(c),
-                Element::Line(_),
-                Element::Close,
-            ] => (a, c),
-            [
-                Element::Move(a),
-                Element::Line(_),
-                Element::Line(c),
-                Element::Line(_),
-                Element::Line(e),
-                Element::Close,
-            ] if e == a => (a, c),
-            _ => return None,
+        let [
+            CGPathElementType::kCGPathElementMoveToPoint(a),
+            CGPathElementType::kCGPathElementAddLineToPoint(b),
+            CGPathElementType::kCGPathElementAddLineToPoint(c),
+            CGPathElementType::kCGPathElementAddLineToPoint(d),
+            CGPathElementType::kCGPathElementCloseSubpath,
+        ] = self.list.as_slice()
+        else {
+            return None;
         };
-        let axis = |p: Point, q: Point| p.0 == q.0 || p.1 == q.1;
-        let points = self.list.iter().filter_map(|e| match *e {
-            Element::Move(p) | Element::Line(p) => Some(p),
-            _ => None,
-        });
-        let points: Vec<Point> = points.collect();
-        if !points.windows(2).all(|w| axis(w[0], w[1])) {
+        if !(a.y == b.y && b.x == c.x && c.y == d.y && d.x == a.x && a.x <= b.x && a.y <= d.y) {
             return None;
         }
-        let (l, r) = (a.0.min(c.0), a.0.max(c.0));
-        let (b, t) = (a.1.min(c.1), a.1.max(c.1));
         Some(CGRect {
-            origin: CGPoint { x: l, y: b },
+            origin: CGPoint { x: a.x, y: a.y },
             size: CGSize {
-                width: r - l,
-                height: t - b,
+                width: c.x - a.x,
+                height: c.y - a.y,
             },
         })
     }
@@ -233,7 +231,11 @@ impl Elements {
             Some(_) => self.line_to(m, sx, sy),
             None => self.move_to(m, sx, sy),
         }
-        let pieces = (sweep.abs() / (TAU / 4.0)).ceil().max(1.0) as usize;
+        // A sweep that is a quarter turn to within rounding is one piece, not
+        // two: `arc_to` derives its angles from `atan2`, so an exact 90 degrees
+        // arrives a few ulps over.
+        let quarters = sweep.abs() / (TAU / 4.0);
+        let pieces = (quarters - 1e-9).ceil().max(1.0) as usize;
         let step = sweep / pieces as f64;
         let k = 4.0 / 3.0 * (step / 4.0).tan();
         let mut a = start;
@@ -274,7 +276,7 @@ impl Elements {
         let Some(inverse) = m.inverse() else {
             return;
         };
-        let (x0, y0) = inverse.apply(current.0, current.1);
+        let CGPoint { x: x0, y: y0 } = inverse.apply(current.x, current.y);
         let (v0x, v0y) = (x0 - x1, y0 - y1);
         let (v1x, v1y) = (x2 - x1, y2 - y1);
         let (l0, l1) = (v0x.hypot(v0y), v1x.hypot(v1y));
@@ -295,7 +297,6 @@ impl Elements {
         let (cx, cy) = (x1 + bx / bl * reach, y1 + by / bl * reach);
         let start = (t0y - cy).atan2(t0x - cx);
         let end = (t1y - cy).atan2(t1x - cx);
-        self.line_to(m, t0x, t0y);
         self.arc(m, cx, cy, radius, start, end, cross > 0.0);
     }
 
@@ -303,11 +304,15 @@ impl Elements {
     pub fn append(&mut self, m: CGAffineTransform, other: &Elements) {
         for element in &other.list {
             match *element {
-                Element::Move(p) => self.move_to(m, p.0, p.1),
-                Element::Line(p) => self.line_to(m, p.0, p.1),
-                Element::Quad(c, p) => self.quad_to(m, c.0, c.1, p.0, p.1),
-                Element::Cubic(c1, c2, p) => self.cubic_to(m, c1.0, c1.1, c2.0, c2.1, p.0, p.1),
-                Element::Close => self.close(),
+                CGPathElementType::kCGPathElementMoveToPoint(p) => self.move_to(m, p.x, p.y),
+                CGPathElementType::kCGPathElementAddLineToPoint(p) => self.line_to(m, p.x, p.y),
+                CGPathElementType::kCGPathElementAddQuadCurveToPoint(c, p) => {
+                    self.quad_to(m, c.x, c.y, p.x, p.y)
+                }
+                CGPathElementType::kCGPathElementAddCurveToPoint(c1, c2, p) => {
+                    self.cubic_to(m, c1.x, c1.y, c2.x, c2.y, p.x, p.y)
+                }
+                CGPathElementType::kCGPathElementCloseSubpath => self.close(),
             }
         }
     }
@@ -316,14 +321,15 @@ impl Elements {
     /// `CGPathGetBoundingBox` answers.
     pub fn bounds(&self) -> Option<CGRect> {
         let mut points = self.list.iter().flat_map(|e| match *e {
-            Element::Move(p) | Element::Line(p) => vec![p],
-            Element::Quad(c, p) => vec![c, p],
-            Element::Cubic(c1, c2, p) => vec![c1, c2, p],
-            Element::Close => vec![],
+            CGPathElementType::kCGPathElementMoveToPoint(p)
+            | CGPathElementType::kCGPathElementAddLineToPoint(p) => vec![p],
+            CGPathElementType::kCGPathElementAddQuadCurveToPoint(c, p) => vec![c, p],
+            CGPathElementType::kCGPathElementAddCurveToPoint(c1, c2, p) => vec![c1, c2, p],
+            CGPathElementType::kCGPathElementCloseSubpath => vec![],
         });
         let first = points.next()?;
-        let (l, b, r, t) = points.fold((first.0, first.1, first.0, first.1), |(l, b, r, t), p| {
-            (l.min(p.0), b.min(p.1), r.max(p.0), t.max(p.1))
+        let (l, b, r, t) = points.fold((first.x, first.y, first.x, first.y), |(l, b, r, t), p| {
+            (l.min(p.x), b.min(p.y), r.max(p.x), t.max(p.y))
         });
         Some(CGRect {
             origin: CGPoint { x: l, y: b },
@@ -337,26 +343,26 @@ impl Elements {
     /// The path for the rasterizer, or `None` when it encloses nothing.
     pub fn to_skia(&self) -> Option<tiny_skia::Path> {
         let mut builder = tiny_skia::PathBuilder::new();
-        let f = |p: Point| (p.0 as f32, p.1 as f32);
+        let f = |p: CGPoint| (p.x as f32, p.y as f32);
         for element in &self.list {
             match *element {
-                Element::Move(p) => {
+                CGPathElementType::kCGPathElementMoveToPoint(p) => {
                     let (x, y) = f(p);
                     builder.move_to(x, y);
                 }
-                Element::Line(p) => {
+                CGPathElementType::kCGPathElementAddLineToPoint(p) => {
                     let (x, y) = f(p);
                     builder.line_to(x, y);
                 }
-                Element::Quad(c, p) => {
+                CGPathElementType::kCGPathElementAddQuadCurveToPoint(c, p) => {
                     let ((cx, cy), (x, y)) = (f(c), f(p));
                     builder.quad_to(cx, cy, x, y);
                 }
-                Element::Cubic(c1, c2, p) => {
+                CGPathElementType::kCGPathElementAddCurveToPoint(c1, c2, p) => {
                     let ((ax, ay), (bx, by), (x, y)) = (f(c1), f(c2), f(p));
                     builder.cubic_to(ax, ay, bx, by, x, y);
                 }
-                Element::Close => builder.close(),
+                CGPathElementType::kCGPathElementCloseSubpath => builder.close(),
             }
         }
         builder.finish()
@@ -395,32 +401,32 @@ impl Elements {
     /// no further than `threshold` from it.
     pub fn flattened(&self, threshold: f64) -> Elements {
         let mut out = Elements::default();
-        let mut pen: Option<Point> = None;
-        let mut subpath: Option<Point> = None;
+        let mut pen: Option<CGPoint> = None;
+        let mut subpath: Option<CGPoint> = None;
         for element in &self.list {
             match *element {
-                Element::Move(p) => {
-                    out.move_to(CGAffineTransformIdentity, p.0, p.1);
+                CGPathElementType::kCGPathElementMoveToPoint(p) => {
+                    out.move_to(CGAffineTransformIdentity, p.x, p.y);
                     pen = Some(p);
                     subpath = Some(p);
                 }
-                Element::Line(p) => {
-                    out.line_to(CGAffineTransformIdentity, p.0, p.1);
+                CGPathElementType::kCGPathElementAddLineToPoint(p) => {
+                    out.line_to(CGAffineTransformIdentity, p.x, p.y);
                     pen = Some(p);
                 }
-                Element::Quad(c, p) => {
+                CGPathElementType::kCGPathElementAddQuadCurveToPoint(c, p) => {
                     if let Some(start) = pen {
                         flatten_quad(&mut out, start, c, p, threshold);
                     }
                     pen = Some(p);
                 }
-                Element::Cubic(c1, c2, p) => {
+                CGPathElementType::kCGPathElementAddCurveToPoint(c1, c2, p) => {
                     if let Some(start) = pen {
                         flatten_cubic(&mut out, start, c1, c2, p, threshold, 0);
                     }
                     pen = Some(p);
                 }
-                Element::Close => {
+                CGPathElementType::kCGPathElementCloseSubpath => {
                     out.close();
                     pen = subpath;
                 }
@@ -438,16 +444,16 @@ impl Elements {
         let mut current: Vec<[f64; 2]> = Vec::new();
         for element in &flat.list {
             match *element {
-                Element::Move(p) => {
+                CGPathElementType::kCGPathElementMoveToPoint(p) => {
                     if current.len() > 2 {
                         out.push(std::mem::take(&mut current));
                     } else {
                         current.clear();
                     }
-                    current.push([p.0, p.1]);
+                    current.push([p.x, p.y]);
                 }
-                Element::Line(p) => current.push([p.0, p.1]),
-                Element::Close => {
+                CGPathElementType::kCGPathElementAddLineToPoint(p) => current.push([p.x, p.y]),
+                CGPathElementType::kCGPathElementCloseSubpath => {
                     if current.len() > 2 {
                         out.push(std::mem::take(&mut current));
                     } else {
@@ -455,7 +461,8 @@ impl Elements {
                     }
                 }
                 // `flattened` emits no curves.
-                Element::Quad(..) | Element::Cubic(..) => {}
+                CGPathElementType::kCGPathElementAddQuadCurveToPoint(..)
+                | CGPathElementType::kCGPathElementAddCurveToPoint(..) => {}
             }
         }
         if current.len() > 2 {
@@ -489,34 +496,37 @@ impl Elements {
 /// recurse until the stack runs out.
 const MAX_FLATTEN_DEPTH: u32 = 24;
 
-fn midpoint(a: Point, b: Point) -> Point {
-    ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0)
+fn midpoint(a: CGPoint, b: CGPoint) -> CGPoint {
+    CGPoint {
+        x: (a.x + b.x) / 2.0,
+        y: (a.y + b.y) / 2.0,
+    }
 }
 
 /// The distance from `p` to the line through `a` and `b`, or to `a` when the
 /// line has no length.
-fn distance_to_line(p: Point, a: Point, b: Point) -> f64 {
-    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+fn distance_to_line(p: CGPoint, a: CGPoint, b: CGPoint) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
     let length = dx.hypot(dy);
     if length == 0.0 {
-        return (p.0 - a.0).hypot(p.1 - a.1);
+        return (p.x - a.x).hypot(p.y - a.y);
     }
-    ((p.0 - a.0) * dy - (p.1 - a.1) * dx).abs() / length
+    ((p.x - a.x) * dy - (p.y - a.y) * dx).abs() / length
 }
 
 fn flatten_cubic(
     out: &mut Elements,
-    p0: Point,
-    p1: Point,
-    p2: Point,
-    p3: Point,
+    p0: CGPoint,
+    p1: CGPoint,
+    p2: CGPoint,
+    p3: CGPoint,
     threshold: f64,
     depth: u32,
 ) {
     let flat =
         distance_to_line(p1, p0, p3) <= threshold && distance_to_line(p2, p0, p3) <= threshold;
     if flat || depth >= MAX_FLATTEN_DEPTH {
-        out.line_to(CGAffineTransformIdentity, p3.0, p3.1);
+        out.line_to(CGAffineTransformIdentity, p3.x, p3.y);
         return;
     }
     let p01 = midpoint(p0, p1);
@@ -529,17 +539,114 @@ fn flatten_cubic(
     flatten_cubic(out, p0123, p123, p23, p3, threshold, depth + 1);
 }
 
-fn flatten_quad(out: &mut Elements, p0: Point, c: Point, p2: Point, threshold: f64) {
+fn flatten_quad(out: &mut Elements, p0: CGPoint, c: CGPoint, p2: CGPoint, threshold: f64) {
     // Degree elevation: the same curve as a cubic.
-    let c1 = (
-        p0.0 + 2.0 / 3.0 * (c.0 - p0.0),
-        p0.1 + 2.0 / 3.0 * (c.1 - p0.1),
-    );
-    let c2 = (
-        p2.0 + 2.0 / 3.0 * (c.0 - p2.0),
-        p2.1 + 2.0 / 3.0 * (c.1 - p2.1),
-    );
+    let c1 = CGPoint {
+        x: p0.x + 2.0 / 3.0 * (c.x - p0.x),
+        y: p0.y + 2.0 / 3.0 * (c.y - p0.y),
+    };
+    let c2 = CGPoint {
+        x: p2.x + 2.0 / 3.0 * (c.x - p2.x),
+        y: p2.y + 2.0 / 3.0 * (c.y - p2.y),
+    };
     flatten_cubic(out, p0, c1, c2, p2, threshold, 0);
+}
+
+/// The distance from `p` to the segment `a`-`b`.
+fn distance_to_segment(p: CGPoint, a: CGPoint, b: CGPoint) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let length_squared = dx * dx + dy * dy;
+    if length_squared == 0.0 {
+        return (p.x - a.x).hypot(p.y - a.y);
+    }
+    let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / length_squared).clamp(0.0, 1.0);
+    (p.x - (a.x + t * dx)).hypot(p.y - (a.y + t * dy))
+}
+
+/// Whether `point` lies on the path itself, within `tolerance`.
+///
+/// A fill test cannot see a subpath with no area - a dashed copy is a run of
+/// zero-width lines - and Quartz counts a point on the path as inside.
+fn on_path(elements: &Elements, point: CGPoint, tolerance: f64) -> bool {
+    let flat = elements.flattened(tolerance);
+    let mut pen: Option<CGPoint> = None;
+    let mut start: Option<CGPoint> = None;
+    for element in &flat.list {
+        match *element {
+            CGPathElementType::kCGPathElementMoveToPoint(p) => {
+                pen = Some(p);
+                start = Some(p);
+            }
+            CGPathElementType::kCGPathElementAddLineToPoint(p) => {
+                if let Some(from) = pen
+                    && distance_to_segment(point, from, p) <= tolerance
+                {
+                    return true;
+                }
+                pen = Some(p);
+            }
+            CGPathElementType::kCGPathElementCloseSubpath => {
+                if let (Some(from), Some(to)) = (pen, start)
+                    && distance_to_segment(point, from, to) <= tolerance
+                {
+                    return true;
+                }
+                pen = start;
+            }
+            CGPathElementType::kCGPathElementAddQuadCurveToPoint(..)
+            | CGPathElementType::kCGPathElementAddCurveToPoint(..) => {}
+        }
+    }
+    false
+}
+
+/// The winding number of `point` against the path's flattened outline.
+///
+/// An open subpath is not closed: Quartz counts the segments as given, so a
+/// zero-width dash still crosses the ray.
+fn winding(elements: &Elements, point: CGPoint) -> i32 {
+    let flat = elements.flattened(1e-6);
+    let mut total = 0;
+    let mut pen: Option<CGPoint> = None;
+    let mut start: Option<CGPoint> = None;
+    for element in &flat.list {
+        match *element {
+            CGPathElementType::kCGPathElementMoveToPoint(p) => {
+                pen = Some(p);
+                start = Some(p);
+            }
+            CGPathElementType::kCGPathElementAddLineToPoint(p) => {
+                if let Some(from) = pen {
+                    total += crossing(point, from, p);
+                }
+                pen = Some(p);
+            }
+            CGPathElementType::kCGPathElementCloseSubpath => {
+                if let (Some(from), Some(to)) = (pen, start) {
+                    total += crossing(point, from, to);
+                }
+                pen = start;
+            }
+            CGPathElementType::kCGPathElementAddQuadCurveToPoint(..)
+            | CGPathElementType::kCGPathElementAddCurveToPoint(..) => {}
+        }
+    }
+    total
+}
+
+/// `+1` or `-1` when the segment crosses the ray from `p` towards +x, else `0`.
+fn crossing(p: CGPoint, a: CGPoint, b: CGPoint) -> i32 {
+    if (a.y > p.y) == (b.y > p.y) {
+        return 0;
+    }
+    let t = (p.y - a.y) / (b.y - a.y);
+    if a.x + t * (b.x - a.x) <= p.x {
+        return 0;
+    }
+    match b.y > a.y {
+        true => 1,
+        false => -1,
+    }
 }
 
 /// A new path object holding `elements`, which the caller owns.
@@ -1141,11 +1248,11 @@ pub unsafe extern "C" fn CGPathGetPathBoundingBox(path: CGPathRef) -> CGRect {
 pub unsafe extern "C" fn CGPathGetCurrentPoint(path: CGPathRef) -> CGPoint {
     elements_of(path)
         .and_then(|e| e.current)
-        .map_or(CGPoint::default(), |(x, y)| CGPoint { x, y })
+        .unwrap_or_default()
 }
 
 /// `bool CGPathContainsPoint(CGPathRef, const CGAffineTransform *, CGPoint,
-/// bool eoFill)`: whether the point's pixel would be filled.
+/// bool eoFill)`: whether the point is inside the path under the given rule.
 pub unsafe extern "C" fn CGPathContainsPoint(
     path: CGPathRef,
     m: *const CGAffineTransform,
@@ -1157,21 +1264,18 @@ pub unsafe extern "C" fn CGPathContainsPoint(
     };
     let mut moved = Elements::default();
     moved.append(transform(m), source);
-    let Some(skia) = moved.to_skia() else {
-        return false;
+    let p = point;
+    // A crossing count rather than a rasterized pixel: the question is about
+    // the point, and a subpath with no area - a dashed copy is a run of
+    // zero-width lines - has no coverage for a fill to find.
+    let w = winding(&moved, p);
+    let inside = match even_odd {
+        true => w % 2 != 0,
+        false => w != 0,
     };
-    // Rasterize one pixel centred on the point, without antialiasing.
-    let Some(mut mask) = tiny_skia::Mask::new(1, 1) else {
-        return false;
-    };
-    let rule = match even_odd {
-        true => tiny_skia::FillRule::EvenOdd,
-        false => tiny_skia::FillRule::Winding,
-    };
-    let shift =
-        tiny_skia::Transform::from_translate((0.5 - point.x) as f32, (0.5 - point.y) as f32);
-    mask.fill_path(&skia, rule, false, shift);
-    mask.data()[0] != 0
+    // A point on the boundary is inside, which a crossing count alone cannot
+    // say.
+    inside || on_path(&moved, p, 1e-6)
 }
 
 /// `bool CGPathEqualToPath(CGPathRef path1, CGPathRef path2)`
@@ -1193,20 +1297,25 @@ pub unsafe extern "C" fn CGPathApply(
         return;
     };
     let list = elements.list.clone();
-    let p = |(x, y): Point| CGPoint { x, y };
     for element in list {
         let (element_type, points): (CGPathElementType, Vec<CGPoint>) = match element {
-            Element::Move(a) => (CGPathElementType::kCGPathElementMoveToPoint, vec![p(a)]),
-            Element::Line(a) => (CGPathElementType::kCGPathElementAddLineToPoint, vec![p(a)]),
-            Element::Quad(c, a) => (
-                CGPathElementType::kCGPathElementAddQuadCurveToPoint,
-                vec![p(c), p(a)],
+            CGPathElementType::kCGPathElementMoveToPoint(a) => {
+                (CGPathElementType::kCGPathElementMoveToPoint(a), vec![a])
+            }
+            CGPathElementType::kCGPathElementAddLineToPoint(a) => {
+                (CGPathElementType::kCGPathElementAddLineToPoint(a), vec![a])
+            }
+            CGPathElementType::kCGPathElementAddQuadCurveToPoint(c, a) => (
+                CGPathElementType::kCGPathElementAddQuadCurveToPoint(c, a),
+                vec![c, a],
             ),
-            Element::Cubic(c1, c2, a) => (
-                CGPathElementType::kCGPathElementAddCurveToPoint,
-                vec![p(c1), p(c2), p(a)],
+            CGPathElementType::kCGPathElementAddCurveToPoint(c1, c2, a) => (
+                CGPathElementType::kCGPathElementAddCurveToPoint(c1, c2, a),
+                vec![c1, c2, a],
             ),
-            Element::Close => (CGPathElementType::kCGPathElementCloseSubpath, vec![]),
+            CGPathElementType::kCGPathElementCloseSubpath => {
+                (CGPathElementType::kCGPathElementCloseSubpath, vec![])
+            }
         };
         let element = CGPathElement {
             element_type,
@@ -1233,20 +1342,25 @@ pub unsafe extern "C" fn CGPathApplyWithBlock(path: CGPathRef, block: *const c_v
     let call: unsafe extern "C" fn(*mut c_void, *const CGPathElement) =
         unsafe { std::mem::transmute(invoke) };
     let list = elements.list.clone();
-    let p = |(x, y): Point| CGPoint { x, y };
     for element in list {
         let (element_type, points): (CGPathElementType, Vec<CGPoint>) = match element {
-            Element::Move(a) => (CGPathElementType::kCGPathElementMoveToPoint, vec![p(a)]),
-            Element::Line(a) => (CGPathElementType::kCGPathElementAddLineToPoint, vec![p(a)]),
-            Element::Quad(c, a) => (
-                CGPathElementType::kCGPathElementAddQuadCurveToPoint,
-                vec![p(c), p(a)],
+            CGPathElementType::kCGPathElementMoveToPoint(a) => {
+                (CGPathElementType::kCGPathElementMoveToPoint(a), vec![a])
+            }
+            CGPathElementType::kCGPathElementAddLineToPoint(a) => {
+                (CGPathElementType::kCGPathElementAddLineToPoint(a), vec![a])
+            }
+            CGPathElementType::kCGPathElementAddQuadCurveToPoint(c, a) => (
+                CGPathElementType::kCGPathElementAddQuadCurveToPoint(c, a),
+                vec![c, a],
             ),
-            Element::Cubic(c1, c2, a) => (
-                CGPathElementType::kCGPathElementAddCurveToPoint,
-                vec![p(c1), p(c2), p(a)],
+            CGPathElementType::kCGPathElementAddCurveToPoint(c1, c2, a) => (
+                CGPathElementType::kCGPathElementAddCurveToPoint(c1, c2, a),
+                vec![c1, c2, a],
             ),
-            Element::Close => (CGPathElementType::kCGPathElementCloseSubpath, vec![]),
+            CGPathElementType::kCGPathElementCloseSubpath => {
+                (CGPathElementType::kCGPathElementCloseSubpath, vec![])
+            }
         };
         let element = CGPathElement {
             element_type,
@@ -1381,10 +1495,10 @@ mod tests {
         assert_eq!(
             kinds,
             [
-                CGPathElementType::kCGPathElementMoveToPoint,
-                CGPathElementType::kCGPathElementAddLineToPoint,
-                CGPathElementType::kCGPathElementAddLineToPoint,
-                CGPathElementType::kCGPathElementAddLineToPoint,
+                CGPathElementType::kCGPathElementMoveToPoint(CGPoint { x: 1.0, y: 2.0 }),
+                CGPathElementType::kCGPathElementAddLineToPoint(CGPoint { x: 4.0, y: 2.0 }),
+                CGPathElementType::kCGPathElementAddLineToPoint(CGPoint { x: 4.0, y: 6.0 }),
+                CGPathElementType::kCGPathElementAddLineToPoint(CGPoint { x: 1.0, y: 6.0 }),
                 CGPathElementType::kCGPathElementCloseSubpath,
             ]
         );
@@ -1404,7 +1518,7 @@ mod tests {
             false,
         );
         let end = e.current.expect("a current point");
-        assert!((end.0).abs() < 1e-9 && (end.1 - 10.0).abs() < 1e-9);
+        assert!((end.x).abs() < 1e-9 && (end.y - 10.0).abs() < 1e-9);
     }
 
     /// A rounded rectangle covers the rectangle it was given, corners included.
@@ -1461,6 +1575,16 @@ mod tests {
             })
         );
 
+        // Quartz only accepts the order `CGPathCreateWithRect` emits, so a
+        // rectangle that starts at another corner is not one.
+        let mut turned = Elements::default();
+        turned.move_to(CGAffineTransformIdentity, 10.0, 10.0);
+        turned.line_to(CGAffineTransformIdentity, 5.0, 10.0);
+        turned.line_to(CGAffineTransformIdentity, 5.0, 5.0);
+        turned.line_to(CGAffineTransformIdentity, 10.0, 5.0);
+        turned.close();
+        assert_eq!(turned.as_rect(), None);
+
         let mut triangle = Elements::default();
         triangle.move_to(CGAffineTransformIdentity, 0.0, 0.0);
         triangle.line_to(CGAffineTransformIdentity, 1.0, 0.0);
@@ -1477,10 +1601,12 @@ mod tests {
         let flat = e.flattened(0.1);
         assert!(flat.list.iter().all(|element| matches!(
             element,
-            Element::Move(_) | Element::Line(_) | Element::Close
+            CGPathElementType::kCGPathElementMoveToPoint(_)
+                | CGPathElementType::kCGPathElementAddLineToPoint(_)
+                | CGPathElementType::kCGPathElementCloseSubpath
         )));
         assert!(flat.list.len() > 2, "a curve should become several lines");
-        assert_eq!(flat.current, Some((10.0, 0.0)));
+        assert_eq!(flat.current, Some(CGPoint { x: 10.0, y: 0.0 }));
     }
 
     #[test]
@@ -1539,5 +1665,125 @@ mod tests {
             CGPathRelease(b);
             CGPathRelease(overlap);
         }
+    }
+
+    fn close_to(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    /// `arc_to` emits the tangent line once, through `arc`, and an exact
+    /// quarter turn is a single cubic.
+    #[test]
+    fn an_arc_to_point_is_one_line_and_one_quarter_turn() {
+        let mut e = Elements::default();
+        e.move_to(CGAffineTransformIdentity, 0.0, 0.0);
+        e.arc_to(CGAffineTransformIdentity, 100.0, 0.0, 100.0, 100.0, 20.0);
+        assert_eq!(e.list.len(), 3, "{:?}", e.list);
+        assert_eq!(
+            e.list[0],
+            CGPathElementType::kCGPathElementMoveToPoint(CGPoint { x: 0.0, y: 0.0 })
+        );
+        match e.list[1] {
+            CGPathElementType::kCGPathElementAddLineToPoint(p) => {
+                assert!(close_to(p.x, 80.0) && close_to(p.y, 0.0), "{:?}", e.list[1]);
+            }
+            ref other => panic!("expected a line, got {other:?}"),
+        }
+        match e.list[2] {
+            CGPathElementType::kCGPathElementAddCurveToPoint(_, _, p) => {
+                assert!(
+                    close_to(p.x, 100.0) && close_to(p.y, 20.0),
+                    "{:?}",
+                    e.list[2]
+                );
+            }
+            ref other => panic!("expected a cubic, got {other:?}"),
+        }
+    }
+
+    /// Quartz starts a rounded rectangle at the middle of its right edge.
+    #[test]
+    fn a_rounded_rect_starts_at_the_middle_of_its_right_edge() {
+        let mut e = Elements::default();
+        e.rounded_rect(
+            CGAffineTransformIdentity,
+            CGRect {
+                origin: CGPoint { x: 0.0, y: 0.0 },
+                size: CGSize {
+                    width: 10.0,
+                    height: 8.0,
+                },
+            },
+            2.0,
+            2.0,
+        );
+        assert_eq!(
+            e.list[0],
+            CGPathElementType::kCGPathElementMoveToPoint(CGPoint { x: 10.0, y: 4.0 })
+        );
+        assert_eq!(e.current, Some(CGPoint { x: 10.0, y: 4.0 }));
+    }
+
+    /// A point on a zero-width subpath is inside, even though a fill test sees
+    /// no coverage there.
+    #[test]
+    fn a_point_on_a_zero_width_subpath_is_inside() {
+        let mut e = Elements::default();
+        e.move_to(CGAffineTransformIdentity, 0.0, 0.0);
+        e.line_to(CGAffineTransformIdentity, 10.0, 0.0);
+        assert!(on_path(&e, CGPoint { x: 5.0, y: 0.0 }, 1e-6));
+        assert!(!on_path(&e, CGPoint { x: 5.0, y: 1.0 }, 1e-6));
+    }
+
+    /// An open arc contains a point inside it, because the ray crosses it once.
+    #[test]
+    fn an_open_arc_contains_a_point_inside_it() {
+        let mut e = Elements::default();
+        e.move_to(CGAffineTransformIdentity, 9.0, 5.0);
+        e.cubic_to(CGAffineTransformIdentity, 9.0, 7.2, 7.2, 9.0, 5.0, 9.0);
+        e.cubic_to(CGAffineTransformIdentity, 2.8, 9.0, 1.0, 7.2, 1.0, 5.0);
+        assert!(winding(&e, CGPoint { x: 5.0, y: 5.0 }) != 0);
+        assert!(winding(&e, CGPoint { x: 5.0, y: 3.0 }) == 0);
+    }
+
+    /// An open subpath's chord is not part of the path.
+    #[test]
+    fn a_point_on_the_chord_of_an_open_subpath_is_outside() {
+        let mut e = Elements::default();
+        e.move_to(CGAffineTransformIdentity, 0.0, 0.0);
+        e.line_to(CGAffineTransformIdentity, 0.0, 10.0);
+        e.line_to(CGAffineTransformIdentity, 10.0, 10.0);
+        assert!(winding(&e, CGPoint { x: 5.0, y: 5.0 }) == 0);
+        assert!(!on_path(&e, CGPoint { x: 5.0, y: 5.0 }, 1e-6));
+    }
+
+    /// A subpath with no area still crosses the ray from a point beside it.
+    #[test]
+    fn a_zero_width_subpath_still_crosses_the_ray() {
+        let mut e = Elements::default();
+        e.move_to(CGAffineTransformIdentity, 10.0, 0.0);
+        e.line_to(CGAffineTransformIdentity, 10.0, 10.0);
+        assert!(winding(&e, CGPoint { x: 5.0, y: 5.0 }) != 0);
+        assert!(winding(&e, CGPoint { x: 15.0, y: 5.0 }) == 0);
+    }
+
+    /// Only the order `CGPathCreateWithRect` emits is a rectangle.
+    #[test]
+    fn only_a_canonical_rect_is_a_rect() {
+        let mut canonical = Elements::default();
+        canonical.move_to(CGAffineTransformIdentity, 0.0, 0.0);
+        canonical.line_to(CGAffineTransformIdentity, 10.0, 0.0);
+        canonical.line_to(CGAffineTransformIdentity, 10.0, 10.0);
+        canonical.line_to(CGAffineTransformIdentity, 0.0, 10.0);
+        canonical.close();
+        assert!(canonical.as_rect().is_some());
+
+        let mut turned = Elements::default();
+        turned.move_to(CGAffineTransformIdentity, 10.0, 10.0);
+        turned.line_to(CGAffineTransformIdentity, 5.0, 10.0);
+        turned.line_to(CGAffineTransformIdentity, 5.0, 5.0);
+        turned.line_to(CGAffineTransformIdentity, 10.0, 5.0);
+        turned.close();
+        assert_eq!(turned.as_rect(), None);
     }
 }
