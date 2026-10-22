@@ -283,9 +283,6 @@ exports::exports! {
         "CGAffineTransformIsIdentity" => CGAffineTransformIsIdentity,
         "CGAffineTransformEqualToTransform" => CGAffineTransformEqualToTransform,
     }
-    data {
-        "_CGAffineTransformIdentity" => &raw const CGAffineTransformIdentity as u64,
-    }
 
 }
 
