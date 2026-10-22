@@ -3,6 +3,7 @@ use microlift::arch::x86_64::context::RegisterContext;
 use crate::abi::{AbiError, Callbacks, GuestMemory, Result};
 
 use super::host::host_or_refuse;
+use crate::shims::bind;
 
 /// `CGRect`, as AAPCS64 returns one.
 #[repr(C)]
@@ -708,7 +709,7 @@ fn display_link_nominal_period(
 }
 
 /// One of this module's implementations, in the shape [`crate::shims`] wants.
-pub type Shim = fn(&str, &mut RegisterContext, &mut dyn GuestMemory) -> Result<()>;
+pub type Shim = crate::shims::Shim;
 
 /// Whether `name` (underscore already stripped) is one of this module's.
 pub fn shim_for(name: &str) -> Option<Shim> {
@@ -716,48 +717,74 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         // `CGRect CGDisplayBounds(CGDirectDisplayID)` - where a display sits in
         // the global desktop coordinate space, which SDL asks for every display
         // it enumerates.
-        "CGDisplayBounds" => Some(rect_of_display),
+        "CGDisplayBounds" => Some(bind!("CGDisplayBounds" => rect_of_display)),
         // `CGSize CGDisplayScreenSize(CGDirectDisplayID)` - sixteen bytes rather
         // than thirty-two, so it is the agreeing case rather than the
         // disagreeing one, and it still cannot be a table entry.
-        "CGDisplayScreenSize" => Some(screen_size_of_display),
+        "CGDisplayScreenSize" => Some(bind!("CGDisplayScreenSize" => screen_size_of_display)),
         // The bitmap-context pair, which is how a `CGImage` becomes texture
         // bytes: a `CGRect` **argument**, passed on the guest's stack.
-        "CGContextClearRect" => Some(context_clear_rect),
-        "CGContextDrawImage" => Some(context_draw_image),
-        "CGEventGetLocation" => Some(event_location),
-        "NSInsetRect" => Some(inset_rect),
-        "CGRectEqualToRect" | "NSEqualRects" => Some(rect_equal),
+        "CGContextClearRect" => Some(bind!("CGContextClearRect" => context_clear_rect)),
+        "CGContextDrawImage" => Some(bind!("CGContextDrawImage" => context_draw_image)),
+        "CGEventGetLocation" => Some(bind!("CGEventGetLocation" => event_location)),
+        "NSInsetRect" => Some(bind!("NSInsetRect" => inset_rect)),
+        "CGRectEqualToRect" => Some(bind!("CGRectEqualToRect" => rect_equal)),
+        "NSEqualRects" => Some(bind!("NSEqualRects" => rect_equal)),
         // A `CGPoint` **argument** in the middle of three scalars; see
         // [`event_create_mouse`] for why that moves `mouseButton` a register.
-        "CGEventCreateMouseEvent" => Some(event_create_mouse),
-        "CVDisplayLinkGetNominalOutputVideoRefreshPeriod" => Some(display_link_nominal_period),
+        "CGEventCreateMouseEvent" => Some(bind!("CGEventCreateMouseEvent" => event_create_mouse)),
+        "CVDisplayLinkGetNominalOutputVideoRefreshPeriod" => Some(
+            bind!("CVDisplayLinkGetNominalOutputVideoRefreshPeriod" => display_link_nominal_period),
+        ),
         // The `CGRect` accessors: a rectangle in, a `CGFloat` out, all eight
         // the same shape.
-        "CGRectGetHeight" | "CGRectGetWidth" | "CGRectGetMinX" | "CGRectGetMidX"
-        | "CGRectGetMaxX" | "CGRectGetMinY" | "CGRectGetMidY" | "CGRectGetMaxY" => {
-            Some(rect_accessor)
-        }
+        "CGRectGetHeight" => Some(bind!("CGRectGetHeight" => rect_accessor)),
+        "CGRectGetWidth" => Some(bind!("CGRectGetWidth" => rect_accessor)),
+        "CGRectGetMinX" => Some(bind!("CGRectGetMinX" => rect_accessor)),
+        "CGRectGetMidX" => Some(bind!("CGRectGetMidX" => rect_accessor)),
+        "CGRectGetMaxX" => Some(bind!("CGRectGetMaxX" => rect_accessor)),
+        "CGRectGetMinY" => Some(bind!("CGRectGetMinY" => rect_accessor)),
+        "CGRectGetMidY" => Some(bind!("CGRectGetMidY" => rect_accessor)),
+        "CGRectGetMaxY" => Some(bind!("CGRectGetMaxY" => rect_accessor)),
         // `CGAffineTransform` is forty-eight bytes, so every one of these is
         // MEMORY class on both sides and cannot be a table entry.
-        "CGAffineTransformMake" => Some(transform_make),
-        "CGAffineTransformMakeScale" => Some(transform_make_scale),
-        "CGAffineTransformMakeTranslation" => Some(transform_make_translation),
-        "CGAffineTransformConcat" => Some(transform_concat),
-        "CGAffineTransformScale" => Some(transform_scale),
-        "CGAffineTransformTranslate" => Some(transform_translate),
-        "CGAffineTransformInvert" => Some(transform_invert),
-        "CGAffineTransformIsIdentity" => Some(transform_is_identity),
-        "CGRectApplyAffineTransform" => Some(rect_apply_transform),
+        "CGAffineTransformMake" => Some(bind!("CGAffineTransformMake" => transform_make)),
+        "CGAffineTransformMakeScale" => {
+            Some(bind!("CGAffineTransformMakeScale" => transform_make_scale))
+        }
+        "CGAffineTransformMakeTranslation" => {
+            Some(bind!("CGAffineTransformMakeTranslation" => transform_make_translation))
+        }
+        "CGAffineTransformConcat" => Some(bind!("CGAffineTransformConcat" => transform_concat)),
+        "CGAffineTransformScale" => Some(bind!("CGAffineTransformScale" => transform_scale)),
+        "CGAffineTransformTranslate" => {
+            Some(bind!("CGAffineTransformTranslate" => transform_translate))
+        }
+        "CGAffineTransformInvert" => Some(bind!("CGAffineTransformInvert" => transform_invert)),
+        "CGAffineTransformIsIdentity" => {
+            Some(bind!("CGAffineTransformIsIdentity" => transform_is_identity))
+        }
+        "CGRectApplyAffineTransform" => {
+            Some(bind!("CGRectApplyAffineTransform" => rect_apply_transform))
+        }
         // `CGPath`'s aggregate forms. The rectangle is MEMORY class to a guest
         // and the point is two SSE eightbytes; neither can be a table entry.
-        "CGPathCreateWithRect" | "CGPathCreateWithEllipseInRect" => Some(path_create_with_rect),
-        "CGPathCreateWithRoundedRect" => Some(path_create_with_rounded_rect),
-        "CGPathAddRect" | "CGPathAddEllipseInRect" => Some(path_add_rect),
-        "CGPathAddRoundedRect" => Some(path_add_rounded_rect),
-        "CGPathGetBoundingBox" | "CGPathGetPathBoundingBox" => Some(path_bounding_box),
-        "CGPathGetCurrentPoint" => Some(path_current_point),
-        "CGPathContainsPoint" => Some(path_contains_point),
+        "CGPathCreateWithRect" => Some(bind!("CGPathCreateWithRect" => path_create_with_rect)),
+        "CGPathCreateWithEllipseInRect" => {
+            Some(bind!("CGPathCreateWithEllipseInRect" => path_create_with_rect))
+        }
+        "CGPathCreateWithRoundedRect" => {
+            Some(bind!("CGPathCreateWithRoundedRect" => path_create_with_rounded_rect))
+        }
+        "CGPathAddRect" => Some(bind!("CGPathAddRect" => path_add_rect)),
+        "CGPathAddEllipseInRect" => Some(bind!("CGPathAddEllipseInRect" => path_add_rect)),
+        "CGPathAddRoundedRect" => Some(bind!("CGPathAddRoundedRect" => path_add_rounded_rect)),
+        "CGPathGetBoundingBox" => Some(bind!("CGPathGetBoundingBox" => path_bounding_box)),
+        "CGPathGetPathBoundingBox" => {
+            Some(bind!("CGPathGetPathBoundingBox" => path_bounding_box))
+        }
+        "CGPathGetCurrentPoint" => Some(bind!("CGPathGetCurrentPoint" => path_current_point)),
+        "CGPathContainsPoint" => Some(bind!("CGPathContainsPoint" => path_contains_point)),
         _ => None,
     }
 }
