@@ -39,11 +39,8 @@ pub mod sysvsem;
 pub mod vmmap;
 pub mod zlib;
 
-#[cfg(target_os = "macos")]
 pub mod cfuuid;
-#[cfg(target_os = "macos")]
 pub mod coremedia;
-#[cfg(target_os = "macos")]
 pub mod iokit;
 #[cfg(target_os = "macos")]
 pub mod machthread;
@@ -72,6 +69,8 @@ fn platform_shim_for(name: &str) -> Option<Shim> {
         .or_else(|| coregraphics::shim_for(name))
         .or_else(|| appkit::shim_for(name))
         .or_else(|| opengl::shim_for(name))
+        .or_else(|| coremedia::shim_for(name))
+        .or_else(|| cfuuid::shim_for(name))
         .or_else(|| macos_shim_for(name))
 }
 
@@ -79,9 +78,7 @@ fn platform_shim_for(name: &str) -> Option<Shim> {
 /// and no Mach.
 #[cfg(target_os = "macos")]
 fn macos_shim_for(name: &str) -> Option<Shim> {
-    coremedia::shim_for(name)
-        .or_else(|| cfuuid::shim_for(name))
-        .or_else(|| machthread::shim_for(name))
+    machthread::shim_for(name)
         .or_else(|| crate::gui::hook::shim_for(name))
 }
 
@@ -98,15 +95,8 @@ fn callback_shim_for(name: &str) -> Option<CallbackShim> {
         .or_else(|| macos_callback_shim_for(name))
 }
 
-/// The macOS-only families that may call into the guest.
-#[cfg(target_os = "macos")]
 fn macos_callback_shim_for(name: &str) -> Option<CallbackShim> {
     iokit::shim_for(name).or_else(|| coremedia::callback_shim_for(name))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn macos_callback_shim_for(_name: &str) -> Option<CallbackShim> {
-    None
 }
 
 /// The two variadics whose format string is an `NSString`, and so are Foundation's.
@@ -118,20 +108,6 @@ fn foundation_variadic(name: &str) -> Option<Shim> {
         "NSRunAlertPanel" => Some(nslog::run_alert_panel),
         _ => None,
     }
-}
-
-/// Run the shim for `symbol`, if there is one.
-///
-/// `None` means "not shimmed" and the caller should carry on with the table;
-/// `Some(Err(..))` means the shim itself refused, which is a different thing
-/// and must not fall through to a passthrough call.
-pub fn dispatch(
-    symbol: &str,
-    ctx: &mut RegisterContext,
-    mem: &mut dyn GuestMemory,
-    callbacks: &dyn crate::abi::Callbacks,
-) -> Option<Result<()>> {
-    resolve(symbol).map(|shim| shim.call(symbol, ctx, mem, callbacks))
 }
 
 /// A shim of either shape, as [`resolve`] finds it.
