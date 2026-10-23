@@ -7,6 +7,10 @@ pub mod keycodes;
 pub mod mouse;
 pub mod tray;
 pub mod wayland;
+#[cfg(target_os = "linux")]
+pub mod wayland_mask;
+#[cfg(target_os = "linux")]
+pub mod x11_mask;
 
 pub mod init {
     pub const VIDEO: u32 = 0x0000_0020;
@@ -75,6 +79,29 @@ pub struct Rect {
     pub y: c_int,
     pub w: c_int,
     pub h: c_int,
+}
+
+impl Rect {
+    /// The parts of a `width` by `height` surface outside this rectangle:
+    /// full-height columns left and right, then the strips above and below
+    /// between them. Every mask and blackout uses these, so they agree on
+    /// each edge pixel; empty bands are left out.
+    pub fn complements(self, (width, height): (c_int, c_int)) -> impl Iterator<Item = Rect> {
+        let (width, height) = (width.max(0), height.max(0));
+        let x0 = self.x.clamp(0, width);
+        let y0 = self.y.clamp(0, height);
+        let x1 = self.x.saturating_add(self.w).clamp(x0, width);
+        let y1 = self.y.saturating_add(self.h).clamp(y0, height);
+        [
+            (0, 0, x0, height),
+            (x1, 0, width - x1, height),
+            (x0, 0, x1 - x0, y0),
+            (x0, y1, x1 - x0, height - y1),
+        ]
+        .into_iter()
+        .map(|(x, y, w, h)| Rect { x, y, w, h })
+        .filter(|band| band.w > 0 && band.h > 0)
+    }
 }
 
 /// `SDL_DisplayMode`.
@@ -261,6 +288,7 @@ struct Api {
     SDL_GetWindowRelativeMouseMode: Option<unsafe extern "C" fn(Window) -> bool>,
     SDL_SetWindowMouseGrab: Option<unsafe extern "C" fn(Window, bool) -> bool>,
     SDL_SetWindowMouseRect: Option<unsafe extern "C" fn(Window, *const Rect) -> bool>,
+    SDL_GetWindowMouseRect: Option<unsafe extern "C" fn(Window) -> *const Rect>,
     SDL_GetModState: Option<unsafe extern "C" fn() -> u16>,
     SDL_GetKeyFromScancode: Option<unsafe extern "C" fn(u32, u16, bool) -> u32>,
     SDL_SetHint: Option<unsafe extern "C" fn(*const c_char, *const c_char) -> bool>,
@@ -268,6 +296,7 @@ struct Api {
     SDL_GetSystemTheme: Option<unsafe extern "C" fn() -> c_int>,
     SDL_GetCurrentVideoDriver: Option<unsafe extern "C" fn() -> *const c_char>,
     SDL_GetWindowProperties: Option<unsafe extern "C" fn(Window) -> PropertiesId>,
+    SDL_GetNumberProperty: Option<unsafe extern "C" fn(PropertiesId, *const c_char, i64) -> i64>,
     SDL_GetPointerProperty:
         Option<unsafe extern "C" fn(PropertiesId, *const c_char, *mut c_void) -> *mut c_void>,
 
@@ -492,6 +521,7 @@ fn api() -> Option<&'static Api> {
             SDL_GetWindowRelativeMouseMode,
             SDL_SetWindowMouseGrab,
             SDL_SetWindowMouseRect,
+            SDL_GetWindowMouseRect,
             SDL_GetModState,
             SDL_GetKeyFromScancode,
             SDL_SetHint,
@@ -499,6 +529,7 @@ fn api() -> Option<&'static Api> {
             SDL_GetSystemTheme,
             SDL_GetCurrentVideoDriver,
             SDL_GetWindowProperties,
+            SDL_GetNumberProperty,
             SDL_GetPointerProperty,
             SDL_OpenAudioDeviceStream,
             SDL_DestroyAudioStream,
@@ -1634,6 +1665,7 @@ pub mod video {
         pub const RESIZABLE: u64 = 0x0000_0020;
         pub const MINIMIZED: u64 = 0x0000_0040;
         pub const MAXIMIZED: u64 = 0x0000_0080;
+        pub const INPUT_FOCUS: u64 = 0x0000_0200;
         pub const HIGH_PIXEL_DENSITY: u64 = 0x0000_2000;
         pub const ALWAYS_ON_TOP: u64 = 0x0001_0000;
         pub const UTILITY: u64 = 0x0002_0000;
@@ -3373,6 +3405,31 @@ pub mod video {
         !name.is_null() && unsafe { CStr::from_ptr(name) } == expected
     }
 
+    /// X11's live display and native window handle. Borrowed from SDL; do
+    /// not close the display, and finish host requests before destroying SDL.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn x11_native_window(window: Window) -> Option<(*mut c_void, u64)> {
+        if !is_x11() {
+            return None;
+        }
+        let api = api()?;
+        let (props, pointer, number) = (
+            api.SDL_GetWindowProperties?,
+            api.SDL_GetPointerProperty?,
+            api.SDL_GetNumberProperty?,
+        );
+        let properties = unsafe { props(window) };
+        let display = unsafe {
+            pointer(
+                properties,
+                c"SDL.window.x11.display".as_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        let handle = unsafe { number(properties, c"SDL.window.x11.window".as_ptr(), 0) };
+        (!display.is_null() && handle != 0).then_some((display, handle as u64))
+    }
+
     /// A window's `wl_display` and `wl_surface`, on Wayland.
     pub fn wayland_surface(window: Window) -> Option<(*mut c_void, *mut c_void)> {
         let api = api()?;
@@ -3463,6 +3520,15 @@ pub mod video {
         let ptr = rect.as_ref().map_or(std::ptr::null(), |r| r as *const Rect);
         // SAFETY: a window from SDL, and null or a rectangle SDL copies.
         unsafe { f(window, ptr) }
+    }
+
+    /// The current pointer-confinement rectangle, if any. SDL owns the
+    /// returned memory, so copy the rectangle before returning it to a caller.
+    pub fn get_mouse_rect(window: Window) -> Option<Rect> {
+        let f = api()?.SDL_GetWindowMouseRect?;
+        // SAFETY: this is a valid SDL window, and the returned pointer, if
+        // non-null, refers to SDL-owned memory valid through this call.
+        unsafe { f(window).as_ref().copied() }
     }
 
     /// Whether `window` is holding the pointer, asked of SDL rather than
