@@ -10,10 +10,31 @@ use std::ffi::c_void;
 
 use i_overlay::float::single::SingleFloatOverlay;
 
-use crate::{
-    CGAffineTransform, CGAffineTransformIdentity, CGFloat, CGMutablePathRef, CGPath, CGPathElement,
-    CGPathElementType, CGPathRef, CGPoint, CGRect, CGSize,
-};
+use corefoundation::base::{CFRuntimeBase, CFTypeRef};
+
+use crate::{CGAffineTransform, CGAffineTransformIdentity, CGFloat, CGPoint, CGRect, CGSize};
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CGPathElementType {
+    kCGPathElementMoveToPoint(CGPoint),
+    kCGPathElementAddLineToPoint(CGPoint),
+    kCGPathElementAddQuadCurveToPoint(CGPoint, CGPoint),
+    kCGPathElementAddCurveToPoint(CGPoint, CGPoint, CGPoint),
+    kCGPathElementCloseSubpath,
+}
+
+/// `CGPathElement`: a type and a pointer to its points, as `CGPathApply`
+/// hands one to an applier.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct CGPathElement {
+    pub element_type: CGPathElementType,
+    pub points: *const CGPoint,
+}
+
+pub type CGPathRef = *const c_void;
+pub type CGMutablePathRef = *mut c_void;
 
 /// A sequence of elements, with the point the next element starts from.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -680,7 +701,7 @@ pub fn elements_of<'a>(path: CGPathRef) -> Option<&'a mut Elements> {
         return None;
     }
     // SAFETY: a `CGPath`, whose elements this runtime owns.
-    Some(unsafe { &mut (*path.cast_mut()).elements })
+    Some(unsafe { &mut (*path.cast::<CGPath>().cast_mut()).elements })
 }
 
 /// The elements a mutating call may write, or `None` for an immutable path.
@@ -690,7 +711,7 @@ pub fn elements_of<'a>(path: CGPathRef) -> Option<&'a mut Elements> {
 fn mutable_elements(path: CGMutablePathRef) -> Option<&'static mut Elements> {
     let elements = elements_of(path)?;
     // SAFETY: the object is a `CGPath` this runtime made.
-    match unsafe { (*path).mutable } {
+    match unsafe { (*path.cast::<CGPath>()).mutable } {
         true => Some(elements),
         false => None,
     }
@@ -706,7 +727,7 @@ fn new_path(elements: Elements, mutable: bool) -> CGPathRef {
         (*path).mutable = mutable;
         (*path).elements = elements;
     }
-    path
+    path.cast()
 }
 
 /// The transform a path call was given, or the identity for none.

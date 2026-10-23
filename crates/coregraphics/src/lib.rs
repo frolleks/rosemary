@@ -5,24 +5,15 @@
     non_snake_case,
     non_upper_case_globals
 )]
-use corefoundation::base::CFRuntimeBase;
 
 pub mod cgaffinetransform;
+pub mod cgcontext;
 pub mod cgpath;
 
 pub use cgaffinetransform::*;
+pub use cgpath::*;
 
 pub type CGFloat = f64;
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum CGPathElementType {
-    kCGPathElementMoveToPoint(CGPoint),
-    kCGPathElementAddLineToPoint(CGPoint),
-    kCGPathElementAddQuadCurveToPoint(CGPoint, CGPoint),
-    kCGPathElementAddCurveToPoint(CGPoint, CGPoint, CGPoint),
-    kCGPathElementCloseSubpath,
-}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -51,29 +42,6 @@ pub struct CGRect {
     pub origin: CGPoint,
     pub size: CGSize,
 }
-
-/// `CGPathElement`: a type and a pointer to its points, as `CGPathApply`
-/// hands one to an applier.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct CGPathElement {
-    pub element_type: CGPathElementType,
-    pub points: *const CGPoint,
-}
-
-/// A `CGPath`: its elements, in the coordinates they were added in.
-///
-/// `base` is first so the object is an Objective-C one, which is what
-/// `CFRetain`/`CFRelease` and `-isEqual:` go through.
-#[repr(C)]
-pub struct CGPath {
-    pub(crate) base: CFRuntimeBase,
-    pub(crate) mutable: bool,
-    pub(crate) elements: cgpath::Elements,
-}
-
-pub type CGPathRef = *const CGPath;
-pub type CGMutablePathRef = *mut CGPath;
 
 /// Register the classes a Core Graphics object is, once.
 ///
