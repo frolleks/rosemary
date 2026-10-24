@@ -2013,8 +2013,12 @@ fn fullscreen_screen_visible_frame_ignores_desktop_panel() {
     let display = sdl3::video::display_for_window(sdl).unwrap();
     let bounds = sdl3::video::display_bounds(display).unwrap();
     let usable = sdl3::video::display_usable_bounds(display).unwrap();
-    let desktop = crate::geometry::rect_from_sdl(usable.x, usable.y, usable.w, usable.h);
-    let whole = crate::geometry::rect_from_sdl(bounds.x, bounds.y, bounds.w, bounds.h);
+    let desktop = crate::cgpath::ns_rect(crate::cggeometry::rect_from_sdl(
+        usable.x, usable.y, usable.w, usable.h,
+    ));
+    let whole = crate::cgpath::ns_rect(crate::cggeometry::rect_from_sdl(
+        bounds.x, bounds.y, bounds.w, bounds.h,
+    ));
     assert_ne!(desktop, whole, "run with a reserved panel work area");
     let screen = crate::screen::screen_object(c"NSScreen", display);
     let visible = |screen| {
@@ -2138,7 +2142,9 @@ fn fullscreen_screen_visible_frame_ignores_desktop_panel() {
         let usable = sdl3::video::display_usable_bounds(other).unwrap();
         assert_eq!(
             visible(crate::screen::screen_object(c"NSScreen", other)),
-            crate::geometry::rect_from_sdl(usable.x, usable.y, usable.w, usable.h)
+            crate::cgpath::ns_rect(crate::cggeometry::rect_from_sdl(
+                usable.x, usable.y, usable.w, usable.h,
+            ))
         );
     }
     assert!(sdl3::video::minimize_window(sdl));

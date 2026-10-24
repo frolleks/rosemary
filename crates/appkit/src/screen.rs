@@ -108,7 +108,7 @@ unsafe extern "C" fn screens(_class: Id, _sel: Sel) -> Id {
 unsafe extern "C" fn frame(receiver: Id, _sel: Sel) -> NSRect {
     let display = display_of(receiver);
     match sdl3::video::display_bounds(display) {
-        Some(b) => crate::geometry::rect_from_sdl(b.x, b.y, b.w, b.h),
+        Some(b) => crate::cgpath::ns_rect(crate::cggeometry::rect_from_sdl(b.x, b.y, b.w, b.h)),
         None => NSRect::default(),
     }
 }
@@ -131,7 +131,7 @@ unsafe extern "C" fn visible_frame(receiver: Id, sel: Sel) -> NSRect {
         return fullscreen_visible_frame(full, crate::menu::global_menu_bar_height());
     }
     match sdl3::video::display_usable_bounds(display) {
-        Some(b) => crate::geometry::rect_from_sdl(b.x, b.y, b.w, b.h),
+        Some(b) => crate::cgpath::ns_rect(crate::cggeometry::rect_from_sdl(b.x, b.y, b.w, b.h)),
         // SAFETY: `-frame` is `NSRect (id, SEL)`.
         None => unsafe { frame(receiver, sel) },
     }

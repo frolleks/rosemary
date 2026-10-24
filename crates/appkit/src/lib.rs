@@ -47,9 +47,9 @@ mod font;
 pub mod hitheme;
 pub mod launch;
 pub mod launchservices;
+pub use coregraphics::cggeometry;
 pub use coregraphics::fonts;
 pub(crate) use coregraphics::quartz;
-pub mod geometry;
 pub mod icon;
 pub mod image;
 mod input_context;
@@ -166,33 +166,6 @@ exports::exports! {
         "CGSetLocalEventsSuppressionInterval" => screen::CGSetLocalEventsSuppressionInterval,
         "CGAssociateMouseAndMouseCursorPosition" => screen::CGAssociateMouseAndMouseCursorPosition,
         "CGEventSourceKeyState" => screen::CGEventSourceKeyState,
-        "CGRectGetWidth" => geometry::CGRectGetWidth,
-        "CGRectGetHeight" => geometry::CGRectGetHeight,
-        "CGRectGetMinX" => geometry::CGRectGetMinX,
-        "CGRectGetMidX" => geometry::CGRectGetMidX,
-        "CGRectGetMaxX" => geometry::CGRectGetMaxX,
-        "CGRectGetMinY" => geometry::CGRectGetMinY,
-        "CGRectGetMidY" => geometry::CGRectGetMidY,
-        "CGRectGetMaxY" => geometry::CGRectGetMaxY,
-        "NSPointInRect" => geometry::NSPointInRect,
-        "NSIsEmptyRect" => geometry::NSIsEmptyRect,
-        "NSUnionRect" => geometry::NSUnionRect,
-        "NSMouseInRect" => geometry::NSMouseInRect,
-        "NSInsetRect" => geometry::NSInsetRect,
-        "NSIntersectionRect" => geometry::NSIntersectionRect,
-        "NSOffsetRect" => geometry::NSOffsetRect,
-        "CGRectInset" => geometry::CGRectInset,
-        "CGRectOffset" => geometry::CGRectOffset,
-        "CGRectIntegral" => geometry::CGRectIntegral,
-        "CGRectIsEmpty" => geometry::CGRectIsEmpty,
-        // FIXME (PORTABILITY): this needs to be ported to macOS
-        #[cfg(not(target_os = "macos"))]
-        "NSDefaultMallocZone" => darwin::malloc::malloc_default_zone,
-        "NSRectFill" => color::NSRectFill,
-        "NSDrawNinePartImage" => image::NSDrawNinePartImage,
-        "NSDisableScreenUpdates" => geometry::NSDisableScreenUpdates,
-        "NSEnableScreenUpdates" => geometry::NSEnableScreenUpdates,
-        "CGRectEqualToRect" | "NSEqualRects" => geometry::CGRectEqualToRect,
         "GetCurrentKeyModifiers" | "GetCurrentEventKeyModifiers" => keymap::GetCurrentKeyModifiers,
         "TISCopyCurrentKeyboardInputSource" => textinput::TISCopyCurrentKeyboardInputSource,
         "TISCopyInputMethodKeyboardLayoutOverride" => textinput::TISCopyInputMethodKeyboardLayoutOverride,

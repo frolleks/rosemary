@@ -1027,7 +1027,9 @@ fn location(window: Id, x: f32, y: f32) -> NSPoint {
         },
     };
     let height = height + window::content_inset(window);
-    crate::geometry::point_in_window(x as f64, y as f64, height)
+    crate::cgpath::ns_point(crate::cggeometry::point_in_window(
+        x as f64, y as f64, height,
+    ))
 }
 
 /// Queue one mouse event for its window, which `-[NSApplication sendEvent:]`

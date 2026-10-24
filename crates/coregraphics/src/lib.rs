@@ -13,6 +13,7 @@ pub mod cgcontext;
 pub mod cgdataprovider;
 pub mod cgdisplay;
 pub mod cgfont;
+pub mod cggeometry;
 pub mod cgimage;
 pub mod cgpaint;
 pub mod cgpath;
@@ -94,6 +95,7 @@ exports::exports! {
         cgdataprovider,
         cgdisplay,
         cgfont,
+        cggeometry,
         cgimage,
         cgpath,
         cgpdf,
