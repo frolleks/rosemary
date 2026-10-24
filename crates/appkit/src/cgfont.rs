@@ -12,6 +12,7 @@ use std::ffi::c_void;
 use std::sync::Mutex;
 
 use corefoundation::base::CFTypeRef;
+use coregraphics::CGAffineTransformIdentity;
 use foundation::geometry::{NSPoint, NSRect, NSSize};
 
 use crate::fonts::{self, FaceInfo};
@@ -582,7 +583,7 @@ pub unsafe extern "C" fn CGFontGetGlyphPath(
         return std::ptr::null();
     };
     let m = match transform.is_null() {
-        true => crate::cgcontext::IDENTITY,
+        true => CGAffineTransformIdentity,
         // SAFETY: the caller's transform.
         false => unsafe { *transform },
     };

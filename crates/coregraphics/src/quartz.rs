@@ -16,11 +16,11 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use crate::{CGPoint, CGRect, CGSize};
+use crate::{CGAffineTransformIdentity, CGPoint, CGRect, CGSize};
 use corefoundation::base::CFTypeRef;
 use tiny_skia as sk;
 
-use crate::cgcontext::{CGAffineTransform, IDENTITY};
+use crate::cgcontext::CGAffineTransform;
 use crate::cgpath::Elements;
 
 /// A Core Foundation object a graphics state holds a reference to.
@@ -92,7 +92,7 @@ pub struct GState {
 impl Default for GState {
     fn default() -> Self {
         GState {
-            ctm: IDENTITY,
+            ctm: CGAffineTransformIdentity,
             fill: Ink::Color([0.0, 0.0, 0.0, 1.0]),
             stroke: Ink::Color([0.0, 0.0, 0.0, 1.0]),
             fill_components: 3,
@@ -109,7 +109,7 @@ impl Default for GState {
                 dash: None,
             },
             clip: None,
-            text_matrix: IDENTITY,
+            text_matrix: CGAffineTransformIdentity,
             font: None,
             font_size: 0.0,
             text_mode: 0,
@@ -202,13 +202,13 @@ pub fn frame_of(context: CFTypeRef) -> Option<Frame> {
             true => CGAffineTransform {
                 a: d,
                 d,
-                ..IDENTITY
+                ..CGAffineTransformIdentity
             },
             false => CGAffineTransform {
                 a: d,
                 d: -d,
                 ty: f64::from(device.height),
-                ..IDENTITY
+                ..CGAffineTransformIdentity
             },
         };
         return Some(Frame {
@@ -226,7 +226,7 @@ pub fn frame_of(context: CFTypeRef) -> Option<Frame> {
         base: CGAffineTransform {
             d: -1.0,
             ty: ctx.height as f64,
-            ..IDENTITY
+            ..CGAffineTransformIdentity
         },
         width: ctx.width as u32,
         height: ctx.height as u32,
@@ -540,7 +540,7 @@ pub fn source_for(ink: &Ink, state: &GState, frame: &Frame) -> Option<Source> {
             let placed = crate::cgpaint::pattern_matrix(pattern.0)?.then(CGAffineTransform {
                 tx: phase_x,
                 ty: phase_y,
-                ..IDENTITY
+                ..CGAffineTransformIdentity
             });
             let pattern_to_device = placed.then(frame.base);
             let tile = crate::cgpaint::render_tile(
@@ -1092,10 +1092,10 @@ pub fn draw_shading(context: CFTypeRef, shading: Shading) {
                 };
                 let at = |s: f64| (shading.start.0 + ux * s, shading.start.1 + uy * s);
                 let (a, b) = (at(s0), at(s1));
-                region.move_to(IDENTITY, a.0 + px, a.1 + py);
-                region.line_to(IDENTITY, b.0 + px, b.1 + py);
-                region.line_to(IDENTITY, b.0 - px, b.1 - py);
-                region.line_to(IDENTITY, a.0 - px, a.1 - py);
+                region.move_to(CGAffineTransformIdentity, a.0 + px, a.1 + py);
+                region.line_to(CGAffineTransformIdentity, b.0 + px, b.1 + py);
+                region.line_to(CGAffineTransformIdentity, b.0 - px, b.1 - py);
+                region.line_to(CGAffineTransformIdentity, a.0 - px, a.1 - py);
                 region.close();
                 (shading.stops.clone(), shading.start, shading.end, None)
             }
@@ -1103,7 +1103,7 @@ pub fn draw_shading(context: CFTypeRef, shading: Shading) {
                 let concentric = shading.start == shading.end;
                 match shading.extend.1 {
                     true => region.rect(
-                        IDENTITY,
+                        CGAffineTransformIdentity,
                         CGRect {
                             origin: CGPoint {
                                 x: -reach,
@@ -1116,7 +1116,7 @@ pub fn draw_shading(context: CFTypeRef, shading: Shading) {
                         },
                     ),
                     false => region.ellipse(
-                        IDENTITY,
+                        CGAffineTransformIdentity,
                         CGRect {
                             origin: CGPoint {
                                 x: shading.end.0 - r1,
@@ -1193,7 +1193,7 @@ pub fn draw_glyphs(
             d: s,
             tx: *x,
             ty: *y,
-            ..IDENTITY
+            ..CGAffineTransformIdentity
         };
         crate::cgpath::glyph_outline(face.face(), *glyph, at, &mut text);
     }

@@ -724,7 +724,7 @@ pub unsafe extern "C" fn CTFontCreatePathForGlyph(
     let to_font = crate::cgcontext::CGAffineTransform {
         a: s,
         d: s,
-        ..crate::cgcontext::IDENTITY
+        ..crate::CGAffineTransformIdentity
     };
     let m = match transform.is_null() {
         true => to_font,

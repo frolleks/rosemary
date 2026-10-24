@@ -5,7 +5,7 @@
 
 use std::ffi::{c_char, c_void};
 
-use crate::{CGPoint, CGRect, CGSize};
+use crate::{CGAffineTransformIdentity, CGPoint, CGRect, CGSize};
 use corefoundation::base::CFTypeRef;
 use tiny_skia as sk;
 
@@ -16,15 +16,6 @@ use crate::{CGAffineTransformMakeScale, CGAffineTransformMakeTranslation};
 pub use crate::CGAffineTransform;
 
 pub type CGContextRef = CFTypeRef;
-
-pub const IDENTITY: CGAffineTransform = CGAffineTransform {
-    a: 1.0,
-    b: 0.0,
-    c: 0.0,
-    d: 1.0,
-    tx: 0.0,
-    ty: 0.0,
-};
 
 #[repr(C)]
 struct Color {
@@ -255,7 +246,7 @@ pub unsafe extern "C" fn CGContextConcatCTM(context: CFTypeRef, transform: CGAff
 }
 
 pub unsafe extern "C" fn CGContextGetCTM(context: CFTypeRef) -> CGAffineTransform {
-    gstate(context).map_or(IDENTITY, |state| state.ctm)
+    gstate(context).map_or(CGAffineTransformIdentity, |state| state.ctm)
 }
 
 /// `CGContextSetCTM`, private but exported, and used by Cairo to put back a
@@ -281,7 +272,7 @@ pub unsafe extern "C" fn CGContextRotateCTM(context: CFTypeRef, angle: f64) {
         b: sin,
         c: -sin,
         d: cos,
-        ..IDENTITY
+        ..CGAffineTransformIdentity
     };
     unsafe { CGContextConcatCTM(context, rotation) };
 }
@@ -1050,7 +1041,7 @@ pub unsafe extern "C" fn CGContextSetTextMatrix(context: CFTypeRef, matrix: CGAf
 }
 
 pub unsafe extern "C" fn CGContextGetTextMatrix(context: CFTypeRef) -> CGAffineTransform {
-    gstate(context).map_or(IDENTITY, |state| state.text_matrix)
+    gstate(context).map_or(CGAffineTransformIdentity, |state| state.text_matrix)
 }
 
 pub unsafe extern "C" fn CGContextSetTextPosition(context: CFTypeRef, x: f64, y: f64) {
@@ -1576,7 +1567,7 @@ mod tests {
             CGContextScaleCTM(context, 2.0, 3.0);
             assert_eq!(CGContextGetCTM(context).d, 3.0);
             CGContextRestoreGState(context);
-            assert_eq!(CGContextGetCTM(context), IDENTITY);
+            assert_eq!(CGContextGetCTM(context), CGAffineTransformIdentity);
             let inverse = crate::CGAffineTransformInvert(CGAffineTransformMakeScale(2.0, 4.0));
             assert_eq!(inverse.a, 0.5);
             assert_eq!(inverse.d, 0.25);
