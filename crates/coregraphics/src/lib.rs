@@ -11,12 +11,15 @@ pub mod cgbitmap;
 pub mod cgcolor;
 pub mod cgcontext;
 pub mod cgdataprovider;
+pub mod cgfont;
 pub mod cgimage;
 pub mod cgpaint;
 pub mod cgpath;
 pub mod focus;
+pub mod font_attributes;
 pub mod fonts;
 pub mod quartz;
+pub mod quartz_event;
 pub mod raster;
 
 pub use cgaffinetransform::*;
@@ -87,10 +90,12 @@ exports::exports! {
         cgbitmap,
         cgcolor,
         cgdataprovider,
+        cgfont,
         cgimage,
         cgpath,
         cgcontext,
         cgpaint,
+        quartz_event,
     }
 }
 
@@ -107,6 +112,7 @@ mod tests {
             "CGColorSpaceCreateDeviceRGB",
             "CGContextFillRect",
             "CGDataProviderCreateWithData",
+            "CGEventCreate",
             "CGImageCreate",
             "CGPatternCreate",
         ] {

@@ -26,8 +26,8 @@ pub use coregraphics::cgcolor;
 pub use coregraphics::cgcontext;
 pub use coregraphics::cgdataprovider;
 pub use coregraphics::cgimage;
-pub mod cgevent;
-pub mod cgfont;
+pub use coregraphics::quartz_event;
+pub mod ats;
 pub mod cgl;
 pub use coregraphics::cgpaint;
 pub mod cgpath;
@@ -94,6 +94,7 @@ pub fn bootstrap() {
     ONCE.call_once(|| {
         foundation::bootstrap();
         coregraphics::bootstrap();
+        event::install_quartz_event_provider();
         decor::install();
         classes::install();
         alert::install();
@@ -214,15 +215,6 @@ exports::exports! {
         "CGSetLocalEventsSuppressionInterval" => screen::CGSetLocalEventsSuppressionInterval,
         "CGAssociateMouseAndMouseCursorPosition" => screen::CGAssociateMouseAndMouseCursorPosition,
         "CGEventSourceKeyState" => screen::CGEventSourceKeyState,
-        "CGEventCreate" => cgevent::CGEventCreate,
-        "CGEventGetLocation" => cgevent::CGEventGetLocation,
-        "CGEventCreateMouseEvent" => cgevent::CGEventCreateMouseEvent,
-        "CGEventSetType" => cgevent::CGEventSetType,
-        "CGEventPost" => cgevent::CGEventPost,
-        "CGGetLastMouseDelta" => cgevent::CGGetLastMouseDelta,
-        "CGEventSourceFlagsState" => cgevent::CGEventSourceFlagsState,
-        "CGEventSourceCounterForEventType" => cgevent::CGEventSourceCounterForEventType,
-        "CGEventTapCreate" => cgevent::CGEventTapCreate,
         "CGDisplayModeCopyPixelEncoding" => screen::CGDisplayModeCopyPixelEncoding,
         "CGRectGetWidth" => geometry::CGRectGetWidth,
         "CGRectGetHeight" => geometry::CGRectGetHeight,
@@ -292,7 +284,7 @@ exports::exports! {
     }
     groups {
         pasteboard_manager,
-        cgfont,
+        ats,
         hitheme,
         launchservices,
         cgl,

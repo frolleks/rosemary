@@ -1463,7 +1463,7 @@ pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::
     // where it was, and otherwise the answer the window system gives.
     let moved = match mouse_is_associated() {
         true => {
-            let at = crate::cgevent::global_pointer();
+            let at = crate::quartz_event::global_pointer();
             (asked.x - at.x, asked.y - at.y)
         }
         false => (f64::from(local.0 - from.0), f64::from(local.1 - from.1)),
