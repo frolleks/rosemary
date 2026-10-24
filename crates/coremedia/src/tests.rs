@@ -223,3 +223,46 @@ fn the_extension_keys_are_one_object_each() {
         (0, 0, 0, 0)
     );
 }
+
+#[test]
+fn hevc_parameter_sets_are_refused_for_lack_of_a_parser() {
+    let vps: &[u8] = &[0x40, 0x01];
+    let pointers: [*const u8; 1] = [vps.as_ptr()];
+    let sizes: [usize; 1] = [vps.len()];
+    let mut out: CFTypeRef = 1 as CFTypeRef;
+    // SAFETY: one array of one entry each and a live out-parameter.
+    let status = unsafe {
+        CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+            std::ptr::null(),
+            1,
+            pointers.as_ptr(),
+            sizes.as_ptr(),
+            4,
+            std::ptr::null(),
+            &mut out,
+        )
+    };
+    assert_eq!(status, INVALID_PARAMETER);
+    assert!(out.is_null(), "no description is ever made");
+}
+
+#[test]
+fn hevc_parameter_set_lookup_is_refused_on_any_description() {
+    let (status, description) = from_sets(&[SPS, PPS], 4);
+    assert_eq!(status, NO_ERR, "an H.264 description to ask the wrong way");
+    // SAFETY: the description just made, released at the end.
+    unsafe {
+        assert_eq!(
+            CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                description,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ),
+            INVALID_PARAMETER
+        );
+        corefoundation::api::CFRelease(description);
+    }
+}
