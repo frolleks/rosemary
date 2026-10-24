@@ -3594,6 +3594,13 @@ pub static SIGNATURES: &[FunctionAbi] = &[
         P,
         P
     ),
+    // The fifth argument is `const VTDecompressionOutputCallbackRecord *`: a
+    // pointer to a two-word record holding a guest callback, not a callback
+    // in argument position itself - a plain `P` leaves it exactly that, a
+    // pointer this crate's own `VTDecompressionSessionCreate` never follows,
+    // because no session - and so no decoded frame to call it with - is ever
+    // made.
+    sig!("VTDecompressionSessionCreate", I32, P, P, P, P, P, P),
     sig!("VTDecompressionSessionDecodeFrame", I32, P, P, U32, P, P),
     sig!("VTDecompressionSessionFinishDelayedFrames", I32, P),
     sig!("VTDecompressionSessionInvalidate", V, P),
@@ -4087,6 +4094,18 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("kCFStreamSSLValidatesCertificateChain", DATA),
     // `CGRect` is returned in memory the caller provides.
     ("CMVideoFormatDescriptionGetCleanAperture", AGGREGATE),
+    // `CMTime` by value: twenty-four bytes, `MEMORY` class in SysV AMD64 and
+    // so passed entirely on the stack rather than in a register - the same
+    // shape `AGGREGATE` already refuses above, just as an argument instead of
+    // a return. `crates/rosemary/src/shims/coremedia.rs` bridges exactly this
+    // shape already, but only for the macOS-hosted VideoToolbox it calls
+    // through `host_or_refuse`; wiring the tree's own `videotoolbox` crate
+    // through that same shim on every host is a bigger change than this
+    // table's entries, so both functions are implemented and exported (a
+    // native same-architecture run needs no marshaller to call them) and
+    // refused here rather than guessed at.
+    ("VTCompressionSessionCompleteFrames", AGGREGATE),
+    ("VTCompressionSessionEncodeFrame", AGGREGATE),
     ("kCFTypeArrayCallBacks", DATA),
     ("kUTTagClassFilenameExtension", DATA),
     ("kUTTagClassMIMEType", DATA),

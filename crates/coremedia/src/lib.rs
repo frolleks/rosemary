@@ -153,6 +153,8 @@ const KEYS: &[(&str, &str)] = &[
         "SMPTE_240M_1995",
     ),
     ("_kCMFormatDescriptionYCbCrMatrix_ITU_R_2020", "ITU_R_2020"),
+    // Sample attachments, which a decoder client reads per frame.
+    ("_kCMSampleAttachmentKey_NotSync", "NotSync"),
 ];
 
 const ATOMS: &str = "SampleDescriptionExtensionAtoms";
@@ -613,6 +615,51 @@ pub unsafe extern "C" fn CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
     }
 }
 
+/// `OSStatus CMVideoFormatDescriptionCreateFromHEVCParameterSets(CFAllocatorRef,
+/// size_t parameterSetCount, const uint8_t *const *parameterSetPointers,
+/// const size_t *parameterSetSizes, int NALUnitHeaderLength, CFDictionaryRef
+/// extensions, CMVideoFormatDescriptionRef *)`.
+///
+/// There is no HEVC parameter-set parser here - nothing reads an HEVC SPS for
+/// its picture size the way [`h264::parse_sps`] does for H.264's - so this can
+/// never build a description. The error is the one Apple's own parser returns
+/// for a parameter set it cannot make sense of, and `out` is left null.
+pub unsafe extern "C" fn CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+    _allocator: CFTypeRef,
+    _parameter_set_count: usize,
+    _parameter_set_pointers: *const *const u8,
+    _parameter_set_sizes: *const usize,
+    _nal_unit_header_length: i32,
+    _extensions: CFTypeRef,
+    out: *mut CFTypeRef,
+) -> i32 {
+    if !out.is_null() {
+        // SAFETY: the caller's out-parameter, checked above.
+        unsafe { out.write(std::ptr::null()) };
+    }
+    INVALID_PARAMETER
+}
+
+/// `OSStatus CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+/// CMFormatDescriptionRef, size_t parameterSetIndex, const uint8_t **, size_t
+/// *parameterSetSizeOut, size_t *parameterSetCountOut, int
+/// *NALUnitHeaderLengthOut)`.
+///
+/// No description this crate makes is ever HEVC -
+/// [`CMVideoFormatDescriptionCreateFromHEVCParameterSets`] never succeeds - so
+/// there is never a parameter set to answer with. Every out-parameter is left
+/// as the caller passed it.
+pub unsafe extern "C" fn CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+    _description: CFTypeRef,
+    _parameter_set_index: usize,
+    _parameter_set_pointer_out: *mut *const u8,
+    _parameter_set_size_out: *mut usize,
+    _parameter_set_count_out: *mut usize,
+    _nal_unit_header_length_out: *mut i32,
+) -> i32 {
+    INVALID_PARAMETER
+}
+
 exports::exports! {
     functions {
         "CMFormatDescriptionGetTypeID" => CMFormatDescriptionGetTypeID,
@@ -624,10 +671,14 @@ exports::exports! {
         "CMVideoFormatDescriptionCreate" => CMVideoFormatDescriptionCreate,
         "CMVideoFormatDescriptionCreateFromH264ParameterSets" =>
             CMVideoFormatDescriptionCreateFromH264ParameterSets,
+        "CMVideoFormatDescriptionCreateFromHEVCParameterSets" =>
+            CMVideoFormatDescriptionCreateFromHEVCParameterSets,
         "CMVideoFormatDescriptionGetDimensions" => CMVideoFormatDescriptionGetDimensions,
         "CMVideoFormatDescriptionGetCleanAperture" => CMVideoFormatDescriptionGetCleanAperture,
         "CMVideoFormatDescriptionGetH264ParameterSetAtIndex" =>
             CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
+        "CMVideoFormatDescriptionGetHEVCParameterSetAtIndex" =>
+            CMVideoFormatDescriptionGetHEVCParameterSetAtIndex,
     }
 }
 
