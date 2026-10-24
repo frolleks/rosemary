@@ -15,6 +15,7 @@ pub mod cgfont;
 pub mod cgimage;
 pub mod cgpaint;
 pub mod cgpath;
+pub mod cgpdf;
 pub mod focus;
 pub mod font_attributes;
 pub mod fonts;
@@ -93,6 +94,7 @@ exports::exports! {
         cgfont,
         cgimage,
         cgpath,
+        cgpdf,
         cgcontext,
         cgpaint,
         quartz_event,

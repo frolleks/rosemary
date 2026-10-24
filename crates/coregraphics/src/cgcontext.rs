@@ -5,7 +5,7 @@
 
 use std::ffi::c_void;
 
-use crate::{CGAffineTransformIdentity, CGPoint, CGRect, CGSize};
+use crate::{CGAffineTransformIdentity, CGPoint, CGRect, CGRectApplyAffineTransform, CGSize};
 use corefoundation::base::CFTypeRef;
 use tiny_skia as sk;
 
@@ -847,39 +847,6 @@ unsafe extern "C" fn ignored_context(_context: CFTypeRef) {}
 /// one page and nothing here makes a PDF context.
 unsafe extern "C" fn CGContextBeginPage(_context: CFTypeRef, _media: *const CGRect) {}
 
-/// `CGContextRef CGPDFContextCreateWithURL(CFURLRef, const CGRect *,
-/// CFDictionaryRef)`: NULL - there is no PDF writer, and a program printing to
-/// a file gets the failure it already handles.
-unsafe extern "C" fn CGPDFContextCreateWithURL(
-    _url: CFTypeRef,
-    _media: *const CGRect,
-    _info: CFTypeRef,
-) -> CFTypeRef {
-    std::ptr::null()
-}
-
-pub unsafe extern "C" fn CGRectApplyAffineTransform(rect: CGRect, t: CGAffineTransform) -> CGRect {
-    let (x0, y0) = (rect.origin.x, rect.origin.y);
-    let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
-    let corners = [
-        t.apply(x0, y0),
-        t.apply(x1, y0),
-        t.apply(x0, y1),
-        t.apply(x1, y1),
-    ];
-    let [left, bottom, right, top] = corners.iter().fold(
-        [f64::MAX, f64::MAX, f64::MIN, f64::MIN],
-        |[l, b, r, t], p| [l.min(p.x), b.min(p.y), r.max(p.x), t.max(p.y)],
-    );
-    CGRect {
-        origin: CGPoint { x: left, y: bottom },
-        size: CGSize {
-            width: right - left,
-            height: top - bottom,
-        },
-    }
-}
-
 /// `CGRectNull`.
 const NULL_RECT: CGRect = CGRect {
     origin: CGPoint {
@@ -968,8 +935,6 @@ exports::exports! {
         "CGContextDrawShading" => CGContextDrawShading,
         "CGContextFlush" | "CGContextSynchronize" | "CGContextEndPage" => ignored_context,
         "CGContextBeginPage" => CGContextBeginPage,
-        "CGPDFContextCreateWithURL" => CGPDFContextCreateWithURL,
-        "CGRectApplyAffineTransform" => CGRectApplyAffineTransform,
     }
 }
 

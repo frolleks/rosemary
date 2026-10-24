@@ -2,7 +2,7 @@
 
 #![allow(non_snake_case)]
 
-use crate::{CGFloat, CGPoint, CGSize, CGVector};
+use crate::{CGFloat, CGPoint, CGRect, CGSize, CGVector};
 
 fn concat(t1: CGAffineTransform, t2: CGAffineTransform) -> CGAffineTransform {
     CGAffineTransform {
@@ -186,6 +186,30 @@ pub unsafe extern "C" fn CGAffineTransformEqualToTransform(
     t1 == t2
 }
 
+/// `CGRect CGRectApplyAffineTransform(CGRect rect, CGAffineTransform t)`:
+/// the rectangle's four corners transformed, and the bounds of the result.
+pub unsafe extern "C" fn CGRectApplyAffineTransform(rect: CGRect, t: CGAffineTransform) -> CGRect {
+    let (x0, y0) = (rect.origin.x, rect.origin.y);
+    let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
+    let corners = [
+        t.apply(x0, y0),
+        t.apply(x1, y0),
+        t.apply(x0, y1),
+        t.apply(x1, y1),
+    ];
+    let [left, bottom, right, top] = corners.iter().fold(
+        [f64::MAX, f64::MAX, f64::MIN, f64::MIN],
+        |[l, b, r, t], p| [l.min(p.x), b.min(p.y), r.max(p.x), t.max(p.y)],
+    );
+    CGRect {
+        origin: CGPoint { x: left, y: bottom },
+        size: CGSize {
+            width: right - left,
+            height: top - bottom,
+        },
+    }
+}
+
 exports::exports! {
     functions {
         "CGAffineTransformMake" => CGAffineTransformMake,
@@ -199,5 +223,6 @@ exports::exports! {
         "CGAffineTransformConcat" => CGAffineTransformConcat,
         "CGAffineTransformIsIdentity" => CGAffineTransformIsIdentity,
         "CGAffineTransformEqualToTransform" => CGAffineTransformEqualToTransform,
+        "CGRectApplyAffineTransform" => CGRectApplyAffineTransform,
     }
 }
