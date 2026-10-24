@@ -8,7 +8,6 @@ license.workspace = true
 corefoundation.workspace = true
 exports.workspace = true
 objc.workspace = true
-prefix.workspace = true
 tiny-skia.workspace = true
 i_overlay.workspace = true
 owned_ttf_parser.workspace = true

@@ -24,6 +24,7 @@ corevideo.workspace = true
 iosurface.workspace = true
 coreaudio.workspace = true
 coregraphics.workspace = true
+coretext.workspace = true
 contacts.workspace = true
 avfoundation.workspace = true
 security.workspace = true

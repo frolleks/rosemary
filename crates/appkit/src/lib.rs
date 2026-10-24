@@ -31,7 +31,7 @@ pub mod classes;
 pub mod color;
 mod controls;
 mod coreanimation;
-pub use coregraphics::coretext;
+pub use coretext;
 pub mod cursor;
 pub(crate) mod decode;
 pub mod decor;

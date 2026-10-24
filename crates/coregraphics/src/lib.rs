@@ -10,7 +10,6 @@ pub mod cgaffinetransform;
 pub mod cgcontext;
 pub mod cgpaint;
 pub mod cgpath;
-pub mod coretext;
 pub mod focus;
 pub mod fonts;
 pub mod graphics;
@@ -73,7 +72,6 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         "_CGAffineTransformIdentity".to_string(),
         (&raw const CGAffineTransformIdentity) as usize as u64,
     )];
-    out.extend(coretext::data_symbols());
     out.extend(cgcontext::data_symbols());
     out
 }
@@ -85,7 +83,6 @@ exports::exports! {
         graphics,
         cgcontext,
         cgpaint,
-        coretext,
     }
 }
 
@@ -96,12 +93,7 @@ mod tests {
     #[test]
     fn the_groups_publish_the_drawing_calls() {
         let names = names();
-        for name in [
-            "CGContextFillRect",
-            "CGImageCreate",
-            "CGPatternCreate",
-            "CTFontCreateWithName",
-        ] {
+        for name in ["CGContextFillRect", "CGImageCreate", "CGPatternCreate"] {
             assert!(names.contains(&name), "{name}");
         }
     }

@@ -11,6 +11,7 @@ darwin.workspace = true
 objc.workspace = true
 corefoundation.workspace = true
 coregraphics.workspace = true
+coretext.workspace = true
 prefix.workspace = true
 server.workspace = true
 foundation.workspace = true

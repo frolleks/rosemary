@@ -162,6 +162,7 @@ dependencies = [
  "chrome",
  "corefoundation",
  "coregraphics",
+ "coretext",
  "darwin",
  "exports",
  "foundation",
@@ -631,7 +632,6 @@ dependencies = [
  "i_overlay",
  "objc",
  "owned_ttf_parser",
- "prefix",
  "rust-fontconfig",
  "tiny-skia",
 ]
@@ -645,6 +645,17 @@ dependencies = [
  "exports",
  "foundation",
  "libc",
+ "prefix",
+]
+
+[[package]]
+name = "coretext"
+version = "0.4.1"
+dependencies = [
+ "corefoundation",
+ "coregraphics",
+ "exports",
+ "owned_ttf_parser",
  "prefix",
 ]
 
@@ -2314,6 +2325,7 @@ dependencies = [
  "corefoundation",
  "coregraphics",
  "coreservices",
+ "coretext",
  "corevideo",
  "darwin",
  "exports",
