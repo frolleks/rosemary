@@ -275,6 +275,33 @@ pub extern "C" fn CGEventSourceCounterForEventType(_state: u32, kind: u32) -> u3
     }
 }
 
+/// `CGError CGSetLocalEventsSuppressionInterval(CFTimeInterval)`.
+///
+/// How long real mouse input is ignored after a warp. `CGWarpMouseCursorPosition`
+/// never suppresses anything, which is the interval games set - zero, so mouse
+/// look keeps its deltas. Any other interval is reported once rather than kept.
+pub unsafe extern "C" fn CGSetLocalEventsSuppressionInterval(seconds: f64) -> i32 {
+    static TOLD: std::sync::Once = std::sync::Once::new();
+    if seconds != 0.0 {
+        TOLD.call_once(|| {
+            eprintln!(
+                "rosemary: coregraphics: CGSetLocalEventsSuppressionInterval({seconds}) is not \
+                 honoured; input is never suppressed after a warp"
+            )
+        });
+    }
+    0
+}
+
+/// `bool CGEventSourceKeyState(CGEventSourceStateID, CGKeyCode)`.
+///
+/// False: the key state a caller asks about here is the window server's, and
+/// there is no window server to ask. SDL's keyboard state is this process's own
+/// view and answers a different question.
+pub unsafe extern "C" fn CGEventSourceKeyState(_source: i32, _key: u16) -> u8 {
+    0
+}
+
 /// `CFMachPortRef CGEventTapCreate(CGEventTapLocation, CGEventTapPlacement,
 /// CGEventTapOptions, CGEventMask, CGEventTapCallBack, void *)`
 ///
@@ -307,6 +334,8 @@ exports::exports! {
         "CGGetLastMouseDelta" => CGGetLastMouseDelta,
         "CGEventSourceFlagsState" => CGEventSourceFlagsState,
         "CGEventSourceCounterForEventType" => CGEventSourceCounterForEventType,
+        "CGSetLocalEventsSuppressionInterval" => CGSetLocalEventsSuppressionInterval,
+        "CGEventSourceKeyState" => CGEventSourceKeyState,
         "CGEventTapCreate" => CGEventTapCreate,
     }
 }

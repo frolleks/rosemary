@@ -18,11 +18,15 @@ pub mod cgimage;
 pub mod cgpaint;
 pub mod cgpath;
 pub mod cgpdf;
+pub mod cgwindow;
 pub mod focus;
 pub mod font_attributes;
 pub mod fonts;
+pub mod metal;
 pub mod quartz;
+pub mod quartz_display;
 pub mod quartz_event;
+pub mod quartz_window;
 pub mod raster;
 
 pub use cgaffinetransform::*;
@@ -99,9 +103,13 @@ exports::exports! {
         cgimage,
         cgpath,
         cgpdf,
+        cgwindow,
         cgcontext,
         cgpaint,
+        metal,
+        quartz_display,
         quartz_event,
+        quartz_window,
     }
 }
 

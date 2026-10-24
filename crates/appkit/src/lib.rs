@@ -105,6 +105,7 @@ pub fn bootstrap() {
         workspace::install();
         color::install();
         cursor::install();
+        screen::install_quartz_display_provider();
         font::install();
         image::install();
         image::bitmap::install();
@@ -151,21 +152,13 @@ exports::exports! {
     functions {
         "NSApplicationMain" => application::NSApplicationMain,
         "CAFrameRateRangeMake" => displaylink::CAFrameRateRangeMake,
-        "CGSessionCopyCurrentDictionary" => screen::CGSessionCopyCurrentDictionary,
-        "CGWindowServerCreateServerPort" => screen::CGWindowServerCreateServerPort,
         "NSBitsPerSampleFromDepth" => screen::NSBitsPerSampleFromDepth,
         "NSBitsPerPixelFromDepth" => screen::NSBitsPerPixelFromDepth,
         "NSNumberOfColorComponents" => screen::NSNumberOfColorComponents,
         "NSPlanarFromDepth" => screen::NSPlanarFromDepth,
         "NSColorSpaceFromDepth" => screen::NSColorSpaceFromDepth,
         "NSBestDepth" => screen::NSBestDepth,
-        "CGDisplayHideCursor" => cursor::CGDisplayHideCursor,
-        "CGDisplayShowCursor" => cursor::CGDisplayShowCursor,
-        "CGCursorIsVisible" => cursor::CGCursorIsVisible,
-        "CGWarpMouseCursorPosition" => screen::CGWarpMouseCursorPosition,
-        "CGSetLocalEventsSuppressionInterval" => screen::CGSetLocalEventsSuppressionInterval,
-        "CGAssociateMouseAndMouseCursorPosition" => screen::CGAssociateMouseAndMouseCursorPosition,
-        "CGEventSourceKeyState" => screen::CGEventSourceKeyState,
+
         "GetCurrentKeyModifiers" | "GetCurrentEventKeyModifiers" => keymap::GetCurrentKeyModifiers,
         "TISCopyCurrentKeyboardInputSource" => textinput::TISCopyCurrentKeyboardInputSource,
         "TISCopyInputMethodKeyboardLayoutOverride" => textinput::TISCopyInputMethodKeyboardLayoutOverride,

@@ -1224,6 +1224,7 @@ name = "foundation"
 version = "0.4.1"
 dependencies = [
  "corefoundation",
+ "coregraphics",
  "darwin",
  "exports",
  "libc",
@@ -1765,6 +1766,7 @@ dependencies = [
  "appkit",
  "ash",
  "corefoundation",
+ "coregraphics",
  "darwin",
  "exports",
  "foundation",

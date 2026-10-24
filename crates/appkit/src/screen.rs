@@ -5,30 +5,6 @@ use objc::object::Id;
 use objc::sel::Sel;
 use static_init::dynamic;
 
-/// `CGSessionCopyCurrentDictionary`.
-///
-/// There is no WindowServer login session on this host. An empty dictionary is
-/// still preferable to null: it represents a local session with none of the
-/// optional flags (notably `kCGSSessionRemote`) set, which is the environment
-/// the SDL-backed application actually runs in.
-#[expect(non_snake_case, reason = "the C spelling is the interface")]
-pub unsafe extern "C" fn CGSessionCopyCurrentDictionary() -> corefoundation::base::CFTypeRef {
-    corefoundation::collections::new_dictionary(
-        &[],
-        corefoundation::callbacks::Policy::from_type_callbacks(),
-        corefoundation::callbacks::Policy::from_type_callbacks(),
-        false,
-    )
-}
-
-/// `CGWindowServerCreateServerPort`, a private call callers use to ask whether
-/// a WindowServer is reachable. There is none here, so the answer is
-/// `MACH_PORT_NULL`, which is what Apple's returns when it cannot connect.
-#[expect(non_snake_case, reason = "the C spelling is the interface")]
-pub unsafe extern "C" fn CGWindowServerCreateServerPort() -> u32 {
-    0
-}
-
 use crate::define::{class_methods, methods};
 
 #[repr(C)]
@@ -614,6 +590,7 @@ mod tests {
 
     impl MouseState {
         fn take(associated: bool, recentring: Option<Recentring>) -> Self {
+            crate::bootstrap();
             static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
             let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
             Self {
@@ -647,7 +624,10 @@ mod tests {
     #[test]
     fn redundant_mouse_association_preserves_camera_recentring() {
         let _state = MouseState::take(true, camera_recentre(std::time::Instant::now()));
-        assert_eq!(unsafe { CGAssociateMouseAndMouseCursorPosition(1) }, 0);
+        assert_eq!(
+            unsafe { coregraphics::quartz_display::CGAssociateMouseAndMouseCursorPosition(1) },
+            0
+        );
         assert!(
             recentring(),
             "a reasserted association dropped the recentre"
@@ -658,14 +638,20 @@ mod tests {
     fn mouse_association_releases_an_idle_recentre() {
         let stale = std::time::Instant::now() - 2 * RECENTRE_IDLE;
         let _state = MouseState::take(true, camera_recentre(stale));
-        assert_eq!(unsafe { CGAssociateMouseAndMouseCursorPosition(1) }, 0);
+        assert_eq!(
+            unsafe { coregraphics::quartz_display::CGAssociateMouseAndMouseCursorPosition(1) },
+            0
+        );
         assert!(!recentring(), "an idle recentre outlived the association");
     }
 
     #[test]
     fn disassociating_takes_over_from_a_recentre() {
         let _state = MouseState::take(true, camera_recentre(std::time::Instant::now()));
-        assert_eq!(unsafe { CGAssociateMouseAndMouseCursorPosition(0) }, 0);
+        assert_eq!(
+            unsafe { coregraphics::quartz_display::CGAssociateMouseAndMouseCursorPosition(0) },
+            0
+        );
         assert!(!mouse_is_associated());
         assert!(!recentring(), "disassociation left the recentre in charge");
     }
@@ -683,8 +669,7 @@ mod tests {
 /// only refresh SDL's virtual position: the physical cursor is already there,
 /// and toggling relative mode every frame would flush real camera motion.
 /// `kCGErrorSuccess` is `0`.
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::NSPoint) -> i32 {
+pub(crate) unsafe fn warp_pointer_impl(point: foundation::geometry::NSPoint) -> i32 {
     let asked = point;
     let point = (point.x as f32, point.y as f32);
     // An edge hold is not the guest's relative mode: the warp is a plain one.
@@ -762,25 +747,6 @@ pub unsafe extern "C" fn CGWarpMouseCursorPosition(point: foundation::geometry::
     match released && warped {
         true => remember_relative_warp(point),
         false => forget_relative_warp(),
-    }
-    0
-}
-
-/// `CGError CGSetLocalEventsSuppressionInterval(CFTimeInterval)`.
-///
-/// How long real mouse input is ignored after a warp. [`CGWarpMouseCursorPosition`]
-/// never suppresses anything, which is the interval games set - zero, so mouse
-/// look keeps its deltas. Any other interval is reported once rather than kept.
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn CGSetLocalEventsSuppressionInterval(seconds: f64) -> i32 {
-    static TOLD: std::sync::Once = std::sync::Once::new();
-    if seconds != 0.0 {
-        TOLD.call_once(|| {
-            eprintln!(
-                "rosemary: appkit: CGSetLocalEventsSuppressionInterval({seconds}) is not honoured; \
-                 input is never suppressed after a warp"
-            )
-        });
     }
     0
 }
@@ -961,17 +927,42 @@ pub(crate) fn forget_recentring() {
 /// `kCGErrorSuccess` is `0`, and stays the answer on a host whose SDL is too
 /// old for the mode: a program told this failed treats mouse look as
 /// unavailable rather than running without capture.
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn CGAssociateMouseAndMouseCursorPosition(connected: u32) -> i32 {
-    let was = ASSOCIATED.swap(connected != 0, std::sync::atomic::Ordering::AcqRel);
+pub(crate) unsafe fn associate_impl(connected: bool) {
+    let was = ASSOCIATED.swap(connected, std::sync::atomic::Ordering::AcqRel);
     // The cursor stops where it is, which is what the guest is told from here.
-    if connected == 0 && was {
+    if !connected && was {
         crate::event::settle_pointer();
     }
     // Reapplied even when unchanged: games reassert every frame, and that is
     // what puts back a window that lost relative mode without a focus event.
     apply_mouse_association();
-    0
+}
+
+/// The display services' view of AppKit's process-wide cursor and association.
+struct QuartzDisplayProvider;
+
+impl coregraphics::quartz_display::Provider for QuartzDisplayProvider {
+    fn hide_cursor(&self) {
+        crate::cursor::hide_cursor();
+    }
+
+    fn show_cursor(&self) {
+        crate::cursor::show_cursor();
+    }
+
+    fn cursor_visible(&self) -> bool {
+        crate::cursor::wants_visible()
+    }
+
+    fn associate(&self, connected: bool) {
+        // SAFETY: the process-wide association state, which this provider owns.
+        unsafe { associate_impl(connected) };
+    }
+}
+
+/// Install the provider the display services ask for cursor and association state.
+pub(crate) fn install_quartz_display_provider() {
+    coregraphics::quartz_display::set_provider(Box::new(QuartzDisplayProvider));
 }
 
 /// Whether the pointer and the cursor are meant to be moving together.
@@ -1381,20 +1372,4 @@ pub fn apply_mouse_association() {
     if changed {
         forget_relative_warp();
     }
-}
-
-/// `bool CGEventSourceKeyState(CGEventSourceStateID, CGKeyCode)`.
-///
-/// False for every key. This asks the *window server* whether a key is down
-/// right now, independently of the event queue, and there is no window server
-/// here to ask - SDL's keyboard state is this process's own view and answers a
-/// different question, one that is wrong in exactly the case the call exists
-/// for (a key pressed while the program was not focused).
-///
-/// False rather than refused because the return type has no error value: a
-/// caller gets "not pressed", which is the answer for all but one key at any
-/// moment anyway.
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn CGEventSourceKeyState(_source: i32, _key: u16) -> u8 {
-    0
 }

@@ -248,11 +248,6 @@ pub unsafe extern "C" fn CGDisplayFade(
     0
 }
 
-/// `CGWindowLevel CGShieldingWindowLevel(void)`: `kCGMaximumWindowLevel - 3`.
-pub unsafe extern "C" fn CGShieldingWindowLevel() -> i32 {
-    2147483628
-}
-
 /// `boolean_t CGDisplayIsMain(CGDirectDisplayID)`
 ///
 /// The primary display, which is the one SDL lists first.
@@ -737,7 +732,6 @@ exports::exports! {
         "CGAcquireDisplayFadeReservation" => CGAcquireDisplayFadeReservation,
         "CGReleaseDisplayFadeReservation" => CGReleaseDisplayFadeReservation,
         "CGDisplayFade" => CGDisplayFade,
-        "CGShieldingWindowLevel" => CGShieldingWindowLevel,
         "CGDisplayIsMain" => CGDisplayIsMain,
         "CGDisplayIsOnline" => CGDisplayIsOnline,
         "CGDisplayIsBuiltin" => CGDisplayIsBuiltin,

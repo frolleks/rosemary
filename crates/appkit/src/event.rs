@@ -21,7 +21,7 @@ impl coregraphics::quartz_event::Provider for QuartzEventProvider {
             y: point.y,
         };
         // SAFETY: a point, which is all it takes.
-        unsafe { crate::screen::CGWarpMouseCursorPosition(point) };
+        unsafe { crate::screen::warp_pointer_impl(point) };
     }
 
     fn modifiers(&self) -> u64 {

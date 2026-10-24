@@ -1,4 +1,4 @@
-//! CoreText: fonts, descriptors, and the text calls a `CGContext` makes.
+//! CoreText: fonts and descriptors.
 
 #![allow(
     clippy::missing_safety_doc,
@@ -8,7 +8,7 @@
     non_upper_case_globals
 )]
 
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 
 use corefoundation::base::CFTypeRef;
 use corefoundation::collections::{self, Number};
@@ -17,7 +17,7 @@ use coregraphics::font_attributes::{
     PATH_KEY, face_attributes, font_size, get, get_number, get_string, key, loaded, make_font,
     merged_attributes, new_dictionary, release, resolve, scale, spill_font, string, type_policy,
 };
-use coregraphics::fonts::{self, FaceInfo, LoadedFace};
+use coregraphics::fonts::{self, FaceInfo};
 use coregraphics::{CGPoint, CGRect, CGSize};
 
 const ATTRIBUTE_GLOBALS: &[(&str, &str)] = &[
@@ -733,214 +733,6 @@ pub unsafe extern "C" fn CTFontManagerCreateFontDescriptorFromData(data: CFTypeR
     face_attributes(first, 0.0)
 }
 
-//
-// The `CGContext` text calls, which CoreText answers for CoreGraphics.
-//
-
-fn gstate<'a>(context: CFTypeRef) -> Option<&'a mut coregraphics::quartz::GState> {
-    coregraphics::quartz::state_of(context).map(|state| &mut state.current)
-}
-
-pub unsafe extern "C" fn CGContextSetFont(context: CFTypeRef, font: CFTypeRef) {
-    if let Some(state) = gstate(context) {
-        state.font = coregraphics::quartz::Retained::new(font);
-    }
-}
-
-pub unsafe extern "C" fn CGContextSetFontSize(context: CFTypeRef, size: f64) {
-    if let Some(state) = gstate(context) {
-        state.font_size = size;
-    }
-}
-
-/// `CGContextSelectFont(CGContextRef, const char *name, CGFloat size,
-/// CGTextEncoding)`: a font by PostScript name, and its size.
-pub unsafe extern "C" fn CGContextSelectFont(
-    context: CFTypeRef,
-    name: *const c_char,
-    size: f64,
-    _encoding: i32,
-) {
-    if name.is_null() {
-        return;
-    }
-    // SAFETY: a NUL-terminated name.
-    let name = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy();
-    let name = corefoundation::string::from_bytes(name.as_bytes(), false);
-    // SAFETY: a string this call made.
-    let font = unsafe { CTFontCreateWithName(name, size, std::ptr::null()) };
-    // SAFETY: the reference this call made.
-    unsafe { corefoundation::api::CFRelease(name) };
-    if let Some(state) = gstate(context) {
-        state.font = coregraphics::quartz::Retained::new(font);
-        state.font_size = size;
-    }
-    if !font.is_null() {
-        // SAFETY: the reference this call made; the state holds its own.
-        unsafe { corefoundation::api::CFRelease(font) };
-    }
-}
-
-pub unsafe extern "C" fn CGContextSetTextMatrix(
-    context: CFTypeRef,
-    matrix: coregraphics::CGAffineTransform,
-) {
-    if let Some(state) = gstate(context) {
-        state.text_matrix = matrix;
-    }
-}
-
-pub unsafe extern "C" fn CGContextGetTextMatrix(
-    context: CFTypeRef,
-) -> coregraphics::CGAffineTransform {
-    gstate(context).map_or(coregraphics::CGAffineTransformIdentity, |state| {
-        state.text_matrix
-    })
-}
-
-pub unsafe extern "C" fn CGContextSetTextPosition(context: CFTypeRef, x: f64, y: f64) {
-    if let Some(state) = gstate(context) {
-        state.text_matrix.tx = x;
-        state.text_matrix.ty = y;
-    }
-}
-
-pub unsafe extern "C" fn CGContextGetTextPosition(context: CFTypeRef) -> CGPoint {
-    gstate(context).map_or(CGPoint::default(), |state| CGPoint {
-        x: state.text_matrix.tx,
-        y: state.text_matrix.ty,
-    })
-}
-
-pub unsafe extern "C" fn CGContextSetTextDrawingMode(context: CFTypeRef, mode: i32) {
-    if let Some(state) = gstate(context) {
-        state.text_mode = mode;
-    }
-}
-
-/// The face the state's font draws with.
-fn state_face(context: CFTypeRef) -> Option<(std::sync::Arc<LoadedFace>, f64)> {
-    let state = gstate(context)?;
-    let face = loaded(state.font.as_ref()?.0)?;
-    Some((face, state.font_size))
-}
-
-/// Draw `glyphs` from the text position, each moved on by the advances
-/// before it (in text space), and move the text position past the last.
-fn show_glyphs(context: CFTypeRef, glyphs: &[u16], advances: &[(f64, f64)]) {
-    let Some((face, size)) = state_face(context) else {
-        return;
-    };
-    let mut positions = Vec::with_capacity(glyphs.len());
-    let mut pen = (0.0, 0.0);
-    for advance in advances.iter().take(glyphs.len()) {
-        positions.push(pen);
-        pen = (pen.0 + advance.0, pen.1 + advance.1);
-    }
-    coregraphics::quartz::draw_glyphs(context, &face, size, glyphs, &positions);
-    if let Some(state) = gstate(context) {
-        let p = state.text_matrix.apply(pen.0, pen.1);
-        state.text_matrix.tx = p.x;
-        state.text_matrix.ty = p.y;
-    }
-}
-
-/// Each glyph's advance from the font, in text space.
-fn font_advances(context: CFTypeRef, glyphs: &[u16]) -> Vec<(f64, f64)> {
-    let Some((face, size)) = state_face(context) else {
-        return Vec::new();
-    };
-    let face = face.face();
-    let s = size / f64::from(face.units_per_em().max(1));
-    glyphs
-        .iter()
-        .map(|g| {
-            let units = face
-                .glyph_hor_advance(owned_ttf_parser::GlyphId(*g))
-                .unwrap_or(0);
-            (f64::from(units) * s, 0.0)
-        })
-        .collect()
-}
-
-pub unsafe extern "C" fn CGContextShowGlyphsWithAdvances(
-    context: CFTypeRef,
-    glyphs: *const u16,
-    advances: *const CGSize,
-    count: usize,
-) {
-    if glyphs.is_null() || advances.is_null() || count == 0 {
-        return;
-    }
-    // SAFETY: the caller supplies `count` of each.
-    let (glyphs, advances) = unsafe {
-        (
-            std::slice::from_raw_parts(glyphs, count),
-            std::slice::from_raw_parts(advances, count),
-        )
-    };
-    let advances: Vec<(f64, f64)> = advances.iter().map(|a| (a.width, a.height)).collect();
-    show_glyphs(context, glyphs, &advances);
-}
-
-pub unsafe extern "C" fn CGContextShowGlyphs(context: CFTypeRef, glyphs: *const u16, count: usize) {
-    if glyphs.is_null() || count == 0 {
-        return;
-    }
-    // SAFETY: the caller supplies `count` glyphs.
-    let glyphs = unsafe { std::slice::from_raw_parts(glyphs, count) };
-    let advances = font_advances(context, glyphs);
-    show_glyphs(context, glyphs, &advances);
-}
-
-pub unsafe extern "C" fn CGContextShowGlyphsAtPoint(
-    context: CFTypeRef,
-    x: f64,
-    y: f64,
-    glyphs: *const u16,
-    count: usize,
-) {
-    unsafe {
-        CGContextSetTextPosition(context, x, y);
-        CGContextShowGlyphs(context, glyphs, count);
-    }
-}
-
-/// `CGContextShowText(CGContextRef, const char *, size_t)`, in the font
-/// `CGContextSelectFont` chose.
-///
-/// FIXME (ACCURACY): the bytes are read as Latin-1, which is MacRoman only
-/// below 128.
-pub unsafe extern "C" fn CGContextShowText(context: CFTypeRef, text: *const c_char, length: usize) {
-    if text.is_null() || length == 0 {
-        return;
-    }
-    // SAFETY: the caller supplies `length` bytes.
-    let bytes = unsafe { std::slice::from_raw_parts(text.cast::<u8>(), length) };
-    let Some((face, _)) = state_face(context) else {
-        return;
-    };
-    let glyphs: Vec<u16> = bytes
-        .iter()
-        .map(|b| face.face().glyph_index(char::from(*b)).map_or(0, |g| g.0))
-        .collect();
-    let advances = font_advances(context, &glyphs);
-    show_glyphs(context, &glyphs, &advances);
-}
-
-pub unsafe extern "C" fn CGContextShowTextAtPoint(
-    context: CFTypeRef,
-    x: f64,
-    y: f64,
-    text: *const c_char,
-    length: usize,
-) {
-    unsafe {
-        CGContextSetTextPosition(context, x, y);
-        CGContextShowText(context, text, length);
-    }
-}
-
 exports::exports! {
     functions {
         "CTFontCreateUIFontForLanguage" => CTFontCreateUIFontForLanguage,
@@ -987,19 +779,6 @@ exports::exports! {
         "CTFontCreateCopyWithAttributes" => CTFontCreateCopyWithAttributes,
         "CTFontCreateWithGraphicsFont" => CTFontCreateWithGraphicsFont,
         "CTGetCoreTextVersion" => CTGetCoreTextVersion,
-        "CGContextSetFont" => CGContextSetFont,
-        "CGContextSetFontSize" => CGContextSetFontSize,
-        "CGContextSelectFont" => CGContextSelectFont,
-        "CGContextSetTextMatrix" => CGContextSetTextMatrix,
-        "CGContextGetTextMatrix" => CGContextGetTextMatrix,
-        "CGContextSetTextPosition" => CGContextSetTextPosition,
-        "CGContextGetTextPosition" => CGContextGetTextPosition,
-        "CGContextSetTextDrawingMode" => CGContextSetTextDrawingMode,
-        "CGContextShowGlyphsWithAdvances" => CGContextShowGlyphsWithAdvances,
-        "CGContextShowGlyphs" => CGContextShowGlyphs,
-        "CGContextShowGlyphsAtPoint" => CGContextShowGlyphsAtPoint,
-        "CGContextShowText" => CGContextShowText,
-        "CGContextShowTextAtPoint" => CGContextShowTextAtPoint,
     }
 }
 
@@ -1023,13 +802,12 @@ mod tests {
     }
 
     #[test]
-    fn the_framework_publishes_its_font_and_text_calls() {
+    fn the_framework_publishes_its_font_calls() {
         let names = names();
         for name in [
             "CTFontCreateWithName",
             "CTFontDrawGlyphs",
-            "CGContextSelectFont",
-            "CGContextShowGlyphs",
+            "CTFontCreatePathForGlyph",
         ] {
             assert!(names.contains(&name), "{name}");
         }

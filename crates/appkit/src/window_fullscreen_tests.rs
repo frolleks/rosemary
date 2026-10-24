@@ -909,7 +909,7 @@ fn disassociated_pointer_input_ignores_the_logical_frame_edge() {
     SENT_EVENTS.with_borrow_mut(Vec::clear);
 
     let id = sdl3::video::window_id(window_of(object).sdl);
-    unsafe { crate::screen::CGAssociateMouseAndMouseCursorPosition(0) };
+    unsafe { coregraphics::quartz_display::CGAssociateMouseAndMouseCursorPosition(0) };
     // Frozen in the 31-point band above the logical frame.
     crate::event::warp_pointer(40.0, 10.0);
     let click = |down| sdl3::video::Event::MouseButton {
@@ -930,7 +930,7 @@ fn disassociated_pointer_input_ignores_the_logical_frame_edge() {
     });
     crate::event::deliver(click(true));
     crate::event::deliver(click(false));
-    unsafe { crate::screen::CGAssociateMouseAndMouseCursorPosition(1) };
+    unsafe { coregraphics::quartz_display::CGAssociateMouseAndMouseCursorPosition(1) };
     let sent = SENT_EVENTS.take();
     let kinds: Vec<u64> = sent.iter().map(|(kind, _, _)| *kind).collect();
     // NSEventTypeMouseMoved, LeftMouseDown, LeftMouseUp.
