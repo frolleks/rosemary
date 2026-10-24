@@ -8,7 +8,14 @@
 
 pub mod cgaffinetransform;
 pub mod cgcontext;
+pub mod cgpaint;
 pub mod cgpath;
+pub mod coretext;
+pub mod focus;
+pub mod fonts;
+pub mod graphics;
+pub mod quartz;
+pub mod raster;
 
 pub use cgaffinetransform::*;
 pub use cgpath::*;
@@ -51,12 +58,8 @@ pub fn bootstrap() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         cgpath::install();
-        // Each module that owns a class registers it here as it arrives:
-        //   graphics::install()   __CGColorSpace, __CGDataProvider,
-        //                         __CGImage, __CGImageSource
-        //   cgcontext::install()  __CGContext, __CGColor
-        //   cgpaint::install()    __CGPattern, __CGFunction, __CGShading,
-        //                         __CGLayer
+        graphics::install();
+        cgcontext::install();
     });
 }
 
@@ -66,22 +69,42 @@ pub fn bootstrap() {
 /// variable goes through here, so the two must name the same addresses.
 pub fn data_symbols() -> Vec<(String, u64)> {
     bootstrap();
-    vec![(
+    let mut out = vec![(
         "_CGAffineTransformIdentity".to_string(),
         (&raw const CGAffineTransformIdentity) as usize as u64,
-    )]
+    )];
+    out.extend(coretext::data_symbols());
+    out.extend(cgcontext::data_symbols());
+    out
 }
 
 exports::exports! {
     groups {
         cgaffinetransform,
         cgpath,
+        graphics,
+        cgcontext,
+        cgpaint,
+        coretext,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_groups_publish_the_drawing_calls() {
+        let names = names();
+        for name in [
+            "CGContextFillRect",
+            "CGImageCreate",
+            "CGPatternCreate",
+            "CTFontCreateWithName",
+        ] {
+            assert!(names.contains(&name), "{name}");
+        }
+    }
 
     #[test]
     fn the_identity_is_published_and_points_at_its_fields() {

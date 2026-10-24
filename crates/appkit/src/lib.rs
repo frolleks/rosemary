@@ -21,17 +21,17 @@ mod bezier;
 pub mod button;
 mod catalog;
 mod cell;
-pub mod cgcontext;
+pub use coregraphics::cgcontext;
 pub mod cgevent;
 pub mod cgfont;
 pub mod cgl;
-pub mod cgpaint;
+pub use coregraphics::cgpaint;
 pub mod cgpath;
 pub mod classes;
 pub mod color;
 mod controls;
 mod coreanimation;
-pub mod coretext;
+pub use coregraphics::coretext;
 pub mod cursor;
 pub(crate) mod decode;
 pub mod decor;
@@ -44,10 +44,10 @@ mod font;
 pub mod hitheme;
 pub mod launch;
 pub mod launchservices;
-pub(crate) mod quartz;
-pub use chrome::fonts;
+pub use coregraphics::fonts;
+pub(crate) use coregraphics::quartz;
 pub mod geometry;
-pub mod graphics;
+pub use coregraphics::graphics;
 pub mod icon;
 pub mod image;
 mod input_context;
@@ -67,7 +67,7 @@ mod paragraph;
 pub mod pasteboard;
 mod pasteboard_manager;
 mod popup;
-pub mod raster;
+pub use coregraphics::raster;
 mod responder;
 pub mod screen;
 pub mod script;
@@ -101,8 +101,6 @@ pub fn bootstrap() {
         dock::install();
         workspace::install();
         color::install();
-        graphics::install();
-        cgcontext::install();
         cursor::install();
         font::install();
         image::install();
@@ -223,32 +221,6 @@ exports::exports! {
         "CGEventSourceCounterForEventType" => cgevent::CGEventSourceCounterForEventType,
         "CGEventTapCreate" => cgevent::CGEventTapCreate,
         "CGDisplayModeCopyPixelEncoding" => screen::CGDisplayModeCopyPixelEncoding,
-        "CGColorSpaceCreateWithName" => graphics::CGColorSpaceCreateWithName,
-        "CGColorSpaceCreateDeviceRGB" => graphics::CGColorSpaceCreateDeviceRGB,
-        "CGColorSpaceCreateDeviceGray" => graphics::CGColorSpaceCreateDeviceGray,
-        "CGColorSpaceCreateWithPlatformColorSpace" => graphics::CGColorSpaceCreateWithPlatformColorSpace,
-        "CGColorSpaceCreatePattern" => graphics::CGColorSpaceCreatePattern,
-        "CGColorSpaceGetNumberOfComponents" => graphics::CGColorSpaceGetNumberOfComponents,
-        "CGColorSpaceRelease" => graphics::CGColorSpaceRelease,
-        "CGColorSpaceGetName" => graphics::CGColorSpaceGetName,
-        "CGColorSpaceCopyName" => graphics::CGColorSpaceCopyName,
-        "CGColorSpaceCopyPropertyList" => graphics::CGColorSpaceCopyPropertyList,
-        "CGDataProviderCreateWithData" => graphics::CGDataProviderCreateWithData,
-        "CGDataProviderRelease" => graphics::CGDataProviderRelease,
-        "CGImageCreate" => graphics::CGImageCreate,
-        "CGImageMaskCreate" => graphics::CGImageMaskCreate,
-        "CGImageCreateWithImageInRect" => graphics::CGImageCreateWithImageInRect,
-        "CGImageCreateWithPNGDataProvider" => graphics::CGImageCreateWithPNGDataProvider,
-        "CGImageCreateCopyWithColorSpace" => graphics::CGImageCreateCopyWithColorSpace,
-        "CGImageRetain" => graphics::CGImageRetain,
-        "CGImageRelease" => graphics::CGImageRelease,
-        "CGImageGetWidth" => graphics::CGImageGetWidth,
-        "CGImageGetHeight" => graphics::CGImageGetHeight,
-        "CGImageGetBitsPerComponent" => graphics::CGImageGetBitsPerComponent,
-        "CGImageGetAlphaInfo" => graphics::CGImageGetAlphaInfo,
-        "CGImageGetColorSpace" => graphics::CGImageGetColorSpace,
-        "CGImageSourceCreateWithData" => graphics::CGImageSourceCreateWithData,
-        "CGImageSourceCreateImageAtIndex" => graphics::CGImageSourceCreateImageAtIndex,
         "CGRectGetWidth" => geometry::CGRectGetWidth,
         "CGRectGetHeight" => geometry::CGRectGetHeight,
         "CGRectGetMinX" => geometry::CGRectGetMinX,
@@ -317,12 +289,9 @@ exports::exports! {
     }
     groups {
         pasteboard_manager,
-        coretext,
         cgfont,
         hitheme,
         launchservices,
-        cgcontext,
-        cgpaint,
         cgl,
     }
 }
@@ -337,8 +306,6 @@ static CG_RECT_INFINITE: [f64; 4] = [f64::MAX / -2.0, f64::MAX / -2.0, f64::MAX,
 pub fn data_symbols() -> Vec<(String, u64)> {
     bootstrap();
     let mut out = classes::class_data();
-    out.extend(coretext::data_symbols());
-    out.extend(cgcontext::data_symbols());
     out.push(("_NSApp".to_string(), ns_app_cell()));
     out.push((
         "_CGRectInfinite".to_string(),

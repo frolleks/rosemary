@@ -3,10 +3,10 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
+use crate::{CGPoint, CGRect, CGSize};
 use corefoundation::base::CFTypeRef;
 use corefoundation::callbacks::Policy;
 use corefoundation::collections::{self, Number};
-use foundation::geometry::{NSPoint, NSRect, NSSize};
 
 use crate::fonts::{self, FaceInfo, LoadedFace};
 
@@ -65,7 +65,7 @@ const BOLD_TRAIT: u32 = 1 << 1;
 const MONOSPACE_TRAIT: u32 = 1 << 10;
 
 fn key(text: &'static str) -> CFTypeRef {
-    foundation::notification::name_object(text) as CFTypeRef
+    corefoundation::base::interned_name(text) as CFTypeRef
 }
 
 fn type_policy() -> Policy {
@@ -83,7 +83,7 @@ fn release(object: CFTypeRef) {
     }
 }
 
-pub(crate) fn get(dictionary: CFTypeRef, name: &'static str) -> CFTypeRef {
+pub fn get(dictionary: CFTypeRef, name: &'static str) -> CFTypeRef {
     // SAFETY: null, or a dictionary a guest received from this runtime.
     match unsafe { collections::dictionary(dictionary) } {
         Some(_) => unsafe { corefoundation::api::CFDictionaryGetValue(dictionary, key(name)) },
@@ -97,7 +97,9 @@ fn get_string(dictionary: CFTypeRef, name: &'static str) -> Option<String> {
         return None;
     }
     // SAFETY: font attributes named as strings hold strings.
-    let bytes = unsafe { foundation::string::bytes(value as _) };
+    let bytes = unsafe { corefoundation::string::as_string(value) }
+        .map(|text| text.utf8())
+        .unwrap_or_default();
     String::from_utf8(bytes).ok()
 }
 
@@ -108,7 +110,7 @@ fn get_number(dictionary: CFTypeRef, name: &'static str) -> Option<f64> {
 }
 
 fn string(text: &str) -> CFTypeRef {
-    foundation::string::from_str(text) as CFTypeRef
+    corefoundation::string::from_bytes(text.as_bytes(), false) as CFTypeRef
 }
 
 /// CoreText's weight trait, from -1 to 1, as an OpenType weight class.
@@ -184,7 +186,7 @@ fn languages(face: &LoadedFace) -> Vec<&'static str> {
 }
 
 /// The attributes of `info` at `size`, as a font or descriptor.
-pub(crate) fn face_attributes(info: &FaceInfo, size: f64) -> CFTypeRef {
+pub fn face_attributes(info: &FaceInfo, size: f64) -> CFTypeRef {
     let mut owned = Vec::new();
     let mut own = |object: CFTypeRef| {
         owned.push(object);
@@ -333,7 +335,7 @@ fn merged_attributes(base: CFTypeRef, overrides: CFTypeRef) -> CFTypeRef {
     new_dictionary(&pairs)
 }
 
-pub(crate) fn loaded(font: CFTypeRef) -> Option<Arc<LoadedFace>> {
+pub fn loaded(font: CFTypeRef) -> Option<Arc<LoadedFace>> {
     let path = get_string(font, PATH_KEY)?;
     let index = get_number(font, INDEX_KEY).unwrap_or(0.0) as u32;
     fonts::load(&path, index)
@@ -345,7 +347,7 @@ fn font_size(font: CFTypeRef) -> f64 {
 
 /// The face a font draws with and its size in points, for text AppKit draws
 /// itself.
-pub(crate) fn face_of(font: CFTypeRef) -> Option<(Arc<LoadedFace>, f64)> {
+pub fn face_of(font: CFTypeRef) -> Option<(Arc<LoadedFace>, f64)> {
     if font.is_null() {
         return None;
     }
@@ -519,17 +521,17 @@ pub unsafe extern "C" fn CTFontGetUnderlineThickness(font: CFTypeRef) -> f64 {
     )
 }
 
-fn rect(left: f64, bottom: f64, right: f64, top: f64) -> NSRect {
-    NSRect {
-        origin: NSPoint { x: left, y: bottom },
-        size: NSSize {
+fn rect(left: f64, bottom: f64, right: f64, top: f64) -> CGRect {
+    CGRect {
+        origin: CGPoint { x: left, y: bottom },
+        size: CGSize {
             width: right - left,
             height: top - bottom,
         },
     }
 }
 
-pub unsafe extern "C" fn CTFontGetBoundingBox(font: CFTypeRef) -> NSRect {
+pub unsafe extern "C" fn CTFontGetBoundingBox(font: CFTypeRef) -> CGRect {
     match loaded(font) {
         Some(face) => {
             let s = scale(font, &face);
@@ -552,12 +554,12 @@ pub unsafe extern "C" fn CTFontGetBoundingRectsForGlyphs(
     font: CFTypeRef,
     _orientation: u32,
     glyphs: *const u16,
-    bounds: *mut NSRect,
+    bounds: *mut CGRect,
     count: isize,
-) -> NSRect {
+) -> CGRect {
     let count = count.max(0) as usize;
     let face = loaded(font);
-    let mut union: Option<NSRect> = None;
+    let mut union: Option<CGRect> = None;
     for at in 0..count {
         let glyph_rect = match (&face, glyphs.is_null()) {
             (Some(face), false) => {
@@ -566,7 +568,7 @@ pub unsafe extern "C" fn CTFontGetBoundingRectsForGlyphs(
                 let glyph = unsafe { *glyphs.add(at) };
                 face.face()
                     .glyph_bounding_box(owned_ttf_parser::GlyphId(glyph))
-                    .map_or(NSRect::default(), |b| {
+                    .map_or(CGRect::default(), |b| {
                         rect(
                             f64::from(b.x_min) * s,
                             f64::from(b.y_min) * s,
@@ -598,7 +600,7 @@ pub unsafe extern "C" fn CTFontGetAdvancesForGlyphs(
     font: CFTypeRef,
     _orientation: u32,
     glyphs: *const u16,
-    advances: *mut NSSize,
+    advances: *mut CGSize,
     count: isize,
 ) -> f64 {
     let count = count.max(0) as usize;
@@ -619,7 +621,7 @@ pub unsafe extern "C" fn CTFontGetAdvancesForGlyphs(
         };
         if !advances.is_null() {
             // SAFETY: the caller supplies `count` writable advances.
-            unsafe { advances.add(at).write(NSSize { width, height: 0.0 }) };
+            unsafe { advances.add(at).write(CGSize { width, height: 0.0 }) };
         }
         total += width;
     }
@@ -689,7 +691,7 @@ pub unsafe extern "C" fn CTFontGetGlyphsForCharacters(
 pub unsafe extern "C" fn CTFontDrawGlyphs(
     font: CFTypeRef,
     glyphs: *const u16,
-    positions: *const NSPoint,
+    positions: *const CGPoint,
     count: usize,
     context: CFTypeRef,
 ) {
@@ -987,7 +989,7 @@ pub unsafe extern "C" fn CTFontManagerCreateFontDescriptorsFromURL(url: CFTypeRe
 /// Write a font held in memory where the face database can read it, named by
 /// its contents so the same font is written once. The path, or `None` when it
 /// cannot be written.
-pub(crate) fn spill_font(bytes: &[u8]) -> Option<String> {
+pub fn spill_font(bytes: &[u8]) -> Option<String> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     bytes.hash(&mut hasher);
@@ -1001,7 +1003,7 @@ pub(crate) fn spill_font(bytes: &[u8]) -> Option<String> {
 }
 
 /// The file and face index a font draws with.
-pub(crate) fn face_location(font: CFTypeRef) -> Option<(String, u32)> {
+pub fn face_location(font: CFTypeRef) -> Option<(String, u32)> {
     let path = get_string(font, PATH_KEY)?;
     let index = get_number(font, INDEX_KEY).unwrap_or(0.0) as u32;
     Some((path, index))
@@ -1129,7 +1131,7 @@ mod tests {
                 1
             );
             assert_ne!(glyph[0], u16::from(b'H'));
-            let mut advance = NSSize::default();
+            let mut advance = CGSize::default();
             CTFontGetAdvancesForGlyphs(font, 0, glyph.as_ptr(), &mut advance, 1);
             assert!(advance.width > 5.0);
             let context = crate::cgcontext::CGBitmapContextCreate(
@@ -1142,7 +1144,7 @@ mod tests {
                 7,
             );
             crate::cgcontext::CGContextSetGrayFillColor(context, 1.0, 1.0);
-            let origin = NSPoint { x: 4.0, y: 6.0 };
+            let origin = CGPoint { x: 4.0, y: 6.0 };
             CTFontDrawGlyphs(font, glyph.as_ptr(), &origin, 1, context);
             release(context);
             release(font);

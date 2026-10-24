@@ -185,7 +185,7 @@ pub unsafe extern "C" fn CGImageSourceCreateImageAtIndex(
 
 /// The bytes a data provider of this runtime's serves, or `None` for anything
 /// else.
-pub(crate) fn provider_bytes(provider: CFTypeRef) -> Option<&'static [u8]> {
+pub fn provider_bytes(provider: CFTypeRef) -> Option<&'static [u8]> {
     let class = objc::class::lookup(c"__CGDataProvider")?;
     // SAFETY: null or an object this runtime allocated; type-checked.
     if !unsafe { corefoundation::base::is_kind_of(provider, class) } {
@@ -287,7 +287,7 @@ pub unsafe extern "C" fn CGImageCreate(
 }
 
 /// A `CGImage` that owns `pixels`, laid out as the arguments say.
-pub(crate) fn image_from_pixels(
+pub fn image_from_pixels(
     pixels: Vec<u8>,
     width: usize,
     height: usize,
@@ -333,7 +333,7 @@ pub(crate) fn image_from_pixels(
 ///
 /// Unpremultiplied RGBA with alpha last, big-endian component order - the
 /// layout [`crate::raster::Bitmap`] already is, so nothing is converted.
-pub(crate) fn image_from_bitmap(bitmap: crate::raster::Bitmap) -> CFTypeRef {
+pub fn image_from_bitmap(bitmap: crate::raster::Bitmap) -> CFTypeRef {
     unsafe extern "C" fn release(info: *mut c_void, _data: *const c_void, _size: usize) {
         // SAFETY: the box `image_from_bitmap` leaked into `info`.
         drop(unsafe { Box::from_raw(info as *mut Vec<u8>) });
@@ -439,7 +439,7 @@ const BYTE_ORDER_32_LITTLE: u32 = 0x2000;
 /// How much of each pixel an image lets through when it is used as a mask, top
 /// row first: an image mask's inverted samples, an image's alpha, or an opaque
 /// image's luminance.
-pub(crate) fn image_coverage(image: CFTypeRef) -> Option<(usize, usize, Vec<u8>)> {
+pub fn image_coverage(image: CFTypeRef) -> Option<(usize, usize, Vec<u8>)> {
     let is_mask = image_of(image)?.is_mask;
     let [low, high] = image_of(image)?.decode;
     let has_alpha = matches!(
@@ -466,7 +466,7 @@ pub(crate) fn image_coverage(image: CFTypeRef) -> Option<(usize, usize, Vec<u8>)
 
 /// Whether an image is an image mask, which paints the fill colour where its
 /// samples allow rather than drawing pixels of its own.
-pub(crate) fn is_image_mask(image: CFTypeRef) -> bool {
+pub fn is_image_mask(image: CFTypeRef) -> bool {
     image_of(image).is_some_and(|image| image.is_mask)
 }
 
@@ -525,7 +525,7 @@ pub unsafe extern "C" fn CGImageMaskCreate(
 /// the image.
 pub unsafe extern "C" fn CGImageCreateWithImageInRect(
     image: CFTypeRef,
-    rect: foundation::geometry::NSRect,
+    rect: crate::CGRect,
 ) -> CFTypeRef {
     let Some((width, height, bgra)) = image_bgra(image) else {
         return std::ptr::null();
@@ -558,7 +558,7 @@ pub unsafe extern "C" fn CGImageCreateWithImageInRect(
 
 /// `kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little`, the layout
 /// [`image_bgra`] answers in.
-pub(crate) const PREMULTIPLIED_BGRA: u32 = 2 | BYTE_ORDER_32_LITTLE;
+pub const PREMULTIPLIED_BGRA: u32 = 2 | BYTE_ORDER_32_LITTLE;
 
 /// `CGImageRef CGImageCreateWithPNGDataProvider(CGDataProviderRef, const
 /// CGFloat *decode, bool, CGColorRenderingIntent)`
@@ -574,11 +574,11 @@ pub unsafe extern "C" fn CGImageCreateWithPNGDataProvider(
 }
 
 /// A `CGImage`'s pixels as premultiplied B, G, R, A rows, top row first -
-/// the layout [`crate::backing`] composites in.
+/// the layout the focused view's backing store composites in.
 ///
 /// `None` for a pixel layout this does not decode, which is anything but
 /// eight bits per component in three or four components.
-pub(crate) fn image_bgra(image: CFTypeRef) -> Option<(usize, usize, Vec<u8>)> {
+pub fn image_bgra(image: CFTypeRef) -> Option<(usize, usize, Vec<u8>)> {
     let image = image_of(image)?;
     // SAFETY: a `__CGImage` holds a retained `__CGDataProvider`.
     let provider = unsafe { &*(image.provider as *const DataProvider) };
@@ -645,7 +645,9 @@ pub(crate) fn image_bgra(image: CFTypeRef) -> Option<(usize, usize, Vec<u8>)> {
 pub unsafe extern "C" fn CGColorSpaceCreateWithName(name: CFTypeRef) -> CFTypeRef {
     let gray = !name.is_null() && {
         // SAFETY: a string, as the parameter is declared.
-        let text = unsafe { foundation::string::bytes(name as _) };
+        let text = unsafe { corefoundation::string::as_string(name) }
+            .map(|text| text.utf8())
+            .unwrap_or_default();
         text.windows(4).any(|w| w == b"Gray")
     };
     make_space(name, if gray { 1 } else { 3 })
@@ -690,7 +692,7 @@ pub unsafe extern "C" fn CGColorSpaceGetNumberOfComponents(space: CFTypeRef) -> 
 }
 
 /// The components of a space, or `None` for something that is not one.
-pub(crate) fn space_components(space: CFTypeRef) -> Option<usize> {
+pub fn space_components(space: CFTypeRef) -> Option<usize> {
     color_space_of(space).map(|space| space.components)
 }
 
@@ -733,6 +735,37 @@ pub unsafe extern "C" fn CGColorSpaceCreateDeviceRGB() -> CFTypeRef {
 pub unsafe extern "C" fn CGColorSpaceRelease(space: CFTypeRef) {
     if !space.is_null() {
         unsafe { corefoundation::api::CFRelease(space) };
+    }
+}
+
+exports::exports! {
+    functions {
+        "CGColorSpaceCreateWithName" => CGColorSpaceCreateWithName,
+        "CGColorSpaceCreateDeviceRGB" => CGColorSpaceCreateDeviceRGB,
+        "CGColorSpaceCreateDeviceGray" => CGColorSpaceCreateDeviceGray,
+        "CGColorSpaceCreateWithPlatformColorSpace" => CGColorSpaceCreateWithPlatformColorSpace,
+        "CGColorSpaceCreatePattern" => CGColorSpaceCreatePattern,
+        "CGColorSpaceGetNumberOfComponents" => CGColorSpaceGetNumberOfComponents,
+        "CGColorSpaceRelease" => CGColorSpaceRelease,
+        "CGColorSpaceGetName" => CGColorSpaceGetName,
+        "CGColorSpaceCopyName" => CGColorSpaceCopyName,
+        "CGColorSpaceCopyPropertyList" => CGColorSpaceCopyPropertyList,
+        "CGDataProviderCreateWithData" => CGDataProviderCreateWithData,
+        "CGDataProviderRelease" => CGDataProviderRelease,
+        "CGImageCreate" => CGImageCreate,
+        "CGImageMaskCreate" => CGImageMaskCreate,
+        "CGImageCreateWithImageInRect" => CGImageCreateWithImageInRect,
+        "CGImageCreateWithPNGDataProvider" => CGImageCreateWithPNGDataProvider,
+        "CGImageCreateCopyWithColorSpace" => CGImageCreateCopyWithColorSpace,
+        "CGImageRetain" => CGImageRetain,
+        "CGImageRelease" => CGImageRelease,
+        "CGImageGetWidth" => CGImageGetWidth,
+        "CGImageGetHeight" => CGImageGetHeight,
+        "CGImageGetBitsPerComponent" => CGImageGetBitsPerComponent,
+        "CGImageGetAlphaInfo" => CGImageGetAlphaInfo,
+        "CGImageGetColorSpace" => CGImageGetColorSpace,
+        "CGImageSourceCreateWithData" => CGImageSourceCreateWithData,
+        "CGImageSourceCreateImageAtIndex" => CGImageSourceCreateImageAtIndex,
     }
 }
 

@@ -8,9 +8,8 @@
 
 use std::ffi::c_void;
 
+use corefoundation::base::CFTypeRef;
 use i_overlay::float::single::SingleFloatOverlay;
-
-use corefoundation::base::{CFRuntimeBase, CFTypeRef};
 
 use crate::{CGAffineTransform, CGAffineTransformIdentity, CGFloat, CGPoint, CGRect, CGSize};
 
@@ -22,6 +21,12 @@ pub enum CGPathElementType {
     kCGPathElementAddQuadCurveToPoint(CGPoint, CGPoint),
     kCGPathElementAddCurveToPoint(CGPoint, CGPoint, CGPoint),
     kCGPathElementCloseSubpath,
+}
+
+#[repr(C)]
+pub struct CGPath {
+    isa: CFTypeRef,
+    elements: *mut Elements,
 }
 
 /// `CGPathElement`: a type and a pointer to its points, as `CGPathApply`
@@ -103,12 +108,12 @@ impl Elements {
     pub fn cubic_to(
         &mut self,
         m: CGAffineTransform,
-        c1x: f64,
-        c1y: f64,
-        c2x: f64,
-        c2y: f64,
-        x: f64,
-        y: f64,
+        c1x: CGFloat,
+        c1y: CGFloat,
+        c2x: CGFloat,
+        c2y: CGFloat,
+        x: CGFloat,
+        y: CGFloat,
     ) {
         if self.current.is_none() {
             self.move_to(m, c1x, c1y);
@@ -153,8 +158,8 @@ impl Elements {
         &mut self,
         m: CGAffineTransform,
         r: CGRect,
-        corner_width: f64,
-        corner_height: f64,
+        corner_width: CGFloat,
+        corner_height: CGFloat,
     ) {
         let (x0, y0) = (r.origin.x, r.origin.y);
         let (x1, y1) = (x0 + r.size.width, y0 + r.size.height);
@@ -224,11 +229,11 @@ impl Elements {
     pub fn arc(
         &mut self,
         m: CGAffineTransform,
-        x: f64,
-        y: f64,
-        radius: f64,
-        start: f64,
-        end: f64,
+        x: CGFloat,
+        y: CGFloat,
+        radius: CGFloat,
+        start: CGFloat,
+        end: CGFloat,
         clockwise: bool,
     ) {
         use std::f64::consts::TAU;
@@ -257,7 +262,7 @@ impl Elements {
         // arrives a few ulps over.
         let quarters = sweep.abs() / (TAU / 4.0);
         let pieces = (quarters - 1e-9).ceil().max(1.0) as usize;
-        let step = sweep / pieces as f64;
+        let step = sweep / pieces as CGFloat;
         let k = 4.0 / 3.0 * (step / 4.0).tan();
         let mut a = start;
         for _ in 0..pieces {
@@ -285,11 +290,11 @@ impl Elements {
     pub fn arc_to(
         &mut self,
         m: CGAffineTransform,
-        x1: f64,
-        y1: f64,
-        x2: f64,
-        y2: f64,
-        radius: f64,
+        x1: CGFloat,
+        y1: CGFloat,
+        x2: CGFloat,
+        y2: CGFloat,
+        radius: CGFloat,
     ) {
         let Some(current) = self.current else {
             return self.move_to(m, x1, y1);
@@ -393,7 +398,7 @@ impl Elements {
     pub fn from_skia(path: &tiny_skia::Path, m: CGAffineTransform) -> Elements {
         use tiny_skia::PathSegment;
         let mut out = Elements::default();
-        let g = |p: tiny_skia::Point| (f64::from(p.x), f64::from(p.y));
+        let g = |p: tiny_skia::Point| (CGFloat::from(p.x), CGFloat::from(p.y));
         for segment in path.segments() {
             match segment {
                 PathSegment::MoveTo(p) => {
@@ -420,7 +425,7 @@ impl Elements {
 
     /// `CGPathCreateCopyByFlattening`: every curve replaced by line segments
     /// no further than `threshold` from it.
-    pub fn flattened(&self, threshold: f64) -> Elements {
+    pub fn flattened(&self, threshold: CGFloat) -> Elements {
         let mut out = Elements::default();
         let mut pen: Option<CGPoint> = None;
         let mut subpath: Option<CGPoint> = None;
@@ -459,10 +464,10 @@ impl Elements {
     /// The path as closed contours of line segments, which is what the boolean
     /// engine takes. Curves are flattened at `threshold`, and an open subpath
     /// is closed because a boolean operation treats a path as a filled region.
-    pub fn contours(&self, threshold: f64) -> Vec<Vec<[f64; 2]>> {
+    pub fn contours(&self, threshold: CGFloat) -> Vec<Vec<[CGFloat; 2]>> {
         let flat = self.flattened(threshold);
-        let mut out: Vec<Vec<[f64; 2]>> = Vec::new();
-        let mut current: Vec<[f64; 2]> = Vec::new();
+        let mut out: Vec<Vec<[CGFloat; 2]>> = Vec::new();
+        let mut current: Vec<[CGFloat; 2]> = Vec::new();
         for element in &flat.list {
             match *element {
                 CGPathElementType::kCGPathElementMoveToPoint(p) => {
@@ -493,7 +498,7 @@ impl Elements {
     }
 
     /// The elements of a boolean result: one closed contour per shape contour.
-    pub fn from_contours(shapes: &[Vec<Vec<[f64; 2]>>]) -> Elements {
+    pub fn from_contours(shapes: &[Vec<Vec<[CGFloat; 2]>>]) -> Elements {
         let mut out = Elements::default();
         for shape in shapes {
             for contour in shape {
@@ -526,7 +531,7 @@ fn midpoint(a: CGPoint, b: CGPoint) -> CGPoint {
 
 /// The distance from `p` to the line through `a` and `b`, or to `a` when the
 /// line has no length.
-fn distance_to_line(p: CGPoint, a: CGPoint, b: CGPoint) -> f64 {
+fn distance_to_line(p: CGPoint, a: CGPoint, b: CGPoint) -> CGFloat {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let length = dx.hypot(dy);
     if length == 0.0 {
@@ -541,7 +546,7 @@ fn flatten_cubic(
     p1: CGPoint,
     p2: CGPoint,
     p3: CGPoint,
-    threshold: f64,
+    threshold: CGFloat,
     depth: u32,
 ) {
     let flat =
@@ -560,7 +565,7 @@ fn flatten_cubic(
     flatten_cubic(out, p0123, p123, p23, p3, threshold, depth + 1);
 }
 
-fn flatten_quad(out: &mut Elements, p0: CGPoint, c: CGPoint, p2: CGPoint, threshold: f64) {
+fn flatten_quad(out: &mut Elements, p0: CGPoint, c: CGPoint, p2: CGPoint, threshold: CGFloat) {
     // Degree elevation: the same curve as a cubic.
     let c1 = CGPoint {
         x: p0.x + 2.0 / 3.0 * (c.x - p0.x),
@@ -574,7 +579,7 @@ fn flatten_quad(out: &mut Elements, p0: CGPoint, c: CGPoint, p2: CGPoint, thresh
 }
 
 /// The distance from `p` to the segment `a`-`b`.
-fn distance_to_segment(p: CGPoint, a: CGPoint, b: CGPoint) -> f64 {
+fn distance_to_segment(p: CGPoint, a: CGPoint, b: CGPoint) -> CGFloat {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let length_squared = dx * dx + dy * dy;
     if length_squared == 0.0 {
@@ -588,7 +593,7 @@ fn distance_to_segment(p: CGPoint, a: CGPoint, b: CGPoint) -> f64 {
 ///
 /// A fill test cannot see a subpath with no area - a dashed copy is a run of
 /// zero-width lines - and Quartz counts a point on the path as inside.
-fn on_path(elements: &Elements, point: CGPoint, tolerance: f64) -> bool {
+fn on_path(elements: &Elements, point: CGPoint, tolerance: CGFloat) -> bool {
     let flat = elements.flattened(tolerance);
     let mut pen: Option<CGPoint> = None;
     let mut start: Option<CGPoint> = None;
@@ -670,9 +675,51 @@ fn crossing(p: CGPoint, a: CGPoint, b: CGPoint) -> i32 {
     }
 }
 
+/// Append a glyph's outline, in font units, through `m`. Every contour is
+/// closed, as a glyph's are.
+pub fn glyph_outline(
+    face: &owned_ttf_parser::Face<'_>,
+    glyph: u16,
+    m: CGAffineTransform,
+    out: &mut Elements,
+) {
+    use crate::fonts::Segment;
+    let p = |(x, y): (f32, f32)| (f64::from(x), f64::from(y));
+    let mut pen: Option<(f32, f32)> = None;
+    for segment in crate::fonts::outline(face, glyph) {
+        let start = match segment {
+            Segment::Line(a, _) | Segment::Quad(a, _, _) | Segment::Cubic(a, _, _, _) => a,
+        };
+        if pen != Some(start) {
+            out.close();
+            let (x, y) = p(start);
+            out.move_to(m, x, y);
+        }
+        let end = match segment {
+            Segment::Line(_, b) => {
+                let (x, y) = p(b);
+                out.line_to(m, x, y);
+                b
+            }
+            Segment::Quad(_, c, b) => {
+                let ((cx, cy), (x, y)) = (p(c), p(b));
+                out.quad_to(m, cx, cy, x, y);
+                b
+            }
+            Segment::Cubic(_, c1, c2, b) => {
+                let ((ax, ay), (bx, by), (x, y)) = (p(c1), p(c2), p(b));
+                out.cubic_to(m, ax, ay, bx, by, x, y);
+                b
+            }
+        };
+        pen = Some(end);
+    }
+    out.close();
+}
+
 /// A new path object holding `elements`, which the caller owns.
 pub fn path_from(elements: Elements) -> CGPathRef {
-    new_path(elements, false)
+    new_path(elements)
 }
 
 pub fn install() {
@@ -701,33 +748,29 @@ pub fn elements_of<'a>(path: CGPathRef) -> Option<&'a mut Elements> {
         return None;
     }
     // SAFETY: a `CGPath`, whose elements this runtime owns.
-    Some(unsafe { &mut (*path.cast::<CGPath>().cast_mut()).elements })
+    unsafe { (*(path as *mut CGPath)).elements.as_mut() }
 }
 
 /// The elements a mutating call may write, or `None` for an immutable path.
 ///
 /// Apple's headers make writing an immutable path undefined behaviour;
 /// refusing is the answer that cannot corrupt the object.
-fn mutable_elements(path: CGMutablePathRef) -> Option<&'static mut Elements> {
-    let elements = elements_of(path)?;
-    // SAFETY: the object is a `CGPath` this runtime made.
-    match unsafe { (*path.cast::<CGPath>()).mutable } {
-        true => Some(elements),
-        false => None,
-    }
-}
+// fn mutable_elements(path: CGMutablePathRef) -> Option<&'static mut Elements> {
+//     let elements = elements_of(path)?;
+//     // SAFETY: the object is a `CGPath` this runtime made.
+//     match unsafe { (*path.cast::<CGPath>()) } {
+//         true => Some(elements),
+//         false => None,
+//     }
+// }
 
-fn new_path(elements: Elements, mutable: bool) -> CGPathRef {
+fn new_path(elements: Elements) -> CGPathRef {
     let class = objc::class::lookup(c"__CGPath").expect("installed during bootstrap");
     // SAFETY: `CGPath` is the registered class layout.
     let path = unsafe { corefoundation::base::allocate::<CGPath>(class) };
-    // SAFETY: a fresh allocation. The elements are written rather than left
-    // zeroed, because a zeroed `Vec` is not an empty one.
-    unsafe {
-        (*path).mutable = mutable;
-        (*path).elements = elements;
-    }
-    path.cast()
+    // SAFETY: a fresh allocation.
+    unsafe { (*path).elements = Box::into_raw(Box::new(elements)) };
+    path as CGPathRef
 }
 
 /// The transform a path call was given, or the identity for none.
@@ -740,17 +783,17 @@ fn transform(m: *const CGAffineTransform) -> CGAffineTransform {
 }
 
 pub unsafe extern "C" fn CGPathCreateMutable() -> CGMutablePathRef {
-    new_path(Elements::default(), true).cast_mut()
+    new_path(Elements::default()).cast_mut()
 }
 
 pub unsafe extern "C" fn CGPathCreateCopy(path: CGPathRef) -> CGPathRef {
-    elements_of(path).map_or(std::ptr::null(), |e| new_path(e.clone(), false))
+    let cloned = path.clone();
+    cloned
 }
 
 pub unsafe extern "C" fn CGPathCreateMutableCopy(path: CGPathRef) -> CGMutablePathRef {
-    elements_of(path).map_or(std::ptr::null_mut(), |e| {
-        new_path(e.clone(), true).cast_mut()
-    })
+    let cloned = path.clone().cast_mut();
+    cloned
 }
 
 pub unsafe extern "C" fn CGPathCreateCopyByTransformingPath(
@@ -762,7 +805,7 @@ pub unsafe extern "C" fn CGPathCreateCopyByTransformingPath(
     };
     let mut out = Elements::default();
     out.append(transform(m), source);
-    new_path(out, false)
+    new_path(out)
 }
 
 pub unsafe extern "C" fn CGPathCreateMutableCopyByTransformingPath(
@@ -774,7 +817,7 @@ pub unsafe extern "C" fn CGPathCreateMutableCopyByTransformingPath(
     };
     let mut out = Elements::default();
     out.append(transform(m), source);
-    new_path(out, true).cast_mut()
+    new_path(out).cast_mut()
 }
 
 pub unsafe extern "C" fn CGPathCreateWithRect(
@@ -783,7 +826,7 @@ pub unsafe extern "C" fn CGPathCreateWithRect(
 ) -> CGPathRef {
     let mut out = Elements::default();
     out.rect(transform(m), rect);
-    new_path(out, false)
+    new_path(out)
 }
 
 pub unsafe extern "C" fn CGPathCreateWithEllipseInRect(
@@ -792,20 +835,20 @@ pub unsafe extern "C" fn CGPathCreateWithEllipseInRect(
 ) -> CGPathRef {
     let mut out = Elements::default();
     out.ellipse(transform(m), rect);
-    new_path(out, false)
+    new_path(out)
 }
 
 /// `CGPathRef CGPathCreateWithRoundedRect(CGRect rect, CGFloat cornerWidth,
 /// CGFloat cornerHeight, const CGAffineTransform *m)`
 pub unsafe extern "C" fn CGPathCreateWithRoundedRect(
     rect: CGRect,
-    corner_width: f64,
-    corner_height: f64,
+    corner_width: CGFloat,
+    corner_height: CGFloat,
     m: *const CGAffineTransform,
 ) -> CGPathRef {
     let mut out = Elements::default();
     out.rounded_rect(transform(m), rect, corner_width, corner_height);
-    new_path(out, false)
+    new_path(out)
 }
 
 /// `CGPathRef CGPathCreateCopyByDashingPath(CGPathRef path,
@@ -814,8 +857,8 @@ pub unsafe extern "C" fn CGPathCreateWithRoundedRect(
 pub unsafe extern "C" fn CGPathCreateCopyByDashingPath(
     path: CGPathRef,
     m: *const CGAffineTransform,
-    phase: f64,
-    lengths: *const f64,
+    phase: CGFloat,
+    lengths: *const CGFloat,
     count: usize,
 ) -> CGPathRef {
     let Some(source) = elements_of(path) else {
@@ -839,10 +882,7 @@ pub unsafe extern "C" fn CGPathCreateCopyByDashingPath(
     let Some(dashed) = skia.dash(&dash, 1.0) else {
         return std::ptr::null();
     };
-    new_path(
-        Elements::from_skia(&dashed, CGAffineTransformIdentity),
-        false,
-    )
+    new_path(Elements::from_skia(&dashed, CGAffineTransformIdentity))
 }
 
 /// `CGPathRef CGPathCreateCopyByStrokingPath(CGPathRef path,
@@ -851,10 +891,10 @@ pub unsafe extern "C" fn CGPathCreateCopyByDashingPath(
 pub unsafe extern "C" fn CGPathCreateCopyByStrokingPath(
     path: CGPathRef,
     m: *const CGAffineTransform,
-    line_width: f64,
+    line_width: CGFloat,
     line_cap: i32,
     line_join: i32,
-    miter_limit: f64,
+    miter_limit: CGFloat,
 ) -> CGPathRef {
     let Some(source) = elements_of(path) else {
         return std::ptr::null();
@@ -882,28 +922,25 @@ pub unsafe extern "C" fn CGPathCreateCopyByStrokingPath(
     let Some(outline) = skia.stroke(&style, 1.0) else {
         return std::ptr::null();
     };
-    new_path(
-        Elements::from_skia(&outline, CGAffineTransformIdentity),
-        false,
-    )
+    new_path(Elements::from_skia(&outline, CGAffineTransformIdentity))
 }
 
 /// `CGPathRef CGPathCreateCopyByFlattening(CGPathRef path, CGFloat threshold)`
 pub unsafe extern "C" fn CGPathCreateCopyByFlattening(
     path: CGPathRef,
-    threshold: f64,
+    threshold: CGFloat,
 ) -> CGPathRef {
     let Some(source) = elements_of(path) else {
         return std::ptr::null();
     };
-    new_path(source.flattened(threshold), false)
+    new_path(source.flattened(threshold))
 }
 
 /// The tolerance the boolean forms flatten curves at.
 ///
 /// FIXME (ACCURACY): Apple intersects the curves exactly; this flattens them
 /// first, so a result can differ by up to this much.
-const BOOLEAN_FLATTENING: f64 = 0.05;
+const BOOLEAN_FLATTENING: CGFloat = 0.05;
 
 /// The fill rule a boolean call names.
 fn fill_rule(even_odd: bool) -> i_overlay::core::fill_rule::FillRule {
@@ -929,7 +966,7 @@ fn boolean(
     let subject = subject.contours(BOOLEAN_FLATTENING);
     let clip = clip.contours(BOOLEAN_FLATTENING);
     let shapes = subject.overlay(&clip, rule, fill_rule(even_odd));
-    new_path(Elements::from_contours(&shapes), false)
+    new_path(Elements::from_contours(&shapes))
 }
 
 /// `CGPathRef CGPathCreateCopyByNormalizing(CGPathRef path, bool evenOddFillRule)`
@@ -941,13 +978,13 @@ pub unsafe extern "C" fn CGPathCreateCopyByNormalizing(
         return std::ptr::null();
     };
     let contours = subject.contours(BOOLEAN_FLATTENING);
-    let empty: Vec<Vec<[f64; 2]>> = Vec::new();
+    let empty: Vec<Vec<[CGFloat; 2]>> = Vec::new();
     let shapes = contours.overlay(
         &empty,
         i_overlay::core::overlay_rule::OverlayRule::Subject,
         fill_rule(even_odd),
     );
-    new_path(Elements::from_contours(&shapes), false)
+    new_path(Elements::from_contours(&shapes))
 }
 
 /// `CGPathRef CGPathCreateCopyByUnioningPath(CGPathRef path, CGPathRef mask,
@@ -1028,10 +1065,10 @@ pub unsafe extern "C" fn CGPathRelease(path: CGPathRef) {
 pub unsafe extern "C" fn CGPathMoveToPoint(
     path: CGMutablePathRef,
     m: *const CGAffineTransform,
-    x: f64,
-    y: f64,
+    x: CGFloat,
+    y: CGFloat,
 ) {
-    if let Some(e) = mutable_elements(path) {
+    if let Some(e) = elements_of(path) {
         e.move_to(transform(m), x, y);
     }
 }
@@ -1039,10 +1076,10 @@ pub unsafe extern "C" fn CGPathMoveToPoint(
 pub unsafe extern "C" fn CGPathAddLineToPoint(
     path: CGMutablePathRef,
     m: *const CGAffineTransform,
-    x: f64,
-    y: f64,
+    x: CGFloat,
+    y: CGFloat,
 ) {
-    if let Some(e) = mutable_elements(path) {
+    if let Some(e) = elements_of(path) {
         e.line_to(transform(m), x, y);
     }
 }
@@ -1050,12 +1087,12 @@ pub unsafe extern "C" fn CGPathAddLineToPoint(
 pub unsafe extern "C" fn CGPathAddQuadCurveToPoint(
     path: CGMutablePathRef,
     m: *const CGAffineTransform,
-    cx: f64,
-    cy: f64,
-    x: f64,
-    y: f64,
+    cx: CGFloat,
+    cy: CGFloat,
+    x: CGFloat,
+    y: CGFloat,
 ) {
-    if let Some(e) = mutable_elements(path) {
+    if let Some(e) = elements_of(path) {
         e.quad_to(transform(m), cx, cy, x, y);
     }
 }
@@ -1064,20 +1101,20 @@ pub unsafe extern "C" fn CGPathAddQuadCurveToPoint(
 pub unsafe extern "C" fn CGPathAddCurveToPoint(
     path: CGMutablePathRef,
     m: *const CGAffineTransform,
-    c1x: f64,
-    c1y: f64,
-    c2x: f64,
-    c2y: f64,
-    x: f64,
-    y: f64,
+    c1x: CGFloat,
+    c1y: CGFloat,
+    c2x: CGFloat,
+    c2y: CGFloat,
+    x: CGFloat,
+    y: CGFloat,
 ) {
-    if let Some(e) = mutable_elements(path) {
+    if let Some(e) = elements_of(path) {
         e.cubic_to(transform(m), c1x, c1y, c2x, c2y, x, y);
     }
 }
 
 pub unsafe extern "C" fn CGPathCloseSubpath(path: CGMutablePathRef) {
-    if let Some(e) = mutable_elements(path) {
+    if let Some(e) = elements_of(path) {
         e.close();
     }
 }
@@ -1087,7 +1124,7 @@ pub unsafe extern "C" fn CGPathAddRect(
     m: *const CGAffineTransform,
     rect: CGRect,
 ) {
-    if let Some(e) = mutable_elements(path) {
+    if let Some(e) = elements_of(path) {
         e.rect(transform(m), rect);
     }
 }
@@ -1098,7 +1135,7 @@ pub unsafe extern "C" fn CGPathAddRects(
     rects: *const CGRect,
     count: usize,
 ) {
-    let Some(e) = mutable_elements(path) else {
+    let Some(e) = elements_of(path) else {
         return;
     };
     if rects.is_null() {
@@ -1115,7 +1152,7 @@ pub unsafe extern "C" fn CGPathAddEllipseInRect(
     m: *const CGAffineTransform,
     rect: CGRect,
 ) {
-    if let Some(e) = mutable_elements(path) {
+    if let Some(e) = elements_of(path) {
         e.ellipse(transform(m), rect);
     }
 }
@@ -1126,10 +1163,10 @@ pub unsafe extern "C" fn CGPathAddRoundedRect(
     path: CGMutablePathRef,
     m: *const CGAffineTransform,
     rect: CGRect,
-    corner_width: f64,
-    corner_height: f64,
+    corner_width: CGFloat,
+    corner_height: CGFloat,
 ) {
-    if let Some(e) = mutable_elements(path) {
+    if let Some(e) = elements_of(path) {
         e.rounded_rect(transform(m), rect, corner_width, corner_height);
     }
 }
@@ -1138,14 +1175,14 @@ pub unsafe extern "C" fn CGPathAddRoundedRect(
 pub unsafe extern "C" fn CGPathAddArc(
     path: CGMutablePathRef,
     m: *const CGAffineTransform,
-    x: f64,
-    y: f64,
-    radius: f64,
-    start: f64,
-    end: f64,
+    x: CGFloat,
+    y: CGFloat,
+    radius: CGFloat,
+    start: CGFloat,
+    end: CGFloat,
     clockwise: bool,
 ) {
-    if let Some(e) = mutable_elements(path) {
+    if let Some(e) = elements_of(path) {
         e.arc(transform(m), x, y, radius, start, end, clockwise);
     }
 }
@@ -1154,13 +1191,13 @@ pub unsafe extern "C" fn CGPathAddArc(
 pub unsafe extern "C" fn CGPathAddArcToPoint(
     path: CGMutablePathRef,
     m: *const CGAffineTransform,
-    x1: f64,
-    y1: f64,
-    x2: f64,
-    y2: f64,
-    radius: f64,
+    x1: CGFloat,
+    y1: CGFloat,
+    x2: CGFloat,
+    y2: CGFloat,
+    radius: CGFloat,
 ) {
-    if let Some(e) = mutable_elements(path) {
+    if let Some(e) = elements_of(path) {
         e.arc_to(transform(m), x1, y1, x2, y2, radius);
     }
 }
@@ -1170,13 +1207,13 @@ pub unsafe extern "C" fn CGPathAddArcToPoint(
 pub unsafe extern "C" fn CGPathAddRelativeArc(
     path: CGMutablePathRef,
     m: *const CGAffineTransform,
-    x: f64,
-    y: f64,
-    radius: f64,
-    start: f64,
-    delta: f64,
+    x: CGFloat,
+    y: CGFloat,
+    radius: CGFloat,
+    start: CGFloat,
+    delta: CGFloat,
 ) {
-    if let Some(e) = mutable_elements(path) {
+    if let Some(e) = elements_of(path) {
         e.arc(
             transform(m),
             x,
@@ -1195,7 +1232,7 @@ pub unsafe extern "C" fn CGPathAddLines(
     points: *const CGPoint,
     count: usize,
 ) {
-    let Some(e) = mutable_elements(path) else {
+    let Some(e) = elements_of(path) else {
         return;
     };
     if points.is_null() || count == 0 {
@@ -1217,7 +1254,7 @@ pub unsafe extern "C" fn CGPathAddPath(
     let Some(source) = elements_of(other).map(|e| e.clone()) else {
         return;
     };
-    if let Some(e) = mutable_elements(path) {
+    if let Some(e) = elements_of(path) {
         e.append(transform(m), &source);
     }
 }
@@ -1256,12 +1293,12 @@ pub unsafe extern "C" fn CGPathGetPathBoundingBox(path: CGPathRef) -> CGRect {
     let tight = skia.compute_tight_bounds().unwrap_or(skia.bounds());
     CGRect {
         origin: CGPoint {
-            x: f64::from(tight.left()),
-            y: f64::from(tight.top()),
+            x: CGFloat::from(tight.left()),
+            y: CGFloat::from(tight.top()),
         },
         size: CGSize {
-            width: f64::from(tight.width()),
-            height: f64::from(tight.height()),
+            width: CGFloat::from(tight.width()),
+            height: CGFloat::from(tight.height()),
         },
     }
 }
@@ -1403,8 +1440,8 @@ pub unsafe extern "C" fn CGPathGetTypeID() -> corefoundation::base::CFTypeID {
 /// `CGRectNull`.
 const NULL_RECT: CGRect = CGRect {
     origin: CGPoint {
-        x: f64::INFINITY,
-        y: f64::INFINITY,
+        x: CGFloat::INFINITY,
+        y: CGFloat::INFINITY,
     },
     size: CGSize {
         width: 0.0,
@@ -1688,7 +1725,7 @@ mod tests {
         }
     }
 
-    fn close_to(a: f64, b: f64) -> bool {
+    fn close_to(a: CGFloat, b: CGFloat) -> bool {
         (a - b).abs() < 1e-9
     }
 

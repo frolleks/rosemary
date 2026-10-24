@@ -476,8 +476,8 @@ name = "chrome"
 version = "0.4.1"
 dependencies = [
  "ab_glyph_rasterizer",
+ "coregraphics",
  "owned_ttf_parser",
- "rust-fontconfig",
 ]
 
 [[package]]
@@ -623,12 +623,16 @@ dependencies = [
 
 [[package]]
 name = "coregraphics"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
+ "ab_glyph_rasterizer",
  "corefoundation",
  "exports",
  "i_overlay",
  "objc",
+ "owned_ttf_parser",
+ "prefix",
+ "rust-fontconfig",
  "tiny-skia",
 ]
 
