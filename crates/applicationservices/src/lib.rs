@@ -1,3 +1,5 @@
+pub mod ats;
+
 #[repr(i32)]
 enum CGWindowLevelKey {
     _BaseWindow = 0,
@@ -14,5 +16,8 @@ extern "C" fn CGWindowLevelForKey(_key: CGWindowLevelKey) -> CGWindowLevel {
 exports::exports! {
     functions {
         "CGWindowLevelForKey" => CGWindowLevelForKey,
+    }
+    groups {
+        ats,
     }
 }

@@ -27,7 +27,6 @@ pub use coregraphics::cgcontext;
 pub use coregraphics::cgdataprovider;
 pub use coregraphics::cgimage;
 pub use coregraphics::quartz_event;
-pub mod ats;
 pub mod cgl;
 pub use coregraphics::cgpaint;
 pub mod cgpath;
@@ -284,7 +283,6 @@ exports::exports! {
     }
     groups {
         pasteboard_manager,
-        ats,
         hitheme,
         launchservices,
         cgl,

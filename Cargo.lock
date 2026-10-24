@@ -169,7 +169,6 @@ dependencies = [
  "gamecontroller",
  "iosurface",
  "objc",
- "owned_ttf_parser",
  "prefix",
  "sdl3",
  "server",
@@ -181,8 +180,11 @@ dependencies = [
 name = "applicationservices"
 version = "0.4.1"
 dependencies = [
- "appkit",
+ "corefoundation",
+ "coregraphics",
  "exports",
+ "foundation",
+ "owned_ttf_parser",
 ]
 
 [[package]]
