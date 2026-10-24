@@ -413,7 +413,7 @@ pub unsafe extern "C" fn CGFontCreateWithFontName(name: CFTypeRef) -> CFTypeRef 
 /// `CGFontRef CGFontCreateWithDataProvider(CGDataProviderRef)`: a font file's
 /// bytes.
 pub unsafe extern "C" fn CGFontCreateWithDataProvider(provider: CFTypeRef) -> CFTypeRef {
-    let Some(bytes) = crate::graphics::provider_bytes(provider) else {
+    let Some(bytes) = crate::cgdataprovider::provider_bytes(provider) else {
         return std::ptr::null();
     };
     let Some(path) = crate::coretext::spill_font(bytes) else {

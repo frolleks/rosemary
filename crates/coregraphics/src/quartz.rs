@@ -866,7 +866,7 @@ pub fn clip_to_mask(context: CFTypeRef, rect: CGRect, image: CFTypeRef) {
     let Some(frame) = frame_of(context) else {
         return;
     };
-    let Some((width, height, coverage)) = crate::graphics::image_coverage(image) else {
+    let Some((width, height, coverage)) = crate::cgimage::image_coverage(image) else {
         return;
     };
     let Some(state) = state_of(context) else {

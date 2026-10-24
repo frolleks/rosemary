@@ -267,7 +267,7 @@ pub fn render_tile(
         // program's own, called as Quartz calls it, with the context then
         // released.
         let rgba = unsafe {
-            let context = crate::cgcontext::CGBitmapContextCreate(
+            let context = crate::cgbitmap::CGBitmapContextCreate(
                 std::ptr::null_mut(),
                 width as usize,
                 height as usize,
@@ -285,7 +285,7 @@ pub fn render_tile(
                 f64::from(height) / y_step,
             );
             draw(p.info, context);
-            let data = crate::cgcontext::CGBitmapContextGetData(context) as *const u8;
+            let data = crate::cgbitmap::CGBitmapContextGetData(context) as *const u8;
             let rgba = std::slice::from_raw_parts(data, (width * height * 4) as usize).to_vec();
             crate::cgcontext::CGContextRelease(context);
             rgba
@@ -441,7 +441,7 @@ fn make_shading(
     // SAFETY: a fresh allocation; the function is retained for its life.
     unsafe {
         (*shading).radial = radial;
-        (*shading).components = crate::graphics::space_components(space).unwrap_or(3).max(1);
+        (*shading).components = crate::cgcolor::space_components(space).unwrap_or(3).max(1);
         (*shading).start = start;
         (*shading).end = end;
         (*shading).radii = radii;
@@ -517,14 +517,14 @@ pub unsafe extern "C" fn CGLayerCreateWithContext(
     let height = (size.height * scale).ceil().max(1.0) as usize;
     // SAFETY: a context over its own storage.
     let backing = unsafe {
-        crate::cgcontext::CGBitmapContextCreate(
+        crate::cgbitmap::CGBitmapContextCreate(
             std::ptr::null_mut(),
             width,
             height,
             8,
             width * 4,
             std::ptr::null(),
-            crate::graphics::PREMULTIPLIED_BGRA,
+            crate::cgimage::PREMULTIPLIED_BGRA,
         )
     };
     if backing.is_null() {

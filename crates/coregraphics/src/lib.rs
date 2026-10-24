@@ -7,12 +7,15 @@
 )]
 
 pub mod cgaffinetransform;
+pub mod cgbitmap;
+pub mod cgcolor;
 pub mod cgcontext;
+pub mod cgdataprovider;
+pub mod cgimage;
 pub mod cgpaint;
 pub mod cgpath;
 pub mod focus;
 pub mod fonts;
-pub mod graphics;
 pub mod quartz;
 pub mod raster;
 
@@ -57,7 +60,9 @@ pub fn bootstrap() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         cgpath::install();
-        graphics::install();
+        cgcolor::install();
+        cgdataprovider::install();
+        cgimage::install();
         cgcontext::install();
     });
 }
@@ -72,15 +77,18 @@ pub fn data_symbols() -> Vec<(String, u64)> {
         "_CGAffineTransformIdentity".to_string(),
         (&raw const CGAffineTransformIdentity) as usize as u64,
     )];
-    out.extend(cgcontext::data_symbols());
+    out.extend(cgcolor::data_symbols());
     out
 }
 
 exports::exports! {
     groups {
         cgaffinetransform,
+        cgbitmap,
+        cgcolor,
+        cgdataprovider,
+        cgimage,
         cgpath,
-        graphics,
         cgcontext,
         cgpaint,
     }
@@ -93,7 +101,15 @@ mod tests {
     #[test]
     fn the_groups_publish_the_drawing_calls() {
         let names = names();
-        for name in ["CGContextFillRect", "CGImageCreate", "CGPatternCreate"] {
+        for name in [
+            "CGBitmapContextCreate",
+            "CGColorCreate",
+            "CGColorSpaceCreateDeviceRGB",
+            "CGContextFillRect",
+            "CGDataProviderCreateWithData",
+            "CGImageCreate",
+            "CGPatternCreate",
+        ] {
             assert!(names.contains(&name), "{name}");
         }
     }

@@ -2296,7 +2296,7 @@ unsafe extern "C" fn shared_color_space(_receiver: Id, _sel: Sel) -> Id {
 unsafe extern "C" fn cg_color_space(_receiver: Id, _sel: Sel) -> *const c_void {
     static SPACE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     // SAFETY: creates an object this runtime keeps for the process.
-    *SPACE.get_or_init(|| unsafe { crate::graphics::CGColorSpaceCreateDeviceRGB() } as usize)
+    *SPACE.get_or_init(|| unsafe { crate::cgcolor::CGColorSpaceCreateDeviceRGB() } as usize)
         as *const c_void
 }
 

@@ -1376,7 +1376,7 @@ mod tests {
             let mut advance = CGSize::default();
             CTFontGetAdvancesForGlyphs(font, 0, glyph.as_ptr(), &mut advance, 1);
             assert!(advance.width > 5.0);
-            let context = coregraphics::cgcontext::CGBitmapContextCreate(
+            let context = coregraphics::cgbitmap::CGBitmapContextCreate(
                 pixels.as_mut_ptr().cast(),
                 32,
                 32,
