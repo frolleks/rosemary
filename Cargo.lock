@@ -635,6 +635,7 @@ dependencies = [
  "objc",
  "owned_ttf_parser",
  "rust-fontconfig",
+ "sdl3",
  "tiny-skia",
 ]
 

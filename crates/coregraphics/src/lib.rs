@@ -11,6 +11,7 @@ pub mod cgbitmap;
 pub mod cgcolor;
 pub mod cgcontext;
 pub mod cgdataprovider;
+pub mod cgdisplay;
 pub mod cgfont;
 pub mod cgimage;
 pub mod cgpaint;
@@ -91,6 +92,7 @@ exports::exports! {
         cgbitmap,
         cgcolor,
         cgdataprovider,
+        cgdisplay,
         cgfont,
         cgimage,
         cgpath,

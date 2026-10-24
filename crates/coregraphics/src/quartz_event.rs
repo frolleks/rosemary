@@ -103,6 +103,13 @@ fn new(location: CGPoint, kind: u32) -> CFTypeRef {
     body as CFTypeRef
 }
 
+/// Put the pointer at `point`, in Quartz's global coordinates.
+pub fn warp_pointer(point: CGPoint) {
+    if let Some(provider) = PROVIDER.get() {
+        provider.warp_pointer(point);
+    }
+}
+
 /// Where the pointer is, in Quartz's global coordinates.
 ///
 /// The same two exceptions `+[NSEvent mouseLocation]` makes, and for the same
