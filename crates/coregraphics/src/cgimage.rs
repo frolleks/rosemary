@@ -352,7 +352,7 @@ pub fn image_coverage(image: CFTypeRef) -> Option<(usize, usize, Vec<u8>)> {
     );
     let (width, height, bgra) = image_bgra(image)?;
     let coverage = bgra
-        .chunks_exact(4)
+        .as_chunks::<4>().0.iter()
         .map(|p| match (is_mask, has_alpha) {
             (true, _) => {
                 let decoded = low + f64::from(p[2]) / 255.0 * (high - low);

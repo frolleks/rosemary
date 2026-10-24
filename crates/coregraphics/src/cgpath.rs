@@ -787,13 +787,13 @@ pub unsafe extern "C" fn CGPathCreateMutable() -> CGMutablePathRef {
 }
 
 pub unsafe extern "C" fn CGPathCreateCopy(path: CGPathRef) -> CGPathRef {
-    let cloned = path.clone();
-    cloned
+    
+    path
 }
 
 pub unsafe extern "C" fn CGPathCreateMutableCopy(path: CGPathRef) -> CGMutablePathRef {
-    let cloned = path.clone().cast_mut();
-    cloned
+    
+    path.cast_mut()
 }
 
 pub unsafe extern "C" fn CGPathCreateCopyByTransformingPath(

@@ -251,13 +251,12 @@ pub fn resolve(descriptor: CFTypeRef) -> Option<FaceInfo> {
         .or_else(|| get_string(descriptor, "CTFontNameAttribute"))
         .unwrap_or_default();
     let style = get_string(descriptor, "CTFontStyleNameAttribute");
-    if let Some(style) = style {
-        if let Some(face) = fonts::all_faces().into_iter().find(|face| {
+    if let Some(style) = style
+        && let Some(face) = fonts::all_faces().into_iter().find(|face| {
             face.family.eq_ignore_ascii_case(&family) && face.style.eq_ignore_ascii_case(&style)
         }) {
             return Some(face);
         }
-    }
     fonts::resolve(&family, weight, italic)
 }
 

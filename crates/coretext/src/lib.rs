@@ -535,8 +535,8 @@ pub unsafe extern "C" fn CTFontDescriptorCreateMatchingFontDescriptors(
     if descriptor.is_null() {
         return std::ptr::null();
     }
-    if get(descriptor, PATH_KEY).is_null() {
-        if let Some(family) = get_string(descriptor, "CTFontFamilyNameAttribute") {
+    if get(descriptor, PATH_KEY).is_null()
+        && let Some(family) = get_string(descriptor, "CTFontFamilyNameAttribute") {
             let style = get_string(descriptor, "CTFontStyleNameAttribute");
             let faces: Vec<CFTypeRef> = fonts::all_faces()
                 .iter()
@@ -555,7 +555,6 @@ pub unsafe extern "C" fn CTFontDescriptorCreateMatchingFontDescriptors(
             faces.into_iter().for_each(release);
             return array;
         }
-    }
     let matching =
         unsafe { CTFontDescriptorCreateMatchingFontDescriptor(descriptor, std::ptr::null()) };
     let array = collections::new_array(&[matching], type_policy(), false);
