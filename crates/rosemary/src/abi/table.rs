@@ -3799,6 +3799,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CTRunGetTypeID", U64),
     sig!("CTFontCreateUIFontForLanguage", P, U32, F64, P),
     sig!("CTFontCreateWithName", P, P, F64, P),
+    sig!("CTFontCreateWithPlatformFont", P, U32, F64, P, P),
+    sig!("CTFontGetPlatformFont", U32, P, P),
+    sig!("CTFontGetGlyphCount", I64, P),
     sig!("CTFontCopyFontDescriptor", P, P),
     sig!("CTFontCopyGraphicsFont", P, P, P),
     sig!("CTFontCopyName", P, P, P),
@@ -3834,8 +3837,19 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CTFontDescriptorCreateWithNameAndSize", P, P, F64),
     sig!("CTFontDescriptorCreateMatchingFontDescriptors", P, P, P),
     sig!("CTFontCreateCopyWithAttributes", P, P, F64, P, P),
+    sig!("CTFontCreateCopyWithSymbolicTraits", P, P, F64, P, U32, U32),
     sig!("CTFontCreateWithGraphicsFont", P, P, F64, P, P),
     sig!("CTGetCoreTextVersion", U32),
+    sig!("CTLineCreateWithAttributedString", P, P),
+    sig!("CTLineGetTypographicBounds", F64, P, P, P, P),
+    sig!("CTLineGetTrailingWhitespaceWidth", F64, P),
+    sig!("CTLineGetGlyphCount", I64, P),
+    sig!("CTLineGetOffsetForStringIndex", F64, P, I64, P),
+    // `CGPoint` by value, split as in `CGDisplayMoveCursorToPoint`.
+    sig!("CTLineGetStringIndexForPosition", I64, P, F64, F64),
+    sig!("CTLineDraw", V, P, P),
+    sig!("CTParagraphStyleCreate", P, P, U64),
+    sig!("CTTextTabCreate", P, U8, F64, P),
     sig!("NSColorSpaceFromDepth", P, I32),
     sig!("NSBestDepth", I32, P, I64, I64, BOOL, P),
     sig!("CGEventSourceKeyState", BOOL, I32, U16),
@@ -4166,6 +4180,8 @@ pub static REFUSED: &[(&str, &str)] = &[
     ("NSDrawNinePartImage", AGGREGATE),
     ("CTFontGetBoundingBox", AGGREGATE),
     ("CTFontGetBoundingRectsForGlyphs", AGGREGATE),
+    ("CTLineGetStringRange", AGGREGATE),
+    ("CTLineGetImageBounds", AGGREGATE),
     // `NSApp` is data like the rest of this block, and the least obvious of
     // them.
     ("NSApp", DATA),
@@ -4415,6 +4431,7 @@ mod tests {
             // A `CGPoint` written out as its two `double`s.
             "CGDisplayMoveCursorToPoint",
             "CGWarpMouseCursorPosition",
+            "CTLineGetStringIndexForPosition",
         ];
         // Clang treats these names as its three-argument builtins. The runtime
         // table describes compiler-rt's four-argument generic functions.
@@ -4576,6 +4593,50 @@ mod tests {
         assert!(matches!(lookup(0, "_strlen"), Lookup::Known(_)));
         assert!(matches!(lookup(0, "___stdoutp"), Lookup::Refused(_)));
         assert!(matches!(lookup(0, "_stdoutp"), Lookup::Unknown));
+    }
+
+    #[test]
+    fn coretext_scalar_calls_have_exact_signatures() {
+        let cases: &[(&str, &[T])] = &[
+            (
+                "CTFontCreateCopyWithSymbolicTraits",
+                &[P, P, F64, P, U32, U32],
+            ),
+            ("CTFontCreateWithPlatformFont", &[P, U32, F64, P, P]),
+            ("CTFontGetPlatformFont", &[U32, P, P]),
+            ("CTFontGetGlyphCount", &[I64, P]),
+            ("CTLineCreateWithAttributedString", &[P, P]),
+            ("CTLineGetTypographicBounds", &[F64, P, P, P, P]),
+            ("CTLineGetTrailingWhitespaceWidth", &[F64, P]),
+            ("CTLineGetGlyphCount", &[I64, P]),
+            ("CTLineGetOffsetForStringIndex", &[F64, P, I64, P]),
+            ("CTLineGetStringIndexForPosition", &[I64, P, F64, F64]),
+            ("CTLineDraw", &[V, P, P]),
+            ("CTParagraphStyleCreate", &[P, P, U64]),
+            ("CTTextTabCreate", &[P, U8, F64, P]),
+        ];
+        for &(name, types) in cases {
+            for spelling in [name.to_string(), format!("_{name}")] {
+                let Lookup::Known(abi) = lookup(0, &spelling) else {
+                    panic!("no signature for {spelling}");
+                };
+                assert_eq!(abi.name, name, "{spelling}");
+                assert_eq!(abi.types, types, "{spelling}");
+                assert!(!abi.variadic, "{spelling}");
+                assert!(abi.callbacks.is_empty(), "{spelling}");
+                assert!(!abi.reenters_guest, "{spelling}");
+                assert!(crate::abi::marshal::is_marshallable(abi), "{spelling}");
+            }
+        }
+    }
+
+    #[test]
+    fn coretext_aggregate_returns_are_explicitly_refused() {
+        for name in ["CTLineGetStringRange", "CTLineGetImageBounds"] {
+            for spelling in [name.to_string(), format!("_{name}")] {
+                assert_eq!(lookup(0, &spelling), Lookup::Refused(AGGREGATE));
+            }
+        }
     }
 
     #[test]

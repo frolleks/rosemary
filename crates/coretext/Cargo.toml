@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 corefoundation.workspace = true
 coregraphics.workspace = true
+foundation.workspace = true
+objc.workspace = true
 exports.workspace = true
 prefix.workspace = true
 owned_ttf_parser.workspace = true

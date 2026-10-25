@@ -684,6 +684,8 @@ dependencies = [
  "corefoundation",
  "coregraphics",
  "exports",
+ "foundation",
+ "objc",
  "owned_ttf_parser",
  "prefix",
 ]

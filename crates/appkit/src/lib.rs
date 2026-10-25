@@ -38,7 +38,7 @@ pub mod color;
 mod controls;
 mod coreanimation;
 pub use coretext;
-mod ctline;
+use coretext::ctline;
 pub mod cursor;
 pub(crate) mod decode;
 pub mod decor;
@@ -106,7 +106,7 @@ pub fn bootstrap() {
         decor::install();
         classes::install();
         accessibility::install();
-        ctline::install();
+        coretext::bootstrap();
         view_controller::install();
         bindings::install();
         table_views::install();

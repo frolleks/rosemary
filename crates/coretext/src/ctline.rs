@@ -16,7 +16,8 @@ use foundation::geometry::{NSPoint, NSRect, NSSize};
 use objc::object::Id;
 use objc::sel::Sel;
 
-use crate::coretext;
+use crate as coretext;
+use coregraphics::font_attributes::face_of;
 
 /// One glyph of a run: the glyph, its pen position from the line's start,
 /// its advance, and the UTF-16 index of the character it draws.
@@ -353,7 +354,7 @@ pub unsafe extern "C" fn CTLineGetTrailingWhitespaceWidth(line: CFTypeRef) -> f6
             if glyph.advance <= 0.0 {
                 continue;
             }
-            let Some((face, _)) = coretext::face_of(run.font) else {
+            let Some((face, _)) = face_of(run.font) else {
                 return width;
             };
             let blank = face
@@ -505,9 +506,9 @@ pub unsafe extern "C" fn CTLineDraw(line: CFTypeRef, context: CFTypeRef) {
 /// `CTParagraphStyleSetting`.
 #[repr(C)]
 pub struct Setting {
-    spec: u32,
-    size: usize,
-    value: *const c_void,
+    pub spec: u32,
+    pub size: usize,
+    pub value: *const c_void,
 }
 
 /// `kCTParagraphStyleSpecifierTabStops` and `...DefaultTabInterval`.

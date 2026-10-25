@@ -1,4 +1,4 @@
-//! CoreText: fonts and descriptors.
+//! CoreText: fonts, descriptors and attributed text lines.
 
 #![allow(
     clippy::missing_safety_doc,
@@ -7,6 +7,15 @@
     non_snake_case,
     non_upper_case_globals
 )]
+
+pub mod ctline;
+
+pub use ctline::{
+    CTLineCreateWithAttributedString, CTLineDraw, CTLineGetGlyphCount, CTLineGetImageBounds,
+    CTLineGetOffsetForStringIndex, CTLineGetStringIndexForPosition, CTLineGetStringRange,
+    CTLineGetTrailingWhitespaceWidth, CTLineGetTypographicBounds, CTParagraphStyleCreate,
+    CTTextTabCreate, Setting as CTParagraphStyleSetting,
+};
 
 use std::ffi::c_void;
 
@@ -790,6 +799,16 @@ pub unsafe extern "C" fn CTFontManagerCreateFontDescriptorFromData(data: CFTypeR
     face_attributes(first, 0.0)
 }
 
+/// Register the CoreText object classes and their Foundation support, once.
+pub fn bootstrap() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        foundation::bootstrap();
+        coregraphics::bootstrap();
+        ctline::install();
+    });
+}
+
 exports::exports! {
     functions {
         "CTFontCreateUIFontForLanguage" => CTFontCreateUIFontForLanguage,
@@ -838,9 +857,13 @@ exports::exports! {
         "CTFontCreateWithGraphicsFont" => CTFontCreateWithGraphicsFont,
         "CTGetCoreTextVersion" => CTGetCoreTextVersion,
     }
+    groups {
+        ctline,
+    }
 }
 
 pub fn data_symbols() -> Vec<(String, u64)> {
+    bootstrap();
     corefoundation::base::string_globals(ATTRIBUTE_GLOBALS)
 }
 
@@ -866,6 +889,18 @@ mod tests {
             "CTFontCreateWithName",
             "CTFontDrawGlyphs",
             "CTFontCreatePathForGlyph",
+            "CTFontCreateCopyWithSymbolicTraits",
+            "CTLineCreateWithAttributedString",
+            "CTLineGetTypographicBounds",
+            "CTLineGetTrailingWhitespaceWidth",
+            "CTLineGetGlyphCount",
+            "CTLineGetStringRange",
+            "CTLineGetOffsetForStringIndex",
+            "CTLineGetStringIndexForPosition",
+            "CTLineGetImageBounds",
+            "CTLineDraw",
+            "CTParagraphStyleCreate",
+            "CTTextTabCreate",
         ] {
             assert!(names.contains(&name), "{name}");
         }
