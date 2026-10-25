@@ -72,6 +72,9 @@ const ATTRIBUTE_GLOBALS: &[(&str, &str)] = &[
     ("_kCTVerticalFormsAttributeName", "CTVerticalForms"),
 ];
 
+const ITALIC_TRAIT: u32 = 1 << 0;
+const BOLD_TRAIT: u32 = 1 << 1;
+
 pub unsafe extern "C" fn CTFontCreateUIFontForLanguage(
     kind: u32,
     size: f64,
@@ -547,25 +550,26 @@ pub unsafe extern "C" fn CTFontDescriptorCreateMatchingFontDescriptors(
         return std::ptr::null();
     }
     if get(descriptor, PATH_KEY).is_null()
-        && let Some(family) = get_string(descriptor, "CTFontFamilyNameAttribute") {
-            let style = get_string(descriptor, "CTFontStyleNameAttribute");
-            let faces: Vec<CFTypeRef> = fonts::all_faces()
-                .iter()
-                .filter(|face| face.family.eq_ignore_ascii_case(&family))
-                .filter(|face| {
-                    style
-                        .as_ref()
-                        .is_none_or(|style| face.style.eq_ignore_ascii_case(style))
-                })
-                .map(|face| face_attributes(face, 0.0))
-                .collect();
-            if faces.is_empty() {
-                return std::ptr::null();
-            }
-            let array = collections::new_array(&faces, type_policy(), false);
-            faces.into_iter().for_each(release);
-            return array;
+        && let Some(family) = get_string(descriptor, "CTFontFamilyNameAttribute")
+    {
+        let style = get_string(descriptor, "CTFontStyleNameAttribute");
+        let faces: Vec<CFTypeRef> = fonts::all_faces()
+            .iter()
+            .filter(|face| face.family.eq_ignore_ascii_case(&family))
+            .filter(|face| {
+                style
+                    .as_ref()
+                    .is_none_or(|style| face.style.eq_ignore_ascii_case(style))
+            })
+            .map(|face| face_attributes(face, 0.0))
+            .collect();
+        if faces.is_empty() {
+            return std::ptr::null();
         }
+        let array = collections::new_array(&faces, type_policy(), false);
+        faces.into_iter().for_each(release);
+        return array;
+    }
     let matching =
         unsafe { CTFontDescriptorCreateMatchingFontDescriptor(descriptor, std::ptr::null()) };
     let array = collections::new_array(&[matching], type_policy(), false);
