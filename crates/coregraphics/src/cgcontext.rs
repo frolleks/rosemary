@@ -80,6 +80,33 @@ pub fn focus_context() -> CFTypeRef {
     context as CFTypeRef
 }
 
+/// Save the focus context's state alongside AppKit's graphics state.
+pub fn focus_save() {
+    let context = focus_context();
+    // SAFETY: null or the focus context.
+    unsafe { CGContextSaveGState(context) };
+}
+
+/// Restore the focus context's state alongside AppKit's graphics state.
+pub fn focus_restore() {
+    let context = focus_context();
+    // SAFETY: null or the focus context.
+    unsafe { CGContextRestoreGState(context) };
+}
+
+/// Apply an AppKit transform change to the focus context too.
+pub fn focus_update_ctm(update: impl FnOnce(CGAffineTransform) -> CGAffineTransform) {
+    if let Some(state) = gstate(focus_context()) {
+        state.ctm = update(state.ctm);
+    }
+}
+
+/// Run `body` with the focus context's clip, one coverage byte per device
+/// pixel, when Quartz calls have clipped it.
+pub fn with_focus_clip<R>(body: impl FnOnce(&[u8], u32) -> R) -> Option<R> {
+    quartz::with_clip(focus_context(), body)
+}
+
 pub unsafe extern "C" fn CGContextRetain(context: CFTypeRef) -> CFTypeRef {
     if context.is_null() {
         return context;

@@ -110,6 +110,24 @@ pub unsafe extern "C" fn CGColorRelease(color: CFTypeRef) {
     }
 }
 
+pub unsafe extern "C" fn CGColorRetain(color: CFTypeRef) -> CFTypeRef {
+    if !color.is_null() {
+        unsafe { corefoundation::api::CFRetain(color) };
+    }
+    color
+}
+
+/// `CGColorCreateCopyWithAlpha`: the same colour at another alpha.
+pub unsafe extern "C" fn CGColorCreateCopyWithAlpha(color: CFTypeRef, alpha: f64) -> CFTypeRef {
+    match color_of(color) {
+        Some(color) => {
+            let [r, g, b, _] = color.components;
+            new_color([r, g, b, alpha])
+        }
+        None => std::ptr::null(),
+    }
+}
+
 pub unsafe extern "C" fn CGColorGetComponents(color: CFTypeRef) -> *const f64 {
     color_of(color).map_or(std::ptr::null(), |color| color.components.as_ptr())
 }
@@ -287,6 +305,8 @@ exports::exports! {
         "CGColorCreateGenericRGB" => CGColorCreateGenericRGB,
         "CGColorCreateGenericGray" => CGColorCreateGenericGray,
         "CGColorRelease" => CGColorRelease,
+        "CGColorRetain" => CGColorRetain,
+        "CGColorCreateCopyWithAlpha" => CGColorCreateCopyWithAlpha,
         "CGColorGetComponents" => CGColorGetComponents,
         "CGColorGetNumberOfComponents" => CGColorGetNumberOfComponents,
         "CGColorGetAlpha" => CGColorGetAlpha,
@@ -304,5 +324,74 @@ exports::exports! {
         "CGColorSpaceCopyName" => CGColorSpaceCopyName,
         "CGColorSpaceCopyPropertyList" => CGColorSpaceCopyPropertyList,
         "CGColorSpaceGetModel" => CGColorSpaceGetModel,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retaining_a_color_preserves_it_after_releasing_the_original_reference() {
+        crate::bootstrap();
+        // SAFETY: a live color, with each owned reference released once.
+        unsafe {
+            let color = CGColorCreateGenericRGB(0.25, 0.5, 0.75, 1.0);
+            let before = corefoundation::api::CFGetRetainCount(color);
+            let retained = CGColorRetain(color);
+            assert_eq!(retained, color);
+            assert_eq!(corefoundation::api::CFGetRetainCount(color), before + 1);
+            CGColorRelease(color);
+            assert_eq!(
+                color_of(retained).unwrap().components,
+                [0.25, 0.5, 0.75, 1.0]
+            );
+            CGColorRelease(retained);
+            assert!(CGColorRetain(std::ptr::null()).is_null());
+        }
+    }
+
+    #[test]
+    fn copying_with_alpha_preserves_rgb_and_leaves_the_original_unchanged() {
+        crate::bootstrap();
+        // SAFETY: each constructor returns an owned color.
+        unsafe {
+            for original in [
+                CGColorCreateGenericRGB(0.25, 0.5, 0.75, 1.0),
+                CGColorCreateGenericGray(0.5, 0.75),
+            ] {
+                let components = color_of(original).unwrap().components;
+                let copy = CGColorCreateCopyWithAlpha(original, 0.125);
+                assert!(!copy.is_null());
+                assert_ne!(copy, original);
+                assert_eq!(color_of(original).unwrap().components, components);
+                CGColorRelease(original);
+                assert_eq!(
+                    color_of(copy).unwrap().components,
+                    [components[0], components[1], components[2], 0.125]
+                );
+                CGColorRelease(copy);
+            }
+        }
+    }
+
+    #[test]
+    fn copying_with_alpha_rejects_null_and_non_colors() {
+        crate::bootstrap();
+        // SAFETY: null or a live color space, not a color.
+        unsafe {
+            assert!(CGColorCreateCopyWithAlpha(std::ptr::null(), 0.5).is_null());
+            let space = CGColorSpaceCreateDeviceRGB();
+            assert!(CGColorCreateCopyWithAlpha(space, 0.5).is_null());
+            CGColorSpaceRelease(space);
+        }
+    }
+
+    #[test]
+    fn the_color_ownership_calls_are_exported() {
+        let names = crate::names();
+        for name in ["CGColorRetain", "CGColorCreateCopyWithAlpha"] {
+            assert!(names.contains(&name), "{name}");
+        }
     }
 }

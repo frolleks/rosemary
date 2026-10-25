@@ -987,6 +987,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGWindowLevelForKey", I32, I32),
     sig!("CGColorGetConstantColor", P, P),
     sig!("CGColorCreateCopy", P, P),
+    sig!("CGColorCreateCopyWithAlpha", P, P, F64),
     sig!("CGColorRelease", V, P),
     sig!("CGColorRetain", P, P),
     sig!("NXGetArchInfoFromCpuType", P, I32, I32),
