@@ -1,7 +1,5 @@
 use std::ffi::c_void;
 
-use core::sync::atomic::AtomicU64;
-
 use objc::class::Class;
 use objc::object::Id;
 
