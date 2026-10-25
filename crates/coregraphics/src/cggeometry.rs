@@ -85,111 +85,9 @@ pub fn contains(rect: CGRect, point: CGPoint) -> bool {
     point.x >= x && point.x < x + width && point.y >= y && point.y < y + height
 }
 
-/// `void NSDisableScreenUpdates(void)` and `NSEnableScreenUpdates`: they hold
-/// back the window server's flushes so several windows change at once. Each
-/// window here presents on its own, so there is nothing to hold back.
-pub extern "C" fn NSDisableScreenUpdates() {}
-
-pub extern "C" fn NSEnableScreenUpdates() {}
-
 /// `bool CGRectEqualToRect(CGRect, CGRect)`, compared standardized.
 pub unsafe extern "C" fn CGRectEqualToRect(a: CGRect, b: CGRect) -> u8 {
     u8::from(standardized(a) == standardized(b))
-}
-
-pub unsafe extern "C" fn NSIsEmptyRect(rect: CGRect) -> u8 {
-    u8::from(rect.size.width <= 0.0 || rect.size.height <= 0.0)
-}
-
-pub unsafe extern "C" fn NSUnionRect(a: CGRect, b: CGRect) -> CGRect {
-    match unsafe { (NSIsEmptyRect(a) != 0, NSIsEmptyRect(b) != 0) } {
-        (true, true) => CGRect::default(),
-        (true, false) => b,
-        (false, true) => a,
-        (false, false) => {
-            let x = a.origin.x.min(b.origin.x);
-            let y = a.origin.y.min(b.origin.y);
-            let right = (a.origin.x + a.size.width).max(b.origin.x + b.size.width);
-            let top = (a.origin.y + a.size.height).max(b.origin.y + b.size.height);
-            CGRect {
-                origin: CGPoint { x, y },
-                size: CGSize {
-                    width: right - x,
-                    height: top - y,
-                },
-            }
-        }
-    }
-}
-
-/// `BOOL NSPointInRect(NSPoint, NSRect)`.
-pub unsafe extern "C" fn NSPointInRect(point: CGPoint, rect: CGRect) -> u8 {
-    contains(rect, point) as u8
-}
-
-/// `BOOL NSMouseInRect(NSPoint, NSRect, BOOL)`.
-///
-/// Cocoa assigns a point on a shared edge to only one adjacent rectangle. The
-/// horizontal interval is always half-open. The vertical interval follows the
-/// view orientation: a flipped view owns its minimum-y edge, while an
-/// unflipped view owns its maximum-y edge.
-pub unsafe extern "C" fn NSMouseInRect(point: CGPoint, rect: CGRect, flipped: u8) -> u8 {
-    let (x, y, width, height) = standardized(rect);
-    let horizontal = point.x >= x && point.x < x + width;
-    let vertical = if flipped != 0 {
-        point.y >= y && point.y < y + height
-    } else {
-        point.y > y && point.y <= y + height
-    };
-    (horizontal && vertical) as u8
-}
-
-/// `NSRect NSInsetRect(NSRect, CGFloat, CGFloat)`: the rectangle shrunk by `dx`
-/// on each side and `dy` on each end. A negative amount grows it, which is how
-/// callers use it to make a margin.
-pub unsafe extern "C" fn NSInsetRect(rect: CGRect, dx: CGFloat, dy: CGFloat) -> CGRect {
-    CGRect {
-        origin: CGPoint {
-            x: rect.origin.x + dx,
-            y: rect.origin.y + dy,
-        },
-        size: CGSize {
-            width: rect.size.width - 2.0 * dx,
-            height: rect.size.height - 2.0 * dy,
-        },
-    }
-}
-
-/// `NSRect NSIntersectionRect(NSRect, NSRect)`, which is also
-/// `CGRectIntersection` for the empty case's purposes: no overlap is the zero
-/// rectangle.
-pub unsafe extern "C" fn NSIntersectionRect(a: CGRect, b: CGRect) -> CGRect {
-    let x = a.origin.x.max(b.origin.x);
-    let y = a.origin.y.max(b.origin.y);
-    let right = (a.origin.x + a.size.width).min(b.origin.x + b.size.width);
-    let top = (a.origin.y + a.size.height).min(b.origin.y + b.size.height);
-    if right <= x || top <= y {
-        return CGRect::default();
-    }
-    CGRect {
-        origin: CGPoint { x, y },
-        size: CGSize {
-            width: right - x,
-            height: top - y,
-        },
-    }
-}
-
-/// `NSRect NSOffsetRect(NSRect, CGFloat, CGFloat)`, the same as
-/// `CGRectOffset`.
-pub unsafe extern "C" fn NSOffsetRect(rect: CGRect, dx: CGFloat, dy: CGFloat) -> CGRect {
-    CGRect {
-        origin: CGPoint {
-            x: rect.origin.x + dx,
-            y: rect.origin.y + dy,
-        },
-        size: rect.size,
-    }
 }
 
 /// [`standardized`] as a rectangle again.
@@ -205,7 +103,16 @@ fn standard_rect(rect: CGRect) -> CGRect {
 /// the null rectangle when the inset swallows it.
 pub unsafe extern "C" fn CGRectInset(rect: CGRect, dx: CGFloat, dy: CGFloat) -> CGRect {
     let rect = standard_rect(rect);
-    let out = unsafe { NSInsetRect(rect, dx, dy) };
+    let out = CGRect {
+        origin: CGPoint {
+            x: rect.origin.x + dx,
+            y: rect.origin.y + dy,
+        },
+        size: CGSize {
+            width: rect.size.width - 2.0 * dx,
+            height: rect.size.height - 2.0 * dy,
+        },
+    };
     if out.size.width < 0.0 || out.size.height < 0.0 {
         return CG_RECT_NULL;
     }
@@ -214,7 +121,14 @@ pub unsafe extern "C" fn CGRectInset(rect: CGRect, dx: CGFloat, dy: CGFloat) -> 
 
 /// `CGRect CGRectOffset(CGRect, CGFloat, CGFloat)`
 pub unsafe extern "C" fn CGRectOffset(rect: CGRect, dx: CGFloat, dy: CGFloat) -> CGRect {
-    unsafe { NSOffsetRect(standard_rect(rect), dx, dy) }
+    let rect = standard_rect(rect);
+    CGRect {
+        origin: CGPoint {
+            x: rect.origin.x + dx,
+            y: rect.origin.y + dy,
+        },
+        size: rect.size,
+    }
 }
 
 /// `CGRect CGRectIntegral(CGRect)`: the smallest integral rectangle that
@@ -258,6 +172,41 @@ const CG_RECT_NULL: CGRect = CGRect {
     },
 };
 
+/// `CGRect CGRectIntersection(CGRect, CGRect)`: standardized, and the null
+/// rectangle rather than the zero one when they do not meet.
+
+pub unsafe extern "C" fn CGRectIntersection(a: CGRect, b: CGRect) -> CGRect {
+    let (a, b) = (standard_rect(a), standard_rect(b));
+    let x = a.origin.x.max(b.origin.x);
+    let y = a.origin.y.max(b.origin.y);
+    let right = (a.origin.x + a.size.width).min(b.origin.x + b.size.width);
+    let top = (a.origin.y + a.size.height).min(b.origin.y + b.size.height);
+    if right < x || top < y {
+        return CG_RECT_NULL;
+    }
+    CGRect {
+        origin: CGPoint { x, y },
+        size: CGSize {
+            width: right - x,
+            height: top - y,
+        },
+    }
+}
+
+/// `bool CGRectContainsPoint(CGRect, CGPoint)`.
+
+pub unsafe extern "C" fn CGRectContainsPoint(rect: CGRect, point: CGPoint) -> u8 {
+    contains(rect, point) as u8
+}
+
+/// `bool CGRectContainsRect(CGRect, CGRect)`: `b` lies wholly inside `a`.
+
+pub unsafe extern "C" fn CGRectContainsRect(a: CGRect, b: CGRect) -> u8 {
+    let (ax, ay, aw, ah) = standardized(a);
+    let (bx, by, bw, bh) = standardized(b);
+    (bx >= ax && by >= ay && bx + bw <= ax + aw && by + bh <= ay + ah) as u8
+}
+
 /// The eight `CGFloat CGRectGet...(CGRect)` accessors.
 ///
 /// Inline functions in the header on a Mac *and* exported symbols, and a guest
@@ -289,16 +238,7 @@ accessors! {
 
 exports::exports! {
     functions {
-        "NSDisableScreenUpdates" => NSDisableScreenUpdates,
-        "NSEnableScreenUpdates" => NSEnableScreenUpdates,
-        "CGRectEqualToRect" | "NSEqualRects" => CGRectEqualToRect,
-        "NSIsEmptyRect" => NSIsEmptyRect,
-        "NSUnionRect" => NSUnionRect,
-        "NSPointInRect" => NSPointInRect,
-        "NSMouseInRect" => NSMouseInRect,
-        "NSInsetRect" => NSInsetRect,
-        "NSIntersectionRect" => NSIntersectionRect,
-        "NSOffsetRect" => NSOffsetRect,
+        "CGRectEqualToRect" => CGRectEqualToRect,
         "CGRectInset" => CGRectInset,
         "CGRectOffset" => CGRectOffset,
         "CGRectIntegral" => CGRectIntegral,
@@ -340,6 +280,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn inset_and_offset_standardize_negative_extents() {
+        let rect = CGRect {
+            origin: CGPoint { x: 30.0, y: 40.0 },
+            size: CGSize {
+                width: -10.0,
+                height: -20.0,
+            },
+        };
+        // SAFETY: these calls pass the functions' plain value arguments.
+        unsafe {
+            assert_eq!(
+                CGRectInset(rect, 2.0, 3.0),
+                CGRect {
+                    origin: CGPoint { x: 22.0, y: 23.0 },
+                    size: CGSize {
+                        width: 6.0,
+                        height: 14.0,
+                    },
+                }
+            );
+            assert_eq!(
+                CGRectOffset(rect, 2.0, 3.0),
+                CGRect {
+                    origin: CGPoint { x: 22.0, y: 23.0 },
+                    size: CGSize {
+                        width: 10.0,
+                        height: 20.0,
+                    },
+                }
+            );
+            assert_eq!(CGRectInset(rect, 6.0, 0.0), CG_RECT_NULL);
+        }
+    }
+
     /// The conversion is its own inverse, whatever the display height is -
     /// which is the property that makes a round trip through SDL and back leave
     /// a window where it started.
@@ -361,248 +336,5 @@ mod tests {
     fn the_origin_is_the_other_corner() {
         let height = primary_height();
         assert_eq!(point_from_sdl(0.0, height), CGPoint { x: 0.0, y: 0.0 });
-    }
-
-    #[test]
-    fn mouse_rect_vertical_edge_tracks_view_orientation() {
-        let rect = CGRect {
-            origin: CGPoint { x: 10.0, y: 20.0 },
-            size: CGSize {
-                width: 30.0,
-                height: 40.0,
-            },
-        };
-
-        // SAFETY: these calls pass the function's plain value arguments.
-        unsafe {
-            assert_eq!(NSMouseInRect(CGPoint { x: 10.0, y: 20.0 }, rect, 1), 1);
-            assert_eq!(NSMouseInRect(CGPoint { x: 10.0, y: 60.0 }, rect, 1), 0);
-            assert_eq!(NSMouseInRect(CGPoint { x: 10.0, y: 20.0 }, rect, 0), 0);
-            assert_eq!(NSMouseInRect(CGPoint { x: 10.0, y: 60.0 }, rect, 0), 1);
-            assert_eq!(NSMouseInRect(CGPoint { x: 40.0, y: 30.0 }, rect, 0), 0);
-        }
-    }
-}
-
-/// `CGRectNull`, which `CGRectIntersection` answers for no overlap.
-const NULL_RECT: NSRect = NSRect {
-    origin: NSPoint {
-        x: f64::INFINITY,
-        y: f64::INFINITY,
-    },
-    size: NSSize {
-        width: 0.0,
-        height: 0.0,
-    },
-};
-
-/// `CGRect CGRectIntersection(CGRect, CGRect)`: standardized, and the null
-/// rectangle rather than the zero one when they do not meet.
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn CGRectIntersection(a: NSRect, b: NSRect) -> NSRect {
-    let (a, b) = (standard_rect(a), standard_rect(b));
-    let x = a.origin.x.max(b.origin.x);
-    let y = a.origin.y.max(b.origin.y);
-    let right = (a.origin.x + a.size.width).min(b.origin.x + b.size.width);
-    let top = (a.origin.y + a.size.height).min(b.origin.y + b.size.height);
-    if right < x || top < y {
-        return NULL_RECT;
-    }
-    NSRect {
-        origin: NSPoint { x, y },
-        size: NSSize {
-            width: right - x,
-            height: top - y,
-        },
-    }
-}
-
-/// `bool CGRectContainsPoint(CGRect, CGPoint)`.
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn CGRectContainsPoint(rect: NSRect, point: NSPoint) -> u8 {
-    contains(rect, point) as u8
-}
-
-/// `bool CGRectContainsRect(CGRect, CGRect)`: `b` lies wholly inside `a`.
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn CGRectContainsRect(a: NSRect, b: NSRect) -> u8 {
-    let (ax, ay, aw, ah) = standardized(a);
-    let (bx, by, bw, bh) = standardized(b);
-    (bx >= ax && by >= ay && bx + bw <= ax + aw && by + bh <= ay + ah) as u8
-}
-
-/// `BOOL NSContainsRect(NSRect a, NSRect b)`: AppKit's, which refuses an
-/// empty `b`.
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn NSContainsRect(a: NSRect, b: NSRect) -> u8 {
-    let empty = unsafe { NSIsEmptyRect(b) } != 0;
-    (!empty
-        && a.origin.x <= b.origin.x
-        && a.origin.y <= b.origin.y
-        && a.origin.x + a.size.width >= b.origin.x + b.size.width
-        && a.origin.y + a.size.height >= b.origin.y + b.size.height) as u8
-}
-
-/// `BOOL NSIntersectsRect(NSRect, NSRect)`.
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn NSIntersectsRect(a: NSRect, b: NSRect) -> u8 {
-    let empty = unsafe { NSIsEmptyRect(a) != 0 || NSIsEmptyRect(b) != 0 };
-    (!empty
-        && a.origin.x < b.origin.x + b.size.width
-        && b.origin.x < a.origin.x + a.size.width
-        && a.origin.y < b.origin.y + b.size.height
-        && b.origin.y < a.origin.y + a.size.height) as u8
-}
-
-/// `NSRect NSIntegralRect(NSRect)`: outward to whole numbers, and the zero
-/// rectangle for an empty one.
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn NSIntegralRect(rect: NSRect) -> NSRect {
-    if unsafe { NSIsEmptyRect(rect) } != 0 {
-        return NSRect::default();
-    }
-    unsafe { CGRectIntegral(rect) }
-}
-
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn NSEqualPoints(a: NSPoint, b: NSPoint) -> u8 {
-    (a.x == b.x && a.y == b.y) as u8
-}
-
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn NSEqualSizes(a: NSSize, b: NSSize) -> u8 {
-    (a.width == b.width && a.height == b.height) as u8
-}
-
-/// `NSRange NSIntersectionRange(NSRange, NSRange)`: the zero range when they
-/// do not overlap.
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn NSIntersectionRange(
-    a: foundation::geometry::NSRange,
-    b: foundation::geometry::NSRange,
-) -> foundation::geometry::NSRange {
-    let start = a.location.max(b.location);
-    let end = (a.location + a.length).min(b.location + b.length);
-    match end > start {
-        true => foundation::geometry::NSRange {
-            location: start,
-            length: end - start,
-        },
-        false => foundation::geometry::NSRange::default(),
-    }
-}
-
-/// A number as `%g` writes it, which is how Foundation prints geometry: six
-/// significant digits, no trailing zeros, and an exponent outside 1e-4..1e6.
-fn g(value: f64) -> String {
-    if value == 0.0 || !value.is_finite() {
-        return match value {
-            v if v.is_nan() => "nan".into(),
-            v if v.is_infinite() && v > 0.0 => "inf".into(),
-            v if v.is_infinite() => "-inf".into(),
-            _ => "0".into(),
-        };
-    }
-    let exponent = value.abs().log10().floor() as i32;
-    let trim = |text: String| {
-        if text.contains('.') {
-            text.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            text
-        }
-    };
-    if !(-4..6).contains(&exponent) {
-        let text = format!("{:.5e}", value);
-        let (mantissa, power) = text.split_once('e').unwrap_or((&text, "0"));
-        let power: i32 = power.parse().unwrap_or(0);
-        let sign = if power < 0 { '-' } else { '+' };
-        return format!("{}e{sign}{:02}", trim(mantissa.to_string()), power.abs());
-    }
-    let decimals = (5 - exponent).max(0) as usize;
-    trim(format!("{value:.decimals$}"))
-}
-
-fn autoreleased_string(text: &str) -> objc::object::Id {
-    objc::arc::autorelease(foundation::string::from_str(text))
-}
-
-/// The numbers in an `NSString`, in order, as Foundation's parsers scan them:
-/// anything that is not part of a number separates.
-unsafe fn numbers(string: objc::object::Id) -> Vec<f64> {
-    if string.is_null() {
-        return Vec::new();
-    }
-    // SAFETY: an NSString, by the parsers' prototypes.
-    let text = String::from_utf8_lossy(&unsafe { foundation::string::bytes(string) }).into_owned();
-    let mut out = Vec::new();
-    let mut current = String::new();
-    for c in text.chars().chain(std::iter::once(' ')) {
-        if c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E') {
-            current.push(c);
-        } else if !current.is_empty() {
-            if let Ok(value) = current.parse() {
-                out.push(value);
-            }
-            current.clear();
-        }
-    }
-    out
-}
-
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn NSStringFromPoint(point: NSPoint) -> objc::object::Id {
-    autoreleased_string(&format!("{{{}, {}}}", g(point.x), g(point.y)))
-}
-
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn NSStringFromSize(size: NSSize) -> objc::object::Id {
-    autoreleased_string(&format!("{{{}, {}}}", g(size.width), g(size.height)))
-}
-
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn NSStringFromRect(rect: NSRect) -> objc::object::Id {
-    autoreleased_string(&format!(
-        "{{{{{}, {}}}, {{{}, {}}}}}",
-        g(rect.origin.x),
-        g(rect.origin.y),
-        g(rect.size.width),
-        g(rect.size.height)
-    ))
-}
-
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn NSStringFromRange(
-    range: foundation::geometry::NSRange,
-) -> objc::object::Id {
-    autoreleased_string(&format!("{{{}, {}}}", range.location, range.length))
-}
-
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn NSPointFromString(string: objc::object::Id) -> NSPoint {
-    let n = unsafe { numbers(string) };
-    let at = |i: usize| n.get(i).copied().unwrap_or(0.0);
-    NSPoint { x: at(0), y: at(1) }
-}
-
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn NSSizeFromString(string: objc::object::Id) -> NSSize {
-    let n = unsafe { numbers(string) };
-    let at = |i: usize| n.get(i).copied().unwrap_or(0.0);
-    NSSize {
-        width: at(0),
-        height: at(1),
-    }
-}
-
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn NSRectFromString(string: objc::object::Id) -> NSRect {
-    let n = unsafe { numbers(string) };
-    let at = |i: usize| n.get(i).copied().unwrap_or(0.0);
-    NSRect {
-        origin: NSPoint { x: at(0), y: at(1) },
-        size: NSSize {
-            width: at(2),
-            height: at(3),
-        },
     }
 }
