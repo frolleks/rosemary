@@ -15,11 +15,11 @@ extern "C" fn UAZoomChangeFocus(_rect: *const f64, _highlight: *const f64, _kind
 }
 
 exports::exports! {
-    groups {
-        ats,
-    }
     functions {
         "UAZoomEnabled" => UAZoomEnabled,
         "UAZoomChangeFocus" => UAZoomChangeFocus,
+    }
+    groups {
+        ats,
     }
 }
