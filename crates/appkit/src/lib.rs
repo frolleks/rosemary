@@ -58,7 +58,6 @@ mod view_controller;
 mod visual_effect;
 mod visual_format;
 pub use coregraphics::fonts;
-pub(crate) use coregraphics::quartz;
 pub mod icon;
 pub mod image;
 mod input_context;

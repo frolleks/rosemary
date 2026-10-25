@@ -623,7 +623,7 @@ pub(crate) fn deliver_past_modal(event: sdl3::video::Event) {
             } else {
                 (x, y)
             };
-            crate::quartz_event::note_mouse_delta(dx, dy);
+            coregraphics::quartz_event::note_mouse_delta(dx, dy);
             crate::screen::hold_at_edge(id, x, y, dx, dy);
             // SDL's position keeps integrating the deltas of a disassociated
             // pointer, so it wanders over the chrome while the cursor the
@@ -1027,7 +1027,7 @@ fn location(window: Id, x: f32, y: f32) -> NSPoint {
         },
     };
     let height = height + window::content_inset(window);
-    crate::cgpath::ns_point(crate::cggeometry::point_in_window(
+    crate::cgpath::ns_point(coregraphics::cggeometry::point_in_window(
         x as f64, y as f64, height,
     ))
 }
@@ -1045,7 +1045,7 @@ fn send(id: u32, at: Option<(f32, f32)>, fields: impl FnOnce(Id, NSPoint) -> Fie
 
 /// Hand a built event to its window's `-sendEvent:`, after the local monitors.
 pub(crate) fn dispatch(window: Id, event: Id) {
-    crate::quartz_event::count(nsevent::kind_of(event));
+    coregraphics::quartz_event::count(nsevent::kind_of(event));
     // Before the window sees it, which is where AppKit runs a local monitor: a
     // monitor exists to swallow an event, and one that ran afterwards could
     // only take it back.

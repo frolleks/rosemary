@@ -8,10 +8,9 @@
 //! toolkit's layout and hit testing still line up with what is drawn.
 
 use corefoundation::base::CFTypeRef;
+use coregraphics::cgcontext as cg;
+use coregraphics::quartz::{self, Shading};
 use foundation::geometry::{NSPoint, NSRect, NSSize};
-
-use crate::cgcontext as cg;
-use crate::quartz::{self, Shading};
 
 type Rgba = [f64; 4];
 

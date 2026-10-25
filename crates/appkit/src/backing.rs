@@ -2261,7 +2261,7 @@ unsafe extern "C" fn context_with_port(
         .expect("NSGraphicsContext is declared");
     let context = objc::object::create_instance(class, 0);
     // SAFETY: the caller's live `CGContext`, held for this object's life.
-    let port = unsafe { crate::cgcontext::CGContextRetain(port) };
+    let port = unsafe { coregraphics::cgcontext::CGContextRetain(port) };
     WRAPPED.lock().unwrap_or_else(|e| e.into_inner()).push((
         context as usize,
         port as usize,
@@ -2280,7 +2280,7 @@ unsafe extern "C" fn context_dealloc(receiver: Id, _sel: Sel) {
     };
     if let Some(port) = port {
         // SAFETY: the reference `context_with_port` took.
-        unsafe { crate::cgcontext::CGContextRelease(port as *const c_void) };
+        unsafe { coregraphics::cgcontext::CGContextRelease(port as *const c_void) };
     }
     objc::arc::finalize(receiver);
 }
@@ -2296,7 +2296,7 @@ unsafe extern "C" fn cg_context(receiver: Id, _sel: Sel) -> *const c_void {
     if let Some((port, _)) = wrapped(receiver) {
         return port as *const c_void;
     }
-    crate::cgcontext::focus_context()
+    coregraphics::cgcontext::focus_context()
 }
 
 unsafe extern "C" fn ignored(_receiver: Id, _sel: Sel) {}
@@ -2315,7 +2315,7 @@ unsafe extern "C" fn shared_color_space(_receiver: Id, _sel: Sel) -> Id {
 unsafe extern "C" fn cg_color_space(_receiver: Id, _sel: Sel) -> *const c_void {
     static SPACE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     // SAFETY: creates an object this runtime keeps for the process.
-    *SPACE.get_or_init(|| unsafe { crate::cgcolor::CGColorSpaceCreateDeviceRGB() } as usize)
+    *SPACE.get_or_init(|| unsafe { coregraphics::cgcolor::CGColorSpaceCreateDeviceRGB() } as usize)
         as *const c_void
 }
 

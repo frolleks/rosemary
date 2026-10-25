@@ -84,7 +84,9 @@ unsafe extern "C" fn screens(_class: Id, _sel: Sel) -> Id {
 unsafe extern "C" fn frame(receiver: Id, _sel: Sel) -> NSRect {
     let display = display_of(receiver);
     match sdl3::video::display_bounds(display) {
-        Some(b) => crate::cgpath::ns_rect(crate::cggeometry::rect_from_sdl(b.x, b.y, b.w, b.h)),
+        Some(b) => {
+            crate::cgpath::ns_rect(coregraphics::cggeometry::rect_from_sdl(b.x, b.y, b.w, b.h))
+        }
         None => NSRect::default(),
     }
 }
@@ -107,7 +109,9 @@ unsafe extern "C" fn visible_frame(receiver: Id, sel: Sel) -> NSRect {
         return fullscreen_visible_frame(full, crate::menu::global_menu_bar_height());
     }
     match sdl3::video::display_usable_bounds(display) {
-        Some(b) => crate::cgpath::ns_rect(crate::cggeometry::rect_from_sdl(b.x, b.y, b.w, b.h)),
+        Some(b) => {
+            crate::cgpath::ns_rect(coregraphics::cggeometry::rect_from_sdl(b.x, b.y, b.w, b.h))
+        }
         // SAFETY: `-frame` is `NSRect (id, SEL)`.
         None => unsafe { frame(receiver, sel) },
     }
@@ -686,7 +690,7 @@ pub(crate) unsafe fn warp_pointer_impl(point: foundation::geometry::NSPoint) -> 
     // where it was, and otherwise the answer the window system gives.
     let moved = match mouse_is_associated() {
         true => {
-            let at = crate::quartz_event::global_pointer();
+            let at = coregraphics::quartz_event::global_pointer();
             (asked.x - at.x, asked.y - at.y)
         }
         false => (f64::from(local.0 - from.0), f64::from(local.1 - from.1)),
