@@ -1,6 +1,11 @@
+use std::ffi::c_void;
+use std::sync::LazyLock;
+
 use microlift::arch::x86_64::context::RegisterContext;
 
-use crate::abi::{Callbacks, GuestMemory, Result};
+use crate::abi::aggregate::{Aggregate, Leaf, Shape};
+use crate::abi::{ArgType as T, Callbacks, GuestMemory, Result};
+use crate::thunk::ThunkSignature;
 
 use super::coregraphics::CgPoint;
 use super::host::builtin_or_host;
@@ -155,13 +160,25 @@ fn encode_frame(symbol: &str, ctx: &mut RegisterContext, mem: &mut dyn GuestMemo
     let f = unsafe { entry::<EncodeFrame>(symbol)? };
     let pts = time_argument(symbol, ctx, mem, 0)?;
     let duration = time_argument(symbol, ctx, mem, 1)?;
-    let status = f(ctx.rdi, ctx.rsi, pts, duration, ctx.rdx, ctx.rcx, ctx.r8);
+    // The encoder is the host's even with the builtin frameworks, and cannot
+    // read this runtime's pixel buffers; it is handed a copy the host made.
+    let copy = match crate::frameworks::using_builtin() {
+        true => corevideo::pixel_buffer::host_copy(ctx.rsi as usize as *const c_void),
+        false => None,
+    };
+    let image = copy.map_or(ctx.rsi, |copy| copy as usize as u64);
+    let status = f(ctx.rdi, image, pts, duration, ctx.rdx, ctx.rcx, ctx.r8);
+    if let Some(copy) = copy {
+        // SAFETY: the reference `host_copy` returned; the encoder took its own.
+        unsafe { corefoundation::api::CFRelease(copy) };
+    }
     super::set_int_return(ctx, status);
     Ok(())
 }
 
-/// `CGSize CVImageBufferGetEncodedSize(CVImageBufferRef imageBuffer)`
-fn encoded_size(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
+/// `CGSize CVImageBufferGetEncodedSize(CVImageBufferRef imageBuffer)`, and
+/// `CVImageBufferGetDisplaySize`, which is declared the same way.
+fn image_size(symbol: &str, ctx: &mut RegisterContext, _mem: &mut dyn GuestMemory) -> Result<()> {
     // SAFETY: the declaration from CVImageBuffer.h; a `CGSize` is laid out as a
     // `CGPoint` is.
     let f = unsafe { entry::<extern "C" fn(u64) -> CgPoint>(symbol)? };
@@ -198,6 +215,51 @@ fn frame_rate_range_make(
     Ok(())
 }
 
+/// The callback's two 24-byte times are passed on the guest SysV stack,
+/// but by pointer to a caller-owned copy on AAPCS64 hosts.
+pub(crate) fn decompression_output_signature() -> ThunkSignature {
+    static SIGNATURE: LazyLock<ThunkSignature> = LazyLock::new(decompression_output_shape);
+    SIGNATURE.clone()
+}
+
+fn decompression_output_shape() -> ThunkSignature {
+    let time = Shape::Struct(Aggregate {
+        size: size_of::<CmTime>(),
+        align: align_of::<CmTime>(),
+        leaves: vec![
+            Leaf {
+                ty: T::SignedDoubleword,
+                offset: 0,
+            },
+            Leaf {
+                ty: T::SignedWord,
+                offset: 8,
+            },
+            Leaf {
+                ty: T::UnsignedWord,
+                offset: 12,
+            },
+            Leaf {
+                ty: T::SignedDoubleword,
+                offset: 16,
+            },
+        ],
+    });
+    ThunkSignature::new(
+        vec![
+            Shape::Scalar(T::Pointer),
+            Shape::Scalar(T::Pointer),
+            Shape::Scalar(T::SignedWord),
+            Shape::Scalar(T::UnsignedWord),
+            Shape::Scalar(T::Pointer),
+            time.clone(),
+            time,
+        ],
+        None,
+    )
+    .expect("the VideoToolbox output callback uses a supported ABI")
+}
+
 /// `VTDecompressionOutputCallbackRecord` - a function pointer and its refcon.
 #[repr(C)]
 struct OutputCallbackRecord {
@@ -225,10 +287,11 @@ fn decompression_session_create(
     let record = match ctx.r8 {
         0 => None,
         va => Some(OutputCallbackRecord {
-            callback: match mem.read_u64(va, symbol)? {
-                0 => 0,
-                guest => callbacks.substitute(symbol, guest)?,
-            },
+            callback: callbacks.substitute_typed(
+                symbol,
+                mem.read_u64(va, symbol)?,
+                decompression_output_signature(),
+            )?,
             refcon: mem.read_u64(va + 8, symbol)?,
         }),
     };
@@ -257,7 +320,8 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         "VTCompressionSessionEncodeFrame" => {
             bind!("VTCompressionSessionEncodeFrame" => encode_frame)
         }
-        "CVImageBufferGetEncodedSize" => bind!("CVImageBufferGetEncodedSize" => encoded_size),
+        "CVImageBufferGetEncodedSize" => bind!("CVImageBufferGetEncodedSize" => image_size),
+        "CVImageBufferGetDisplaySize" => bind!("CVImageBufferGetDisplaySize" => image_size),
         "CAFrameRateRangeMake" => bind!("CAFrameRateRangeMake" => frame_rate_range_make),
         _ => return None,
     })

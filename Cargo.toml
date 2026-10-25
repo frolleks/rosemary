@@ -9,6 +9,8 @@ edition = "2024"
 license = "GPL-3.0-only"
 
 [workspace.dependencies]
+icu_normalizer = { version = "2.3", default-features = false, features = ["compiled_data"] }
+icu_properties = { version = "2.3", default-features = false, features = ["compiled_data"] }
 machish = { path = "crates/machish" }
 exports = { path = "crates/exports" }
 darwin = { path = "crates/darwin" }
@@ -25,6 +27,7 @@ chrome = { path = "crates/chrome" }
 applicationservices = { path = "crates/applicationservices" }
 coreservices = { path = "crates/coreservices" }
 audiotoolbox = { path = "crates/audiotoolbox" }
+coremedia = { path = "crates/coremedia" }
 corevideo = { path = "crates/corevideo" }
 iosurface = { path = "crates/iosurface" }
 coreaudio = { path = "crates/coreaudio" }
