@@ -48,6 +48,7 @@ mod displaylink;
 pub mod dock;
 pub mod event;
 mod font;
+mod geometry;
 pub mod hitheme;
 pub mod launch;
 pub mod launchservices;
@@ -186,6 +187,13 @@ exports::exports! {
         "NSAccessibilityRoleDescriptionForUIElement" => accessibility::NSAccessibilityRoleDescriptionForUIElement,
         "NSAccessibilityUnignoredAncestor" => accessibility::NSAccessibilityUnignoredAncestor,
         "NSAccessibilityFrameInView" => accessibility::NSAccessibilityFrameInView,
+        // FIXME (PORTABILITY): this needs to be ported to macOS
+        #[cfg(not(target_os = "macos"))]
+        "NSDefaultMallocZone" => darwin::malloc::malloc_default_zone,
+        "NSRectFill" => color::NSRectFill,
+        "NSDrawNinePartImage" => image::NSDrawNinePartImage,
+        "NSDisableScreenUpdates" => geometry::NSDisableScreenUpdates,
+        "NSEnableScreenUpdates" => geometry::NSEnableScreenUpdates,
         "GetCurrentKeyModifiers" | "GetCurrentEventKeyModifiers" => keymap::GetCurrentKeyModifiers,
         "TISCopyCurrentKeyboardInputSource" => textinput::TISCopyCurrentKeyboardInputSource,
         "TISCopyInputMethodKeyboardLayoutOverride" => textinput::TISCopyInputMethodKeyboardLayoutOverride,

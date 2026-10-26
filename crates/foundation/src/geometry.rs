@@ -23,13 +23,6 @@ pub struct NSRange {
     pub length: usize,
 }
 
-/// `void NSDisableScreenUpdates(void)` and `NSEnableScreenUpdates`: they hold
-/// back the window server's flushes so several windows change at once. Each
-/// window here presents on its own, so there is nothing to hold back.
-pub extern "C" fn NSDisableScreenUpdates() {}
-
-pub extern "C" fn NSEnableScreenUpdates() {}
-
 pub unsafe extern "C" fn NSEqualRects(a: NSRect, b: NSRect) -> u8 {
     unsafe { cggeometry::CGRectEqualToRect(a, b) }
 }
