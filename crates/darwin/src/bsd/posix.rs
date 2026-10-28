@@ -1,11 +1,5 @@
 use std::ffi::{CStr, c_char, c_int, c_void};
 
-extern "C" fn errc(_: c_int, _: c_int, _: *const c_char) {
-    todo!()
-}
-extern "C" fn warnc(_: c_int, _: *const c_char) {
-    todo!()
-}
 extern "C" fn abort_report_np(_: *const c_char) -> ! {
     todo!()
 }
@@ -395,8 +389,6 @@ pub extern "C" fn keymgr_dwarf2_register_sections() {}
 
 exports::exports! {
     functions {
-        "errc" => errc,
-        "warnc" => warnc,
         "abort_report_np" => abort_report_np,
         #[cfg(target_os = "linux")]
         "sigsetjmp" => sigsetjmp,

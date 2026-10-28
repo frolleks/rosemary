@@ -48,6 +48,7 @@ pub mod dispatch;
 pub mod distnote;
 pub mod divergent;
 pub mod env;
+pub mod err;
 pub mod errno;
 pub mod exe;
 pub mod exit;
@@ -324,6 +325,7 @@ fn registered(name: &str) -> Option<u64> {
 /// Guest-aware overrides enabled on every host, even with native libc.
 static DEFAULT_MODULES: &[exports::Module] = &[
     idle::MODULE,
+    err::MODULE,
     errno::MODULE,
     sysctl::MODULE,
     sysinfo::MODULE,
