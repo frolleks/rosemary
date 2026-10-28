@@ -3808,6 +3808,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CTFontDescriptorCreateMatchingFontDescriptor", P, P, P),
     sig!("CTFontCreateWithFontDescriptor", P, P, F64, P),
     sig!("CTFontCopyTable", P, P, U32, U32),
+    sig!("CTFontCopyVariationAxes", P, P),
     sig!("CTFontCopyDefaultCascadeListForLanguages", P, P, P),
     sig!("CTFontManagerCopyAvailableFontFamilyNames", P),
     sig!("CTFontManagerCreateFontDescriptorsFromURL", P, P),
