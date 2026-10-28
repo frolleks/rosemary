@@ -588,13 +588,14 @@ impl RunLoop {
             true => Instant::now().checked_add(Duration::from_secs_f64(seconds.min(1e9))),
             false => None,
         };
+        let services_main_queue = self.services_main_queue(mode);
 
         loop {
             if self.stopped.swap(false, Ordering::AcqRel) {
                 self.observe(mode, activity::EXIT);
                 return result::STOPPED;
             }
-            if self.is_empty(mode) && !self.has_observer(mode) {
+            if !services_main_queue && self.is_empty(mode) && !self.has_observer(mode) {
                 self.observe(mode, activity::EXIT);
                 return result::FINISHED;
             }
@@ -616,6 +617,9 @@ impl RunLoop {
                 handled |= source.fire();
             }
             handled |= self.run_blocks(mode);
+            if services_main_queue {
+                handled |= darwin::dispatch::queue::drain_main();
+            }
             if handled && return_after_source {
                 self.observe(mode, activity::EXIT);
                 return result::HANDLED_SOURCE;
@@ -646,6 +650,27 @@ impl RunLoop {
             self.waiting.store(false, Ordering::Release);
             self.observe(mode, activity::AFTER_WAITING);
         }
+    }
+
+    /// Whether a run in `mode` services the main dispatch queue, as the main
+    /// thread's loop does in its common modes. That makes the mode never empty:
+    /// the queue is a source another thread can always add work to.
+    fn services_main_queue(&self, mode: &str) -> bool {
+        let is_main = MAIN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|main| std::ptr::eq(Arc::as_ptr(main), self));
+        // SAFETY: no arguments; answers about the calling thread.
+        is_main
+            && unsafe { darwin::pthread::main_np() } != 0
+            && self
+                .common
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .names
+                .iter()
+                .any(|name| name == mode)
     }
 
     fn wait_until(&self, deadline: Instant) {
@@ -790,8 +815,26 @@ pub fn current() -> Arc<RunLoop> {
 
 /// The main thread's run loop, made if nothing has asked for it yet.
 pub fn main() -> Arc<RunLoop> {
-    let mut main = MAIN.lock().unwrap_or_else(|e| e.into_inner());
-    Arc::clone(main.get_or_insert_with(fresh))
+    let mut made = false;
+    let main = Arc::clone(
+        MAIN.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(|| {
+                made = true;
+                fresh()
+            }),
+    );
+    if made {
+        // Outside the lock: the hook runs at once, and it asks for this loop.
+        darwin::dispatch::queue::set_main_wake_hook(wake_main);
+    }
+    main
+}
+
+/// Work sent to the main queue ends the main loop's wait, as the queue's port
+/// does on a Mac.
+fn wake_main() {
+    main().wake();
 }
 
 fn fresh() -> Arc<RunLoop> {

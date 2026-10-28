@@ -66,18 +66,6 @@ static CURRENT_EVENT: AtomicUsize = AtomicUsize::new(0);
 static POSTED_SOURCE: std::sync::OnceLock<std::sync::Arc<corefoundation::runloop::Source>> =
     std::sync::OnceLock::new();
 
-/// The main run loop's source for the main dispatch queue, which also exists
-/// only to end its wait: `turn` drains the queue once the loop returns.
-static MAIN_QUEUE_SOURCE: std::sync::OnceLock<std::sync::Arc<corefoundation::runloop::Source>> =
-    std::sync::OnceLock::new();
-
-fn main_queue_submitted() {
-    if let Some(source) = MAIN_QUEUE_SOURCE.get() {
-        source.signal();
-        corefoundation::runloop::main().wake();
-    }
-}
-
 /// Nothing to do: the events are sent by `turn`, or taken by
 /// `-nextEventMatchingMask:`, once the loop returns for this source.
 unsafe extern "C" fn posted_source_fired(_info: *mut c_void) {}
@@ -518,12 +506,6 @@ fn register_common_modes() {
         let source = POSTED_SOURCE
             .get_or_init(|| corefoundation::runloop::new_source(Some(posted_source_fired), 0));
         loop_.add_source(source, corefoundation::runloop::COMMON_MODES);
-        // Drained by `service_run_loop`, not by the source, so a main-queue block
-        // that runs a nested loop does not start the next one inside it.
-        let source = MAIN_QUEUE_SOURCE
-            .get_or_init(|| corefoundation::runloop::new_source(Some(posted_source_fired), 0));
-        loop_.add_source(source, corefoundation::runloop::COMMON_MODES);
-        darwin::dispatch::queue::set_main_wake_hook(main_queue_submitted);
     });
 }
 
@@ -563,18 +545,17 @@ unsafe fn turn_in_pool(receiver: Id, mode: &str) {
     unsafe { service_run_loop(mode, 0.002) };
 }
 
-/// Drain the main queue and run the main run loop in `mode` for `seconds`.
+/// Run the main run loop in `mode` for `seconds`, which also drains the main
+/// queue in the common modes.
 ///
-/// The main queue is drained here because this is the main thread: a block sent
-/// to it with `dispatch_async` runs nowhere else. The slice is short because the
-/// run loop's timers are what drive a frame - see `corevideo` - and the window
-/// system is pumped between slices, not by the loop.
+/// The slice is short because the run loop's timers are what drive a frame -
+/// see `corevideo` - and the window system is pumped between slices, not by the
+/// loop.
 ///
 /// # Safety
 ///
 /// Called on the main thread, from a place a run loop callback may reenter.
 unsafe fn service_run_loop(mode: &str, seconds: f64) {
-    darwin::dispatch::queue::drain_main();
     // Returning after a source lets an event posted from another thread be sent
     // now rather than when the slice ends - see `POSTED_SOURCE`.
     let result = corefoundation::runloop::main().run_in_mode(mode, seconds, true);

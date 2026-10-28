@@ -83,16 +83,6 @@ unsafe fn once_with(predicate: *mut c_void, body: impl FnOnce()) {
     state.store(DONE, Ordering::Release);
 }
 
-/// `_dispatch_main_q`, and a note that the thread binding it is the main one.
-///
-/// Recorded here rather than at start-up because this is the call that runs on
-/// the thread the program was loaded on, which is what `dispatch_get_main_queue`
-/// means by main.
-fn main_queue() -> u64 {
-    queue::note_main_thread();
-    queue::main_queue()
-}
-
 exports::exports! {
     functions {
         "dispatch_queue_create" => queue::queue_create,
@@ -143,7 +133,7 @@ exports::exports! {
         "dispatch_source_merge_data" => source::merge_data,
     }
     data {
-        "__dispatch_main_q" => main_queue(),
+        "__dispatch_main_q" => queue::main_queue(),
         "__dispatch_queue_attr_concurrent" => queue::concurrent_attr(),
         "__dispatch_data_destructor_free" => data::destructor_free(),
         "__dispatch_source_type_data_add" => source::type_data_add(),
