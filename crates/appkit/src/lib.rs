@@ -508,6 +508,12 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     "NSOutlineViewItemDidCollapseNotification",
     "NSOutlineViewItemDidExpandNotification",
     "NSPopUpButtonWillPopUpNotification",
+    // Observed by Qt's font database; no font is ever installed while running.
+    "NSFontSetChangedNotification",
+    // Observed by Qt's Cocoa platform plugin; no menu tracking or other
+    // application's activation posts them here.
+    "NSMenuDidBeginTrackingNotification",
+    "NSWorkspaceDidActivateApplicationNotification",
     // Keys and option names whose text is their own name.
     "NSApplicationLaunchUserNotificationKey",
     "NSAccessibilityException",
@@ -668,6 +674,30 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     // that writes with one and reads with the other has to name the same type.
     ("_NSPasteboardTypeString", "public.utf8-plain-text"),
     ("_NSStringPboardType", "public.utf8-plain-text"),
+    ("_NSPasteboardTypeColor", "com.apple.cocoa.pasteboard.color"),
+    ("_NSPasteboardTypeFileURL", "public.file-url"),
+    (
+        "_NSPasteboardTypeFont",
+        "com.apple.cocoa.pasteboard.character-formatting",
+    ),
+    ("_NSPasteboardTypeHTML", "public.html"),
+    (
+        "_NSPasteboardTypeMultipleTextSelection",
+        "com.apple.cocoa.pasteboard.multiple-text-selection",
+    ),
+    ("_NSPasteboardTypePDF", "com.adobe.pdf"),
+    ("_NSPasteboardTypeRTF", "public.rtf"),
+    ("_NSPasteboardTypeRTFD", "com.apple.flat-rtfd"),
+    (
+        "_NSPasteboardTypeRuler",
+        "com.apple.cocoa.pasteboard.paragraph-formatting",
+    ),
+    ("_NSPasteboardTypeTIFF", "public.tiff"),
+    (
+        "_NSPasteboardTypeTabularText",
+        "public.utf8-tab-separated-values-text",
+    ),
+    ("_NSPasteboardTypeURL", "public.url"),
     // The rest of the deprecated pasteboard types, whose values are their own
     // names - which is what they are on a Mac, and what makes a program that
     // writes with the old spelling and reads with it find its own data.
@@ -818,6 +848,58 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSAccessibilityTextAreaRole", "AXTextArea"),
     ("_NSAccessibilityTextFieldRole", "AXTextField"),
     ("_NSAccessibilityTextLinkSubrole", "AXTextLink"),
+    ("_NSAccessibilityApplicationRole", "AXApplication"),
+    ("_NSAccessibilityButtonRole", "AXButton"),
+    ("_NSAccessibilityCellRole", "AXCell"),
+    ("_NSAccessibilityCheckBoxRole", "AXCheckBox"),
+    ("_NSAccessibilityColorWellRole", "AXColorWell"),
+    ("_NSAccessibilityColumnRole", "AXColumn"),
+    ("_NSAccessibilityComboBoxRole", "AXComboBox"),
+    ("_NSAccessibilityGrowAreaRole", "AXGrowArea"),
+    ("_NSAccessibilityImageRole", "AXImage"),
+    ("_NSAccessibilityIncrementorRole", "AXIncrementor"),
+    ("_NSAccessibilityListRole", "AXList"),
+    ("_NSAccessibilityMenuBarRole", "AXMenuBar"),
+    ("_NSAccessibilityMenuButtonRole", "AXMenuButton"),
+    ("_NSAccessibilityMenuItemRole", "AXMenuItem"),
+    ("_NSAccessibilityMenuRole", "AXMenu"),
+    ("_NSAccessibilityOutlineRole", "AXOutline"),
+    ("_NSAccessibilityPopUpButtonRole", "AXPopUpButton"),
+    (
+        "_NSAccessibilityProgressIndicatorRole",
+        "AXProgressIndicator",
+    ),
+    ("_NSAccessibilityRowRole", "AXRow"),
+    ("_NSAccessibilityScrollBarRole", "AXScrollBar"),
+    ("_NSAccessibilitySliderRole", "AXSlider"),
+    ("_NSAccessibilitySplitGroupRole", "AXSplitGroup"),
+    ("_NSAccessibilitySplitterRole", "AXSplitter"),
+    ("_NSAccessibilityTableRole", "AXTable"),
+    ("_NSAccessibilityToolbarRole", "AXToolbar"),
+    ("_NSAccessibilityUnknownRole", "AXUnknown"),
+    ("_NSAccessibilityValueIndicatorRole", "AXValueIndicator"),
+    ("_NSAccessibilityWindowRole", "AXWindow"),
+    ("_NSAccessibilitySearchFieldSubrole", "AXSearchField"),
+    (
+        "_NSAccessibilitySecureTextFieldSubrole",
+        "AXSecureTextField",
+    ),
+    ("_NSAccessibilityTabButtonSubrole", "AXTabButton"),
+    ("_NSAccessibilityDecrementAction", "AXDecrement"),
+    ("_NSAccessibilityIncrementAction", "AXIncrement"),
+    ("_NSAccessibilityRaiseAction", "AXRaise"),
+    ("_NSAccessibilityShowMenuAction", "AXShowMenu"),
+    ("_NSAccessibilityFocusedAttribute", "AXFocused"),
+    ("_NSAccessibilityPriorityKey", "AXPriorityKey"),
+    (
+        "_NSAccessibilityFocusedUIElementChangedNotification",
+        "AXFocusedUIElementChanged",
+    ),
+    ("_NSAccessibilityTitleChangedNotification", "AXTitleChanged"),
+    (
+        "_NSAccessibilityUIElementDestroyedNotification",
+        "AXUIElementDestroyed",
+    ),
     ("_NSAccessibilityPressAction", "AXPress"),
     (
         "_NSAccessibilitySelectedRowsChangedNotification",
