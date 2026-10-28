@@ -332,6 +332,14 @@ unsafe extern "C" fn highlight_with_level(receiver: Id, _sel: Sel, level: CGFloa
     make(mix(r), mix(g), mix(b), a)
 }
 
+/// `-colorWithAlphaComponent:`: the receiver's colour with its alpha replaced,
+/// clamped to 0...1 as AppKit clamps it.
+unsafe extern "C" fn color_with_alpha_component(receiver: Id, _sel: Sel, alpha: CGFloat) -> Id {
+    // SAFETY: a colour of this crate's.
+    let (r, g, b, _) = unsafe { components(receiver) };
+    make(r, g, b, alpha.clamp(0.0, 1.0))
+}
+
 /// `+colorWithCGColor:`: the same components, as RGBA.
 unsafe extern "C" fn color_with_cg_color(_class: Id, _sel: Sel, color: *const c_void) -> Id {
     if color.is_null() {
@@ -633,6 +641,7 @@ pub(crate) fn install() {
     });
     methods!(class, {
         "highlightWithLevel:" => highlight_with_level, c"@24@0:8d16";
+        "colorWithAlphaComponent:" => color_with_alpha_component, c"@24@0:8d16";
         "setFill" => set_fill, c"v16@0:8";
         "setStroke" => set_stroke, c"v16@0:8";
         "set" => set_both, c"v16@0:8";
@@ -700,6 +709,26 @@ mod tests {
         // SAFETY: still live, because nothing autoreleased it.
         assert_eq!(unsafe { components(first) }, before);
         assert_eq!(before, (0.0, 0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn color_with_alpha_component_replaces_only_alpha() {
+        crate::bootstrap();
+        let color = make(0.25, 0.5, 0.75, 1.0);
+        // SAFETY: `-colorWithAlphaComponent:` is `id (id, SEL, CGFloat)`.
+        let (half, over) = unsafe {
+            let sel = objc::sel::get("colorWithAlphaComponent:");
+            (
+                color_with_alpha_component(color, sel, 0.5),
+                color_with_alpha_component(color, sel, 2.0),
+            )
+        };
+        // SAFETY: colours this crate just made.
+        unsafe {
+            assert_eq!(components(half), (0.25, 0.5, 0.75, 0.5));
+            assert_eq!(components(over), (0.25, 0.5, 0.75, 1.0));
+            assert_eq!(components(color), (0.25, 0.5, 0.75, 1.0));
+        }
     }
 
     /// `+alternatingContentBackgroundColors` is the same kept pair as the older
