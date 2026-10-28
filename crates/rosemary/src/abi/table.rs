@@ -3871,6 +3871,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // *format, uint8_t *buf, uint32_t size)` - **not** variadic, which is the
     // surprise.
     sig!("_os_log_impl", V, P, P, U8, P, P, U32),
+    sig!("_os_log_debug_impl", V, P, P, U8, P, P, U32),
+    sig!("_os_log_error_impl", V, P, P, U8, P, P, U32),
+    sig!("_os_log_fault_impl", V, P, P, U8, P, P, U32),
     sig!("os_log_create", P, P, P),
     sig!("os_log_type_enabled", BOOL, P, U8),
     sig!("os_release", V, P),
