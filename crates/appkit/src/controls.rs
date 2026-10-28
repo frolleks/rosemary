@@ -524,7 +524,7 @@ mod slot {
     pub const FILL_COLOR: usize = 1;
     pub const BORDER_COLOR: usize = 2;
     pub const TRANSPARENT: usize = 3;
-    /// An `f64`'s bits.
+    /// An `f64`'s bits, inverted so that zero is "never set".
     pub const BORDER_WIDTH: usize = 4;
     /// `-contentViewMargins`, each an `f64`'s bits.
     pub const MARGIN_WIDTH: usize = 5;
@@ -737,13 +737,23 @@ unsafe extern "C" fn box_set_border_width(receiver: Id, _sel: Sel, value: f64) {
         boxes(),
         receiver,
         slot::BORDER_WIDTH,
-        value.to_bits() as usize,
+        !value.to_bits() as usize,
     );
     crate::backing::needs_display(receiver);
 }
 
 unsafe extern "C" fn box_border_width(receiver: Id, _sel: Sel) -> f64 {
-    f64::from_bits(read(boxes(), receiver, slot::BORDER_WIDTH) as u64)
+    border_width(receiver)
+}
+
+/// AppKit's default for a custom box's border.
+const DEFAULT_BORDER_WIDTH: f64 = 1.0;
+
+fn border_width(receiver: Id) -> f64 {
+    match read(boxes(), receiver, slot::BORDER_WIDTH) {
+        0 => DEFAULT_BORDER_WIDTH,
+        bits => f64::from_bits(!(bits as u64)),
+    }
 }
 
 unsafe extern "C" fn box_set_corner_radius(receiver: Id, _sel: Sel, value: f64) {
@@ -792,7 +802,7 @@ unsafe extern "C" fn box_draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
         crate::color::NSRectFill(rect);
     };
     fill(read(boxes(), receiver, slot::FILL_COLOR) as Id, bounds);
-    let width = f64::from_bits(read(boxes(), receiver, slot::BORDER_WIDTH) as u64);
+    let width = border_width(receiver);
     let border = read(boxes(), receiver, slot::BORDER_COLOR) as Id;
     if width > 0.0 {
         let NSRect { origin, size } = bounds;
@@ -819,7 +829,7 @@ unsafe extern "C" fn box_draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
 /// A custom box with rounded corners: one path, the bounds inset by half the
 /// border so the stroke stays inside them, filled and then stroked.
 fn draw_rounded_custom_box(receiver: Id, bounds: NSRect, radius: f64) {
-    let width = f64::from_bits(read(boxes(), receiver, slot::BORDER_WIDTH) as u64);
+    let width = border_width(receiver);
     let inset = (width / 2.0).max(0.0);
     let path = NSRect {
         origin: NSPoint {
@@ -834,17 +844,32 @@ fn draw_rounded_custom_box(receiver: Id, bounds: NSRect, radius: f64) {
     if path.size.width <= 0.0 || path.size.height <= 0.0 {
         return;
     }
+    let fill = read(boxes(), receiver, slot::FILL_COLOR) as Id;
+    let border = read(boxes(), receiver, slot::BORDER_COLOR) as Id;
+    // NSBezierPath paints the focused view; a context made over a caller's
+    // `CGContext` (Qt's dark group box) is drawn into through Quartz.
+    if let Some((port, flipped)) = crate::backing::current_port() {
+        let Some(p) = crate::aqua::Painter::new(port.cast_mut(), bounds, flipped) else {
+            return;
+        };
+        let rgba = |color: Id| {
+            // SAFETY: a colour this box retained.
+            let (r, g, b, a) = unsafe { crate::color::components(color) };
+            [r, g, b, a]
+        };
+        let fill = (!fill.is_null()).then(|| rgba(fill));
+        let border = (width > 0.0 && !border.is_null()).then(|| (rgba(border), width));
+        return crate::aqua::rounded_box(&p, path, radius, fill, border);
+    }
     // SAFETY: `-setFill` and `-setStroke` take no arguments.
     let set = |color: Id, selector: &str| unsafe {
         let f: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(objc::msg::entry());
         f(color, objc::sel::get(selector));
     };
-    let fill = read(boxes(), receiver, slot::FILL_COLOR) as Id;
     if !fill.is_null() {
         set(fill, "setFill");
         crate::bezier::fill_rounded_rect(path, radius);
     }
-    let border = read(boxes(), receiver, slot::BORDER_COLOR) as Id;
     if width > 0.0 && !border.is_null() {
         set(border, "setStroke");
         crate::bezier::stroke_rounded_rect(path, radius, width);
@@ -1278,18 +1303,22 @@ unsafe extern "C" fn control_tag(receiver: Id, _sel: Sel) -> isize {
     read(buttons(), receiver, slot::TAG) as isize
 }
 
-/// `-[NSButtonCell drawBezelWithFrame:inView:]` draws only the border. The
-/// supplied view is the button whose state controls the bezel appearance.
+/// `-[NSButtonCell drawBezelWithFrame:inView:]` draws only the border, in
+/// the cell's own state. The view is only where it is drawn: Qt passes the
+/// button's superview.
 unsafe extern "C" fn button_cell_draw_bezel_with_frame(
-    _receiver: Id,
+    receiver: Id,
     _sel: Sel,
     frame: NSRect,
-    control_view: Id,
+    _control_view: Id,
 ) {
-    if control_view.is_null() {
+    if crate::cell::draw_bezel(receiver, frame) {
         return;
     }
-    draw_button(control_view, frame, false);
+    let control = crate::cell::control_of(receiver);
+    if !control.is_null() {
+        draw_button(control, frame, false);
+    }
 }
 
 /// The bezel of a bordered button and its title, which is how a text button
@@ -1348,10 +1377,13 @@ fn button_surface(
     let (w, h) = (frame.size.width as f32, frame.size.height as f32);
     let pressed = read(buttons(), receiver, slot::HIGHLIGHTED) != 0;
     let enabled = read(buttons(), receiver, slot::DISABLED) == 0;
+    let dark = crate::appearance::is_dark();
     if bordered {
-        let face = match pressed {
-            true => chrome::Color::rgba(178, 178, 178, 1.0),
-            false => chrome::Color::rgba(236, 236, 236, 1.0),
+        let face = match (dark, pressed) {
+            (false, true) => chrome::Color::rgba(178, 178, 178, 1.0),
+            (false, false) => chrome::Color::rgba(236, 236, 236, 1.0),
+            (true, true) => chrome::Color::rgba(128, 128, 128, 1.0),
+            (true, false) => chrome::Color::rgba(101, 101, 101, 1.0),
         };
         let inset = chrome::Rect::new(1.0, 1.0, w - 2.0, h - 3.0);
         canvas.fill_rounded_rect(inset, 3.0, face);
@@ -1381,7 +1413,10 @@ fn button_surface(
             &font,
             size,
             chrome::Point::new(x, baseline),
-            chrome::Color::rgba(0, 0, 0, alpha),
+            match dark {
+                true => chrome::Color::rgba(255, 255, 255, alpha),
+                false => chrome::Color::rgba(0, 0, 0, alpha),
+            },
         );
     }
     Some((pixels, width, height))
@@ -1389,8 +1424,8 @@ fn button_surface(
 
 /// A check box or radio button: its box, its mark and its title beside it.
 ///
-/// FIXME (ACCURACY): drawn in the light theme's colours with the system font,
-/// whatever font the button names, like the toolkit's own check box.
+/// FIXME (ACCURACY): drawn with the system font, whatever font the button
+/// names, like the toolkit's own check box.
 fn draw_check(receiver: Id, radio: bool) {
     use chrome::View;
     let bounds = view::bounds_of(receiver);
@@ -1405,7 +1440,7 @@ fn draw_check(receiver: Id, radio: bool) {
     }
     let mut pixels = vec![0u8; width * height * 4];
     let mut canvas = chrome::Canvas::new(&mut pixels, width, height, width * 4, density as f32);
-    let theme = chrome::Theme::light();
+    let theme = chrome::Theme::for_appearance(crate::appearance::is_dark());
     let check = chrome::checkbox::Checkbox {
         title: button_text(receiver),
         state: match read(buttons(), receiver, slot::BUTTON_STATE) as isize {
@@ -2796,6 +2831,23 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn box_border_width_is_one_point_until_set() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSBox").expect("NSBox");
+        let view = objc::object::create_instance(class, 0);
+        // SAFETY: the accessors take and return one `CGFloat`.
+        unsafe {
+            let get: unsafe extern "C" fn(Id, Sel) -> f64 = std::mem::transmute(objc::msg::entry());
+            let set: unsafe extern "C" fn(Id, Sel, f64) = std::mem::transmute(objc::msg::entry());
+            assert_eq!(get(view, objc::sel::get("borderWidth")), 1.0);
+            set(view, objc::sel::get("setBorderWidth:"), 0.0);
+            assert_eq!(get(view, objc::sel::get("borderWidth")), 0.0);
+            set(view, objc::sel::get("setBorderWidth:"), 2.5);
+            assert_eq!(get(view, objc::sel::get("borderWidth")), 2.5);
+        }
+    }
 
     #[test]
     fn box_corner_radius_is_read_back() {

@@ -76,6 +76,8 @@ const FORWARDED: &[&str] = &[
     "setDrawsBackground:",
     "isBordered",
     "setBordered:",
+    "isBezeled",
+    "setBezeled:",
     "isEnabled",
     "setEnabled:",
     "isEditable",
@@ -725,6 +727,7 @@ enum Drawn {
     Combo,
     Search,
     Field,
+    Stepper,
 }
 
 fn drawn_as(cell: Id) -> Option<Drawn> {
@@ -738,6 +741,9 @@ fn drawn_as(cell: Id) -> Option<Drawn> {
     }
     if is_a(cell, c"NSComboBoxCell") {
         return Some(Drawn::Combo);
+    }
+    if is_a(cell, c"NSStepperCell") {
+        return Some(Drawn::Stepper);
     }
     if is_a(cell, c"NSTextFieldCell") {
         return (ask(cell, "isBezeled", 0) as u8 != 0).then_some(Drawn::Field);
@@ -792,6 +798,19 @@ unsafe extern "C" fn draw_interior_with_frame(
     draw_cell(receiver, frame, true);
 }
 
+/// `-[NSButtonCell drawBezelWithFrame:inView:]` into the current graphics
+/// context: a bordered button's bezel, without its title or image. False when
+/// there is no current context to draw into.
+pub(crate) fn draw_bezel(cell: Id, frame: foundation::geometry::NSRect) -> bool {
+    let Some(port) = current_port() else {
+        return false;
+    };
+    if let Some(drawn @ (Drawn::Push | Drawn::Bevel | Drawn::Round)) = drawn_as(cell) {
+        paint(cell, drawn, frame, port);
+    }
+    true
+}
+
 fn draw_cell(cell: Id, frame: foundation::geometry::NSRect, interior: bool) {
     let Some(drawn) = drawn_as(cell) else {
         return;
@@ -799,9 +818,17 @@ fn draw_cell(cell: Id, frame: foundation::geometry::NSRect, interior: bool) {
     if interior && !matches!(drawn, Drawn::Check | Drawn::Radio | Drawn::Disclosure) {
         return;
     }
-    let Some((port, flipped)) = current_port() else {
-        return;
-    };
+    if let Some(port) = current_port() {
+        paint(cell, drawn, frame, port);
+    }
+}
+
+fn paint(
+    cell: Id,
+    drawn: Drawn,
+    frame: foundation::geometry::NSRect,
+    (port, flipped): (corefoundation::base::CFTypeRef, bool),
+) {
     let Some(p) = crate::aqua::Painter::new(port, frame, flipped) else {
         return;
     };
@@ -838,7 +865,11 @@ fn draw_cell(cell: Id, frame: foundation::geometry::NSRect, interior: bool) {
         Drawn::Popup { pulls_down } => aqua::popup_button(&p, frame, size, look, pulls_down),
         Drawn::Combo => aqua::combo_box(&p, frame, size, look),
         Drawn::Search => aqua::round_field(&p, frame, look.focused),
-        Drawn::Field => aqua::text_field(&p, frame, look.focused),
+        Drawn::Field => {
+            aqua::text_field_fill(&p, frame);
+            aqua::text_field(&p, frame, look.focused)
+        }
+        Drawn::Stepper => aqua::inc_dec(&p, frame, size, look, None),
     }
 }
 
@@ -1161,5 +1192,125 @@ mod tests {
             assert_eq!((inset.size.width, inset.size.height), (13.0, 21.0));
             objc::arc::release(cell);
         }
+    }
+
+    #[test]
+    fn a_text_field_and_its_cell_share_one_bezel() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSTextField").expect("NSTextField");
+        let field = objc::object::create_instance(class, 0);
+        // SAFETY: the bezel accessors take and return one BOOL.
+        unsafe {
+            let cell = send(field, "cell") as Id;
+            send_word(field, "setBezeled:", 1);
+            assert_eq!(send(cell, "isBezeled") as u8, 1);
+            send_word(cell, "setBezeled:", 0);
+            assert_eq!(send(field, "isBezeled") as u8, 0);
+        }
+    }
+
+    const SIDE: usize = 32;
+    /// `kCGImageAlphaPremultipliedLast`: RGBA bytes.
+    const PREMULTIPLIED_LAST: u32 = 1;
+
+    /// Run `draw` with a bitmap context over `pixels` current, as Qt draws
+    /// its widgets.
+    fn with_current_bitmap(pixels: &mut [u8; SIDE * SIDE * 4], draw: impl FnOnce()) {
+        let class = objc::class::lookup(c"NSGraphicsContext").expect("NSGraphicsContext");
+        // SAFETY: `pixels` is SIDE rows of SIDE RGBA pixels, and the class
+        // methods take the argument types used here.
+        unsafe {
+            let port = crate::cgcontext::CGBitmapContextCreate(
+                pixels.as_mut_ptr().cast(),
+                SIDE,
+                SIDE,
+                8,
+                SIDE * 4,
+                std::ptr::null(),
+                PREMULTIPLIED_LAST,
+            );
+            let wrap: unsafe extern "C" fn(Id, Sel, *const std::ffi::c_void, u8) -> Id =
+                std::mem::transmute(objc::msg::entry());
+            let context = wrap(
+                objc::class::ptr(class).cast(),
+                objc::sel::get("graphicsContextWithCGContext:flipped:"),
+                port,
+                1,
+            );
+            send_word(
+                objc::class::ptr(class).cast(),
+                "setCurrentContext:",
+                context as usize,
+            );
+            draw();
+            send_word(objc::class::ptr(class).cast(), "setCurrentContext:", 0);
+            crate::cgcontext::CGContextRelease(port);
+        }
+    }
+
+    fn whole() -> foundation::geometry::NSRect {
+        crate::aqua::rect(0.0, 0.0, SIDE as f64, SIDE as f64)
+    }
+
+    #[test]
+    fn a_button_cell_bezel_is_drawn_into_the_current_context() {
+        crate::bootstrap();
+        let cell = new_button_cell("OK");
+        let mut pixels = [0u8; SIDE * SIDE * 4];
+        with_current_bitmap(&mut pixels, || {
+            // SAFETY: `-drawBezelWithFrame:inView:` takes a rect and a view;
+            // Qt passes the button's superview, which may be nil.
+            unsafe {
+                let f: unsafe extern "C" fn(Id, Sel, foundation::geometry::NSRect, Id) =
+                    std::mem::transmute(objc::msg::entry());
+                f(
+                    cell,
+                    objc::sel::get("drawBezelWithFrame:inView:"),
+                    whole(),
+                    std::ptr::null_mut(),
+                );
+            }
+        });
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
+        objc::arc::release(cell);
+    }
+
+    /// The red of a pixel inside a check box drawn in the named appearance.
+    fn check_box_face_in(appearance: &str) -> u8 {
+        let cell = new_button_cell("");
+        let class = objc::class::lookup(c"NSAppearance").expect("NSAppearance");
+        let class = objc::class::ptr(class).cast();
+        let name = foundation::string::from_str(appearance);
+        let mut pixels = [0u8; SIDE * SIDE * 4];
+        // SAFETY: each selector takes the word-sized argument given.
+        unsafe {
+            // NSSwitchButton.
+            send_word(cell, "setButtonType:", 3);
+            let appearance = send_word(class, "appearanceNamed:", name as usize);
+            send_word(class, "setCurrentAppearance:", appearance);
+            with_current_bitmap(&mut pixels, || {
+                let f: unsafe extern "C" fn(Id, Sel, foundation::geometry::NSRect, Id) =
+                    std::mem::transmute(objc::msg::entry());
+                f(
+                    cell,
+                    objc::sel::get("drawWithFrame:inView:"),
+                    whole(),
+                    std::ptr::null_mut(),
+                );
+            });
+            send_word(class, "setCurrentAppearance:", 0);
+        }
+        objc::arc::release(name);
+        objc::arc::release(cell);
+        // The box is drawn at the frame's leading edge, vertically centred.
+        let inside = (SIDE / 2 * SIDE + 8) * 4;
+        pixels[inside]
+    }
+
+    #[test]
+    fn a_check_box_is_drawn_in_the_current_appearance() {
+        crate::bootstrap();
+        assert!(check_box_face_in(crate::appearance::AQUA) > 0xe0);
+        assert!(check_box_face_in(crate::appearance::DARK_AQUA) < 0x80);
     }
 }
