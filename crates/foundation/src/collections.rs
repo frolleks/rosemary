@@ -2613,6 +2613,25 @@ unsafe extern "C" fn set_add_object(receiver: Id, _sel: Sel, object: Id) {
     }
 }
 
+/// `-copy` and `-mutableCopy` of a set: a new set of the same objects, for the
+/// same reason as [`copy_array`].
+fn copy_set(receiver: Id) -> Id {
+    // SAFETY: the receiver is a set.
+    let Some(set) = (unsafe { collections::set(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    let values = set.values.clone();
+    collections::new_set(&values, Policy::from_type_callbacks()) as Id
+}
+
+unsafe extern "C" fn set_copy(receiver: Id, _sel: Sel) -> Id {
+    copy_set(receiver)
+}
+
+unsafe extern "C" fn set_copy_with_zone(receiver: Id, _sel: Sel, _zone: *const ()) -> Id {
+    copy_set(receiver)
+}
+
 /// The set's members, as a fresh autoreleased array.
 ///
 /// # Safety
@@ -2853,6 +2872,10 @@ pub(crate) fn install() {
         "isSubsetOfSet:" => set_is_subset, c"c24@0:8@16";
         "isEqualToSet:" => set_is_equal_to_set, c"c24@0:8@16";
         "countByEnumeratingWithState:objects:count:" => set_enumerate, c"Q40@0:8^{?=Q^@^QQ5}16^@24Q32";
+        "copy" => set_copy, c"@16@0:8";
+        "copyWithZone:" => set_copy_with_zone, c"@24@0:8^v16";
+        "mutableCopy" => set_copy, c"@16@0:8";
+        "mutableCopyWithZone:" => set_copy_with_zone, c"@24@0:8^v16";
     });
     let mutable_set = objc::class::lookup(c"NSMutableSet").expect("NSMutableSet");
     methods!(mutable_set, {
@@ -3139,5 +3162,38 @@ mod tests {
             base64_decode(b"aGV5\naGk=", true).as_deref(),
             Some(&b"heyhi"[..])
         );
+    }
+
+    #[test]
+    fn copying_a_set_leaves_the_copy_alone_when_the_original_changes() {
+        crate::bootstrap();
+        let (a, b) = (crate::string::from_str("a"), crate::string::from_str("b"));
+        let set = collections::new_set(&[a as CFTypeRef], Policy::from_type_callbacks()) as Id;
+        let sel = objc::sel::get("copyWithZone:");
+        // SAFETY: a set this test made, so a class it has.
+        let class = unsafe { objc::object::class_of(set) }.expect("a set");
+        // SAFETY: `-copyWithZone:` is `id (id, SEL, NSZone *)`.
+        let copy = unsafe {
+            let f: unsafe extern "C" fn(Id, Sel, *const ()) -> Id =
+                std::mem::transmute(objc::class::method_implementation(class, sel));
+            f(set, sel, std::ptr::null())
+        };
+        assert_ne!(copy, set);
+        // SAFETY: a set and a live string.
+        unsafe { set_add_object(set, objc::sel::get("addObject:"), b) };
+        let count = objc::sel::get("count");
+        // SAFETY: both are sets.
+        unsafe {
+            assert_eq!(set_count(set, count), 2);
+            assert_eq!(set_count(copy, count), 1);
+            assert!(set_contains_object(
+                copy,
+                objc::sel::get("containsObject:"),
+                a
+            ));
+        }
+        for object in [copy, set, a, b] {
+            objc::arc::release(object);
+        }
     }
 }
