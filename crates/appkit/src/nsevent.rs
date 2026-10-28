@@ -575,6 +575,9 @@ pub(crate) fn install() {
         // An event number counts *tracking* sequences on a Mac, and nothing
         // here tracks one; zero is what an event outside any sequence carries.
         "eventNumber" => zero, c"q16@0:8";
+        // Pairs a tablet event with its proximity event; no tablet events are
+        // delivered here, so every event is from no tablet device.
+        "deviceID" => zero, c"Q16@0:8";
         // `NSEventSubtype`, which for a mouse or key event is zero.
         "subtype" => subtype, c"s16@0:8";
         "data1" => data1, c"q16@0:8";
