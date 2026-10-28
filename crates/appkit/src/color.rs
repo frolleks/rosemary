@@ -353,6 +353,15 @@ unsafe extern "C" fn component(receiver: Id, sel: Sel) -> CGFloat {
     }
 }
 
+/// `NSColorTypeComponentBased`.
+const NS_COLOR_TYPE_COMPONENT_BASED: isize = 0;
+
+/// `-type`: component-based, which every colour here is - see
+/// [`color_space_name`] and [`name_component`].
+unsafe extern "C" fn color_type(_receiver: Id, _sel: Sel) -> isize {
+    NS_COLOR_TYPE_COMPONENT_BASED
+}
+
 /// `-colorSpaceName`, the deprecated name of the space a colour is in.
 ///
 /// Calibrated RGB, which is what every colour here is: four components in the
@@ -425,6 +434,22 @@ unsafe extern "C" fn name_component(_receiver: Id, _sel: Sel) -> Id {
 /// `-numberOfComponents`, which is four: red, green, blue and alpha.
 unsafe extern "C" fn number_of_components(_receiver: Id, _sel: Sel) -> isize {
     4
+}
+
+/// `-getComponents:`: as many values as [`number_of_components`] says, in the
+/// order of the receiver's space - red, green, blue, alpha.
+///
+/// # Safety
+///
+/// `out` is null or has room for four `CGFloat`s.
+unsafe extern "C" fn get_component_array(receiver: Id, _sel: Sel, out: *mut CGFloat) {
+    if out.is_null() {
+        return;
+    }
+    // SAFETY: a colour of this crate's.
+    let c = unsafe { &*(receiver as *const Color) };
+    // SAFETY: the caller states there is room for every component.
+    unsafe { std::ptr::copy_nonoverlapping([c.red, c.green, c.blue, c.alpha].as_ptr(), out, 4) };
 }
 
 /// `-whiteComponent`, the brightness of a grey colour.
@@ -599,7 +624,9 @@ pub(crate) fn install() {
         "whiteComponent" => white_component, c"d16@0:8";
         "getWhite:alpha:" => get_white, c"v32@0:8^d16^d24";
         "numberOfComponents" => number_of_components, c"q16@0:8";
+        "getComponents:" => get_component_array, c"v24@0:8^d16";
         "colorSpaceName" => color_space_name, c"@16@0:8";
+        "type" => color_type, c"q16@0:8";
         "colorUsingColorSpaceName:" => color_using_color_space_name, c"@24@0:8@16";
         "colorUsingColorSpaceName:device:" => color_using_color_space_name, c"@32@0:8@16@24";
         "colorUsingColorSpace:" => color_using_color_space, c"@24@0:8@16";

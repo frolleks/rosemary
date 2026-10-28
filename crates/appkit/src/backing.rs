@@ -4553,6 +4553,13 @@ unsafe extern "C" fn cg_color_space(_receiver: Id, _sel: Sel) -> *const c_void {
         as *const c_void
 }
 
+/// `-[NSColorSpace ICCProfileData]`: nil, the documented answer for a space
+/// with no profile, as `-[NSScreen colorSpace]` is nil for the same reason - see
+/// `crate::screen`. A caller takes its sRGB fallback, which is what this is.
+unsafe extern "C" fn icc_profile_data(_receiver: Id, _sel: Sel) -> Id {
+    std::ptr::null_mut()
+}
+
 pub(crate) fn install() {
     let view = objc::class::lookup(c"NSView").expect("declared before its methods");
     methods!(view, {
@@ -4591,9 +4598,15 @@ pub(crate) fn install() {
     });
     methods!(space, {
         "CGColorSpace" => cg_color_space, c"^v16@0:8";
+        "ICCProfileData" => icc_profile_data, c"@16@0:8";
     });
     let window = objc::class::lookup(c"NSWindow").expect("declared");
     methods!(window, {
+        "colorSpace" => shared_color_space, c"@16@0:8";
+    });
+    // Every colour is in the one space; see `crate::color`.
+    let color = objc::class::lookup(c"NSColor").expect("declared");
+    methods!(color, {
         "colorSpace" => shared_color_space, c"@16@0:8";
     });
 }
