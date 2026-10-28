@@ -361,6 +361,7 @@ impl Execution for Native {
             // and `GuestStack` owns the aligned, writable frame at `sp`.
             unsafe { enter_unix_thread(entry, sp) }
         }
+        darwin::pthread::commit_main_stack();
         let (argc, argv, envp, apple) = self.main_args();
         self.call(entry, &[argc, argv, envp, apple])
     }

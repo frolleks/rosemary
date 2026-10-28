@@ -258,6 +258,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioQueueStart", I32, P, P),
     sig!("AudioQueueStop", I32, P, BOOL),
     sig!("AudioUnitGetProperty", I32, P, U32, U32, U32, P, P),
+    sig!("AudioUnitGetPropertyInfo", I32, P, U32, U32, U32, P, P),
     sig!("AudioUnitInitialize", I32, P),
     sig!("AudioUnitRender", I32, P, P, P, U32, U32, P),
     sig!("AudioUnitSetProperty", I32, P, U32, U32, U32, P, U32),

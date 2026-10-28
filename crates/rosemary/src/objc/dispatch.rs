@@ -1776,17 +1776,10 @@ mod tests {
     /// with "unsatisfied import" under `ROSEMARY_OBJC=builtin`, and the name is
     /// the whole of the work queue.
     const BUILTIN_GAPS: &[&str] = &[
-        // The ARC layout bitmap for a class's strong ivars, which the compiler
-        // emits into a `class_ro_t` and this runtime does not carry across.
-        // Null would be a legal answer meaning "no strong ivars", and a wrong
-        // one for every class that has some.
-        "class_getIvarLayout",
-        // Both are about images. A class here belongs to the runtime rather than
-        // to the file it was declared in, so there is nothing to enumerate and
-        // nothing to read a compiler-laid-out `objc_class` out of - that pass is
-        // `crate::objc::register`, and it runs at load time from the link
-        // transcript rather than on a guest's say-so.
-        "objc_copyClassNamesForImage",
+        // A class here belongs to the runtime rather than to the file it was
+        // declared in, so there is nothing to read a compiler-laid-out
+        // `objc_class` out of - that pass is `crate::objc::register`, and it runs
+        // at load time from the link transcript rather than on a guest's say-so.
         "objc_readClassPair",
     ];
 
