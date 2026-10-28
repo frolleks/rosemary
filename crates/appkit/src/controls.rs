@@ -535,6 +535,8 @@ mod slot {
     /// `NSTitlePosition`, plus one so that zero is "never set".
     pub const TITLE_POSITION: usize = 9;
     pub const BOX_TITLE_FONT: usize = 10;
+    /// An `f64`'s bits.
+    pub const CORNER_RADIUS: usize = 11;
     pub const BOX_OBJECTS: [usize; 4] = [FILL_COLOR, BORDER_COLOR, BOX_TITLE, BOX_TITLE_FONT];
 
     pub const INDETERMINATE: usize = 0;
@@ -742,6 +744,20 @@ unsafe extern "C" fn box_border_width(receiver: Id, _sel: Sel) -> f64 {
     f64::from_bits(read(boxes(), receiver, slot::BORDER_WIDTH) as u64)
 }
 
+unsafe extern "C" fn box_set_corner_radius(receiver: Id, _sel: Sel, value: f64) {
+    write(
+        boxes(),
+        receiver,
+        slot::CORNER_RADIUS,
+        value.to_bits() as usize,
+    );
+    crate::backing::needs_display(receiver);
+}
+
+unsafe extern "C" fn box_corner_radius(receiver: Id, _sel: Sel) -> f64 {
+    f64::from_bits(read(boxes(), receiver, slot::CORNER_RADIUS) as u64)
+}
+
 /// `NSBoxCustom`, the type whose look is entirely its fill and border colours.
 const BOX_CUSTOM: usize = 4;
 
@@ -758,6 +774,10 @@ unsafe extern "C" fn box_draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
         _ => return draw_group_box(receiver),
     }
     let bounds = view::bounds_of(receiver);
+    let radius = f64::from_bits(read(boxes(), receiver, slot::CORNER_RADIUS) as u64);
+    if radius > 0.0 {
+        return draw_rounded_custom_box(receiver, bounds, radius);
+    }
     let fill = |color: Id, rect: NSRect| {
         if color.is_null() || rect.size.width <= 0.0 || rect.size.height <= 0.0 {
             return;
@@ -791,6 +811,41 @@ unsafe extern "C" fn box_draw_rect(receiver: Id, _sel: Sel, _dirty: NSRect) {
             border,
             edge(origin.x + size.width - width, origin.y, width, size.height),
         );
+    }
+}
+
+/// A custom box with rounded corners: one path, the bounds inset by half the
+/// border so the stroke stays inside them, filled and then stroked.
+fn draw_rounded_custom_box(receiver: Id, bounds: NSRect, radius: f64) {
+    let width = f64::from_bits(read(boxes(), receiver, slot::BORDER_WIDTH) as u64);
+    let inset = (width / 2.0).max(0.0);
+    let path = NSRect {
+        origin: NSPoint {
+            x: bounds.origin.x + inset,
+            y: bounds.origin.y + inset,
+        },
+        size: NSSize {
+            width: bounds.size.width - 2.0 * inset,
+            height: bounds.size.height - 2.0 * inset,
+        },
+    };
+    if path.size.width <= 0.0 || path.size.height <= 0.0 {
+        return;
+    }
+    // SAFETY: `-setFill` and `-setStroke` take no arguments.
+    let set = |color: Id, selector: &str| unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(objc::msg::entry());
+        f(color, objc::sel::get(selector));
+    };
+    let fill = read(boxes(), receiver, slot::FILL_COLOR) as Id;
+    if !fill.is_null() {
+        set(fill, "setFill");
+        crate::bezier::fill_rounded_rect(path, radius);
+    }
+    let border = read(boxes(), receiver, slot::BORDER_COLOR) as Id;
+    if width > 0.0 && !border.is_null() {
+        set(border, "setStroke");
+        crate::bezier::stroke_rounded_rect(path, radius, width);
     }
 }
 
@@ -2522,6 +2577,8 @@ pub(crate) fn install() {
         "setContentViewMargins:" => box_set_content_view_margins, c"v32@0:8{CGSize=dd}16";
         "contentViewMargins" => box_content_view_margins, c"{CGSize=dd}16@0:8";
         "borderWidth" => box_border_width, c"d16@0:8";
+        "setCornerRadius:" => box_set_corner_radius, c"v24@0:8d16";
+        "cornerRadius" => box_corner_radius, c"d16@0:8";
         "setTitle:" => box_set_title, c"v24@0:8@16";
         "title" => box_title, c"@16@0:8";
         "setTitlePosition:" => box_set_title_position, c"v24@0:8Q16";
@@ -2710,6 +2767,21 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn box_corner_radius_is_read_back() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSBox").expect("NSBox");
+        let view = objc::object::create_instance(class, 0);
+        // SAFETY: the accessors take and return one `CGFloat`.
+        unsafe {
+            let get: unsafe extern "C" fn(Id, Sel) -> f64 = std::mem::transmute(objc::msg::entry());
+            let set: unsafe extern "C" fn(Id, Sel, f64) = std::mem::transmute(objc::msg::entry());
+            assert_eq!(get(view, objc::sel::get("cornerRadius")), 0.0);
+            set(view, objc::sel::get("setCornerRadius:"), 6.5);
+            assert_eq!(get(view, objc::sel::get("cornerRadius")), 6.5);
+        }
+    }
 
     #[test]
     fn button_cell_draw_bezel_uses_its_frame_and_control_view() {
