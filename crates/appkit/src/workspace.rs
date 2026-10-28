@@ -70,6 +70,23 @@ unsafe extern "C" fn application_url_for_url(_receiver: Id, _sel: Sel, _url: Id)
     std::ptr::null_mut()
 }
 
+/// `-URLForApplicationWithBundleIdentifier:`; see
+/// [`crate::launchservices::application_url`].
+unsafe extern "C" fn application_url_for_identifier(
+    _receiver: Id,
+    _sel: Sel,
+    identifier: Id,
+) -> Id {
+    // SAFETY: an `NSString` or nil.
+    let identifier = unsafe { foundation::string::bytes(identifier) };
+    std::str::from_utf8(&identifier)
+        .ok()
+        .and_then(crate::launchservices::application_url)
+        .map_or(std::ptr::null_mut(), |url| {
+            objc::arc::autorelease(url as Id)
+        })
+}
+
 /// `-[NSWorkspace openURL:]`: to this application when it is the scheme's
 /// handler, as LaunchServices sends a running handler the URL, and to the
 /// host's registered handler otherwise.
@@ -533,6 +550,8 @@ pub(crate) fn install() {
     });
     methods!(class, {
         "URLForApplicationToOpenURL:" => application_url_for_url, c"@24@0:8@16";
+        "URLForApplicationWithBundleIdentifier:" => application_url_for_identifier,
+            c"@24@0:8@16";
         "openURL:" => open_url, c"c24@0:8@16";
         "isVoiceOverEnabled" => voice_over_enabled, c"c16@0:8";
         "openFile:" => open_file, c"c24@0:8@16";
