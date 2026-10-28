@@ -182,6 +182,14 @@ static FRAMEWORKS: &[Framework] = &[
         symbol: Some(coreaudio::symbol),
     },
     Framework {
+        leaf: "UniformTypeIdentifiers",
+        version: 'A',
+        umbrellas: &[],
+        provide: None,
+        data: Some(coreservices::uttype::data_symbols),
+        symbol: None,
+    },
+    Framework {
         leaf: "Contacts",
         version: 'A',
         umbrellas: &[],

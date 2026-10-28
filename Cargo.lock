@@ -657,6 +657,7 @@ dependencies = [
  "exports",
  "foundation",
  "libc",
+ "objc",
  "prefix",
 ]
 
