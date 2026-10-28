@@ -423,7 +423,16 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSFilePathErrorKey", "NSFilePath"),
     ("_NSURLErrorKey", "NSURL"),
     ("_NSUnderlyingErrorKey", "NSUnderlyingError"),
+    (
+        "_NSMultipleUnderlyingErrorsKey",
+        "NSMultipleUnderlyingErrorsKey",
+    ),
     ("_NSURLErrorDomain", "NSURLErrorDomain"),
+    ("_NSURLErrorFailingURLErrorKey", "NSErrorFailingURLKey"),
+    (
+        "_NSURLErrorFailingURLStringErrorKey",
+        "NSErrorFailingURLStringKey",
+    ),
     ("_NSHTTPCookieDiscard", "Discard"),
     ("_NSHTTPCookieDomain", "Domain"),
     ("_NSHTTPCookieExpires", "Expires"),
