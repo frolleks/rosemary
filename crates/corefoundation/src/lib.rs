@@ -406,6 +406,13 @@ pub fn data_symbols() -> Vec<(String, u64)> {
             base::global_cell(symbol, value as usize as u64),
         ));
     }
+    // The objects themselves, which `@YES` and `@NO` compile to the address of.
+    for (symbol, value) in [
+        ("___kCFBooleanTrue", collections::boolean(true)),
+        ("___kCFBooleanFalse", collections::boolean(false)),
+    ] {
+        out.push((symbol.to_string(), value as usize as u64));
+    }
     out.push((
         "_kCFNull".to_string(),
         base::global_cell("_kCFNull", null_object()),
