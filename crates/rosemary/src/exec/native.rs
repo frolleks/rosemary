@@ -196,7 +196,7 @@ impl Native {
             true => darwin::sysctl::GuestArch::Arm64,
             false => darwin::sysctl::GuestArch::X86_64,
         });
-        darwin::sysctl::set_runs_host_instructions(true);
+        darwin::cpu::set_runs_host_instructions(true);
         // The guest's instructions run on this CPU, so its raw syscalls would
         // reach the host kernel under Darwin's numbering.
         match darwin::syscall::setup_syscall_handler() {

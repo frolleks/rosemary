@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 use crate::process::{Audit, Descriptor, Footprint, Identity, Process, Region, Thread, Usage};
 use crate::socket::Peer;
-use crate::system::{CpuTicks, Memory};
+use crate::system::{CpuTicks, Memory, Swap};
 
 fn exists(pid: i32) -> bool {
     // SAFETY: signal zero only checks that the pid can be signalled.
@@ -90,6 +90,26 @@ pub fn cpu_brand() -> Option<String> {
 }
 
 pub fn host_uuid() -> Option<[u8; 16]> {
+    None
+}
+
+pub fn packages() -> Option<u32> {
+    None
+}
+
+pub fn cpu_frequency() -> Option<u64> {
+    None
+}
+
+pub fn booted() -> Option<std::time::SystemTime> {
+    None
+}
+
+pub fn swap() -> Option<Swap> {
+    None
+}
+
+pub fn max_processes() -> Option<u32> {
     None
 }
 

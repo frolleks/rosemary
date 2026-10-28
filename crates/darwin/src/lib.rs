@@ -40,6 +40,7 @@ pub mod commpage;
 #[cfg(not(target_os = "macos"))]
 pub mod compat;
 pub mod copyfile;
+pub mod cpu;
 pub mod credentials;
 pub mod data;
 pub mod dirent;

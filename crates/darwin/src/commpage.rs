@@ -6,10 +6,11 @@
 //! FIXME (ACCURACY): this is a stub in the manner of Darling's `mldr`. It is filled
 //! once at startup and never updated: the nanotime/gettimeofday data are zero (a
 //! reader must take the syscall path), memory pressure stays 0, the active CPU
-//! count is a snapshot, physical CPUs are reported as logical CPUs, and the comm
-//! page text (preemption-free zone, `_COMM_PAGE_RET`, ...) is not mapped.
+//! count is a snapshot, and the comm page text (preemption-free zone,
+//! `_COMM_PAGE_RET`, ...) is not mapped.
 
-use crate::sysctl::{GuestArch, guest_arch, is_translated, runs_host_instructions};
+use crate::cpu::{Feature, has};
+use crate::sysctl::{GuestArch, guest_arch, is_translated};
 
 /// `_COMM_PAGE64_BASE_ADDRESS`.
 pub const COMM_PAGE64_BASE_ADDRESS: u64 = 0x0000_7fff_ffe0_0000;
@@ -31,9 +32,6 @@ const COMM_PAGE_USER_PAGE_SHIFT_64: usize = 0x04e;
 
 const COMM_PAGE_SIGNATURE64: &[u8] = b"commpage 64-bit\0";
 const COMM_PAGE_THIS_VERSION: u16 = 14;
-
-/// Every x86 Mac's line size.
-const CACHE_LINE_SIZE: u16 = 64;
 
 // `<i386/cpu_capabilities.h>`.
 const K_HAS_MMX: u64 = 0x0000_0001;
@@ -130,9 +128,15 @@ fn fill(page: &mut [u8]) {
     );
     // Overlaps `kNumCPUs` in the legacy word above, as on Darwin.
     put(COMM_PAGE_NCPUS, &[ncpus]);
-    put(COMM_PAGE_CACHE_LINESIZE, &CACHE_LINE_SIZE.to_le_bytes());
+    put(
+        COMM_PAGE_CACHE_LINESIZE,
+        &(crate::cpu::cache_line_size() as u16).to_le_bytes(),
+    );
     put(COMM_PAGE_ACTIVE_CPUS, &[ncpus]);
-    put(COMM_PAGE_PHYSICAL_CPUS, &[ncpus]);
+    put(
+        COMM_PAGE_PHYSICAL_CPUS,
+        &[crate::sysctl::physical_cpus().min(u8::MAX as u32) as u8],
+    );
     put(COMM_PAGE_LOGICAL_CPUS, &[ncpus]);
     put(
         COMM_PAGE_MEMORY_SIZE,
@@ -142,10 +146,9 @@ fn fill(page: &mut [u8]) {
     put(COMM_PAGE_USER_PAGE_SHIFT_64, &[page_shift]);
 }
 
-/// `_cpu_capabilities`: the x86-64 baseline, plus whatever this CPU has when the
-/// guest's instructions are its own - the same rule `hw.optional` follows.
+/// `_cpu_capabilities`, decoded from the same `CPUID` the guest reads.
 fn cpu_capabilities(ncpus: u8) -> u64 {
-    let mut capabilities = K_HAS_MMX | K_HAS_SSE | K_HAS_SSE2 | K_64_BIT | K_CACHE64;
+    let mut capabilities = K_64_BIT | K_CACHE64;
     capabilities |= (u64::from(ncpus) << K_NUM_CPUS_SHIFT) & K_NUM_CPUS;
     if ncpus == 1 {
         capabilities |= K_UP;
@@ -153,54 +156,46 @@ fn cpu_capabilities(ncpus: u8) -> u64 {
     if is_translated() {
         capabilities |= K_IS_TRANSLATED;
     }
-    if runs_host_instructions() {
-        capabilities |= host_capabilities();
-    }
-    capabilities
+    FEATURE_CAPABILITIES
+        .iter()
+        .filter(|&&(feature, _)| has(feature))
+        .fold(capabilities, |capabilities, &(_, bit)| capabilities | bit)
 }
 
-#[cfg(target_arch = "x86_64")]
-fn host_capabilities() -> u64 {
-    use std::arch::is_x86_feature_detected as has;
-    [
-        (has!("sse3"), K_HAS_SSE3),
-        (has!("ssse3"), K_HAS_SUPPLEMENTAL_SSE3),
-        (has!("sse4.1"), K_HAS_SSE4_1),
-        (has!("sse4.2"), K_HAS_SSE4_2),
-        (has!("aes"), K_HAS_AES),
-        (has!("avx"), K_HAS_AVX1_0),
-        (has!("rdrand"), K_HAS_RDRAND),
-        (has!("f16c"), K_HAS_F16C),
-        (has!("ermsb"), K_HAS_ENFSTRG),
-        (has!("fma"), K_HAS_FMA),
-        (has!("avx2"), K_HAS_AVX2_0),
-        (has!("bmi1"), K_HAS_BMI1),
-        (has!("bmi2"), K_HAS_BMI2),
-        (has!("rtm"), K_HAS_RTM),
-        (has!("adx"), K_HAS_ADX),
-        (has!("rdseed"), K_HAS_RDSEED),
-        (has!("avx512f"), K_HAS_AVX512F),
-        (has!("avx512cd"), K_HAS_AVX512CD),
-        (has!("avx512dq"), K_HAS_AVX512DQ),
-        (has!("avx512bw"), K_HAS_AVX512BW),
-        (has!("avx512ifma"), K_HAS_AVX512IFMA),
-        (has!("avx512vbmi"), K_HAS_AVX512VBMI),
-        (has!("avx512vl"), K_HAS_AVX512VL),
-        (has!("vaes"), K_HAS_VAES),
-        (has!("vpclmulqdq"), K_HAS_VPCLMULQDQ),
-        (has!("avx512vnni"), K_HAS_AVX512VNNI),
-        (has!("avx512bitalg"), K_HAS_AVX512BITALG),
-        (has!("avx512vpopcntdq"), K_HAS_AVX512VPOPCNTDQ),
-    ]
-    .into_iter()
-    .filter(|&(present, _)| present)
-    .fold(0, |capabilities, (_, bit)| capabilities | bit)
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn host_capabilities() -> u64 {
-    0
-}
+/// The capability bits XNU's `commpage_init_cpu_capabilities` sets from `CPUID`.
+const FEATURE_CAPABILITIES: &[(Feature, u64)] = &[
+    (Feature::Mmx, K_HAS_MMX),
+    (Feature::Sse, K_HAS_SSE),
+    (Feature::Sse2, K_HAS_SSE2),
+    (Feature::Sse3, K_HAS_SSE3),
+    (Feature::Ssse3, K_HAS_SUPPLEMENTAL_SSE3),
+    (Feature::Sse4_1, K_HAS_SSE4_1),
+    (Feature::Sse4_2, K_HAS_SSE4_2),
+    (Feature::Aes, K_HAS_AES),
+    (Feature::Avx, K_HAS_AVX1_0),
+    (Feature::Rdrand, K_HAS_RDRAND),
+    (Feature::F16c, K_HAS_F16C),
+    (Feature::Erms, K_HAS_ENFSTRG),
+    (Feature::Fma, K_HAS_FMA),
+    (Feature::Avx2, K_HAS_AVX2_0),
+    (Feature::Bmi1, K_HAS_BMI1),
+    (Feature::Bmi2, K_HAS_BMI2),
+    (Feature::Rtm, K_HAS_RTM),
+    (Feature::Adx, K_HAS_ADX),
+    (Feature::Rdseed, K_HAS_RDSEED),
+    (Feature::Avx512f, K_HAS_AVX512F),
+    (Feature::Avx512cd, K_HAS_AVX512CD),
+    (Feature::Avx512dq, K_HAS_AVX512DQ),
+    (Feature::Avx512bw, K_HAS_AVX512BW),
+    (Feature::Avx512ifma, K_HAS_AVX512IFMA),
+    (Feature::Avx512vbmi, K_HAS_AVX512VBMI),
+    (Feature::Avx512vl, K_HAS_AVX512VL),
+    (Feature::Vaes, K_HAS_VAES),
+    (Feature::Vpclmulqdq, K_HAS_VPCLMULQDQ),
+    (Feature::Avx512vnni, K_HAS_AVX512VNNI),
+    (Feature::Avx512bitalg, K_HAS_AVX512BITALG),
+    (Feature::Avx512vpopcntdq, K_HAS_AVX512VPOPCNTDQ),
+];
 
 #[cfg(test)]
 mod tests {
