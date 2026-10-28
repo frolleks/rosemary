@@ -1523,6 +1523,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("SCPreferencesCreate", P, P, P, P),
     sig!("SCPreferencesGetValue", P, P, P),
     sig!("SCNetworkReachabilityCreateWithAddress", P, P, P),
+    sig!("SCNetworkReachabilityCreateWithAddressPair", P, P, P, P),
+    sig!("SCNetworkReachabilitySetDispatchQueue", U8, P, P),
     sig!("SCNetworkReachabilityCreateWithName", P, P, P),
     sig!("SCNetworkReachabilityGetFlags", U8, P, P),
     sig!("SCNetworkReachabilityScheduleWithRunLoop", U8, P, P, P),
