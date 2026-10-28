@@ -1006,6 +1006,30 @@ mod tests {
         }
     }
 
+    /// UTF-16 has no byte-order mark here and still ends in one NUL byte.
+    #[test]
+    fn a_utf16_c_string_is_the_units_and_one_nul() {
+        bootstrap();
+        unsafe {
+            let s = api::CFStringCreateWithCString(
+                std::ptr::null(),
+                c"h\xc3\xa9".as_ptr(),
+                string::encoding::UTF8,
+            );
+            let mut buf = [0x55u8; 8];
+            assert_eq!(
+                api::CFStringGetCString(s, buf.as_mut_ptr().cast(), 4, string::encoding::UTF16),
+                0
+            );
+            assert_eq!(
+                api::CFStringGetCString(s, buf.as_mut_ptr().cast(), 6, string::encoding::UTF16),
+                1
+            );
+            assert_eq!(buf, [b'h', 0, 0xe9, 0, 0, 0x55, 0x55, 0x55]);
+            api::CFRelease(s);
+        }
+    }
+
     /// A constant string is one of this runtime's objects with nothing copied,
     /// and releasing it does not free the image's `__DATA`.
     #[test]

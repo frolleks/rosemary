@@ -8,6 +8,7 @@ mod why {
     pub const DIRENT: &str = "struct dirent is laid out differently";
     pub const SIGNAL: &str = "the signal numbers and sigaction layout differ";
     pub const TERMIOS: &str = "struct termios is laid out differently";
+    pub const FENV: &str = "fenv_t is laid out differently";
     pub const MACH: &str = "Mach is a Darwin kernel interface";
     pub const SYSCTL: &str = "reimplemented; see darwin::sysctl";
     pub const XATTR: &str =
@@ -121,6 +122,11 @@ pub const NAMES: &[(&str, &str)] = &[
     // `RLIMIT_*` are not the same numbers, and `RLIM_INFINITY` is a different
     // sentinel. `crate::rlimit` answers both; the entries are what stop the
     // host's own being bound instead.
+    // `crate::fenv` answers these on x86-64.
+    ("fegetenv", FENV),
+    ("fesetenv", FENV),
+    ("feholdexcept", FENV),
+    ("feupdateenv", FENV),
     ("getrlimit", "the RLIMIT_ resource numbers differ"),
     ("setrlimit", "the RLIMIT_ resource numbers differ"),
     // `fd_set` is the same 128 bytes on both and the *timeout* is not; `crate::select`

@@ -502,7 +502,8 @@ pub unsafe extern "C" fn CFStringGetCString(
     buffer_size: CFIndex,
     encoding: u32,
 ) -> Boolean {
-    let Some(s) = (unsafe { string::as_string(s) }) else {
+    let string = s;
+    let Some(s) = (unsafe { string::as_string(string) }) else {
         return 0;
     };
     if buffer.is_null() || buffer_size <= 0 {
@@ -510,8 +511,9 @@ pub unsafe extern "C" fn CFStringGetCString(
     }
     let bytes = match encoding {
         string::encoding::UTF8 => s.utf8(),
-        // Every other encoding this runtime answers for is one where an ASCII
-        // byte is itself, and a non-ASCII one has no defined answer here.
+        // Apple encodes these as `CFStringGetBytes` does, without a byte-order
+        // mark, and terminates them with a single NUL byte all the same. The
+        // JDK reads file names back through `kCFStringEncodingUnicode` this way.
         e if e == string::encoding::UTF16
             || e == string::encoding::UTF16_BE
             || e == string::encoding::UTF16_LE
@@ -519,7 +521,28 @@ pub unsafe extern "C" fn CFStringGetCString(
             || e == string::encoding::UTF32_BE
             || e == string::encoding::UTF32_LE =>
         {
-            return 0;
+            let length = s.units().len() as CFIndex;
+            let mut used = 0;
+            // SAFETY: the caller's buffer, less the byte the NUL needs.
+            let converted = unsafe {
+                CFStringGetBytes(
+                    string,
+                    0,
+                    length,
+                    e,
+                    0,
+                    0,
+                    buffer.cast(),
+                    buffer_size - 1,
+                    &mut used,
+                )
+            };
+            if converted != length {
+                return 0;
+            }
+            // SAFETY: `used` is at most `buffer_size - 1`.
+            unsafe { *buffer.add(used as usize) = 0 };
+            return 1;
         }
         e if crate::eightbit::is_table(e) => {
             let encoded: Option<Vec<u8>> = s

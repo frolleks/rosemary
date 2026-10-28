@@ -51,6 +51,8 @@ pub mod errno;
 pub mod exe;
 pub mod exit;
 pub mod fcntl;
+#[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
+pub mod fenv;
 pub mod fmtcheck;
 pub mod fortify;
 pub mod fs;
@@ -398,6 +400,8 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     printf_l::MODULE,
     #[cfg(target_arch = "x86_64")]
     asl::MODULE,
+    #[cfg(target_arch = "x86_64")]
+    fenv::MODULE,
     acl::MODULE,
     fmtcheck::MODULE,
     langinfo::MODULE,
