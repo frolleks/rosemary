@@ -597,6 +597,9 @@ mod slot {
     /// Both `f64` bits.
     pub const SCROLLER_VALUE: usize = 0;
     pub const KNOB_PROPORTION: usize = 1;
+    /// `NSScrollerKnobStyle` and `NSScrollerStyle`, zero being each default.
+    pub const KNOB_STYLE: usize = 2;
+    pub const SCROLLER_STYLE: usize = 3;
 }
 
 const ROW: usize = 26;
@@ -2240,6 +2243,22 @@ unsafe extern "C" fn scroller_knob_proportion(receiver: Id, _sel: Sel) -> f64 {
     scroller_f64(receiver, slot::KNOB_PROPORTION)
 }
 
+unsafe extern "C" fn scroller_set_knob_style(receiver: Id, _sel: Sel, value: isize) {
+    write(scrollers(), receiver, slot::KNOB_STYLE, value as usize);
+}
+
+unsafe extern "C" fn scroller_knob_style(receiver: Id, _sel: Sel) -> isize {
+    read(scrollers(), receiver, slot::KNOB_STYLE) as isize
+}
+
+unsafe extern "C" fn scroller_set_scroller_style(receiver: Id, _sel: Sel, value: isize) {
+    write(scrollers(), receiver, slot::SCROLLER_STYLE, value as usize);
+}
+
+unsafe extern "C" fn scroller_scroller_style(receiver: Id, _sel: Sel) -> isize {
+    read(scrollers(), receiver, slot::SCROLLER_STYLE) as isize
+}
+
 /// `-[NSScroller rectForPart:]`, in the scroller's own flipped coordinates.
 ///
 /// A scroller since 10.7 has no arrows, so the slot is the whole bounds and
@@ -2255,6 +2274,50 @@ unsafe extern "C" fn scroller_rect_for_part(receiver: Id, _sel: Sel, which: usiz
         scroller_f64(receiver, slot::KNOB_PROPORTION),
         which,
     )
+}
+
+/// Paint into the current context over the scroller's bounds.
+///
+/// The parts land at [`scroller_rect_for_part`]'s coordinates in the current
+/// user space as it stands, whatever the context says of its flippedness: a
+/// scroller is a flipped view, and drawn directly rather than by the view
+/// system nothing flips the space for it.
+fn paint_scroller(receiver: Id, paint: impl FnOnce(&crate::aqua::Painter, NSRect, bool)) {
+    let Some((port, _)) = crate::cell::current_port() else {
+        return;
+    };
+    let size = view::frame_of(receiver).size;
+    let bounds = NSRect {
+        origin: NSPoint::default(),
+        size,
+    };
+    if let Some(p) = crate::aqua::Painter::new(port, bounds, true) {
+        paint(&p, bounds, size.width > size.height);
+    }
+}
+
+/// `-[NSScroller drawKnobSlotInRect:highlight:]`
+unsafe extern "C" fn scroller_draw_knob_slot(
+    receiver: Id,
+    _sel: Sel,
+    slot: NSRect,
+    _highlight: u8,
+) {
+    paint_scroller(receiver, |p, _, horizontal| {
+        crate::aqua::scroll_track(p, slot, horizontal)
+    });
+}
+
+/// `-[NSScroller drawKnob]`: nothing when there is no knob to draw.
+unsafe extern "C" fn scroller_draw_knob(receiver: Id, sel: Sel) {
+    // SAFETY: a scroller of this crate's.
+    let knob = unsafe { scroller_rect_for_part(receiver, sel, part::KNOB) };
+    if knob.size.width <= 0.0 || knob.size.height <= 0.0 {
+        return;
+    }
+    paint_scroller(receiver, |p, _, horizontal| {
+        crate::aqua::scroll_thumb(p, knob, horizontal, false)
+    });
 }
 
 fn scroller_part(size: NSSize, value: f64, proportion: f64, which: usize) -> NSRect {
@@ -2530,6 +2593,13 @@ pub(crate) fn install() {
         "floatValue" => scroller_float_value, c"f16@0:8";
         "setKnobProportion:" => scroller_set_knob_proportion, c"v24@0:8d16";
         "knobProportion" => scroller_knob_proportion, c"d16@0:8";
+        "setKnobStyle:" => scroller_set_knob_style, c"v24@0:8q16";
+        "drawKnobSlotInRect:highlight:" => scroller_draw_knob_slot,
+            c"v52@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16c48";
+        "drawKnob" => scroller_draw_knob, c"v16@0:8";
+        "knobStyle" => scroller_knob_style, c"q16@0:8";
+        "setScrollerStyle:" => scroller_set_scroller_style, c"v24@0:8q16";
+        "scrollerStyle" => scroller_scroller_style, c"q16@0:8";
         "rectForPart:" => scroller_rect_for_part,
             c"{CGRect={CGPoint=dd}{CGSize=dd}}24@0:8Q16";
     });

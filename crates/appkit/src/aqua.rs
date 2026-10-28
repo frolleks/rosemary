@@ -699,20 +699,42 @@ pub(crate) fn scroll_bar(
     thumb: Option<(f64, f64)>,
     pressed: bool,
 ) {
+    scroll_track(p, r, horizontal);
+    let Some((at, length)) = thumb else {
+        return;
+    };
+    let (x, y, w, h) = (r.origin.x, r.origin.y, r.size.width, r.size.height);
+    let knob = match horizontal {
+        true => rect(x + at, y, length, h),
+        false => rect(x, y + at, w, length),
+    };
+    scroll_thumb(p, knob, horizontal, pressed);
+}
+
+/// A scroll bar's track, edged on the side facing the content.
+pub(crate) fn scroll_track(p: &Painter, r: NSRect, horizontal: bool) {
     p.rect(r, TRACK);
     let (x, y, w, h) = (r.origin.x, r.origin.y, r.size.width, r.size.height);
     match horizontal {
         true => p.rect(rect(x, y, w, 1.0), TRACK_EDGE),
         false => p.rect(rect(x, y, 1.0, h), TRACK_EDGE),
     }
-    let Some((at, length)) = thumb else {
-        return;
-    };
+}
+
+/// A scroll bar's capsule thumb, inset within `knob` - the span it occupies
+/// along the track, the track's full breadth across.
+pub(crate) fn scroll_thumb(p: &Painter, knob: NSRect, horizontal: bool, pressed: bool) {
+    let (x, y, w, h) = (
+        knob.origin.x,
+        knob.origin.y,
+        knob.size.width,
+        knob.size.height,
+    );
     let girth = if horizontal { h } else { w };
     let pad = (girth * 0.2).round().max(2.0);
     let thumb = match horizontal {
-        true => rect(x + at + 2.0, y + pad, length - 4.0, h - 2.0 * pad + 1.0),
-        false => rect(x + pad, y + at + 2.0, w - 2.0 * pad + 1.0, length - 4.0),
+        true => rect(x + 2.0, y + pad, w - 4.0, h - 2.0 * pad + 1.0),
+        false => rect(x + pad, y + 2.0, w - 2.0 * pad + 1.0, h - 4.0),
     };
     let color = if pressed {
         [0.0, 0.0, 0.0, 0.55]

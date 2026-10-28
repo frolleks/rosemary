@@ -662,7 +662,7 @@ fn is_a(object: Id, class: &std::ffi::CStr) -> bool {
 
 /// The current graphics context's `CGContext`, and whether its user space
 /// grows downward.
-fn current_port() -> Option<(corefoundation::base::CFTypeRef, bool)> {
+pub(crate) fn current_port() -> Option<(corefoundation::base::CFTypeRef, bool)> {
     let class = objc::class::lookup(c"NSGraphicsContext")?;
     let context = ask(class as *const _ as Id, "currentContext", 0) as Id;
     if context.is_null() {
