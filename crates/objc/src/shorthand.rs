@@ -235,14 +235,32 @@ pub unsafe extern "C" fn objc_retainBlock(block: Id) -> Id {
     crate::block::copy(block)
 }
 
-/// Mutating a collection while enumerating it. A named abort, as on Apple's.
+/// The handler `objc_setEnumerationMutationHandler` installed, or zero.
+static MUTATION_HANDLER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Mutating a collection while enumerating it: the program's handler if it set
+/// one, otherwise a named abort, as on Apple's.
 pub unsafe extern "C" fn objc_enumerationMutation(object: Id) {
+    let handler = MUTATION_HANDLER.load(std::sync::atomic::Ordering::Acquire);
+    if handler != 0 {
+        // SAFETY: only `objc_setEnumerationMutationHandler` stores here, and it
+        // stores a `void (*)(id)`.
+        let handler: unsafe extern "C" fn(Id) = unsafe { std::mem::transmute(handler) };
+        return unsafe { handler(object) };
+    }
     // SAFETY: a live object.
     let class = unsafe { crate::object::class_of(object) };
     crate::fail!(
         "collection was mutated while being enumerated: {}",
         class.map_or("nil", |c| c.name_str())
     );
+}
+
+pub unsafe extern "C" fn objc_setEnumerationMutationHandler(
+    handler: Option<unsafe extern "C" fn(Id)>,
+) {
+    let handler = handler.map_or(0, |h| h as usize);
+    MUTATION_HANDLER.store(handler, std::sync::atomic::Ordering::Release);
 }
 
 /// The `std::terminate` an uncaught Objective-C exception reaches.
