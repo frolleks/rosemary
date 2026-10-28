@@ -310,7 +310,7 @@ pub(crate) fn ncpu() -> u32 {
     std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
 }
 
-fn page_size() -> u32 {
+pub(crate) fn page_size() -> u32 {
     (unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).max(4096) as u32
 }
 
@@ -730,8 +730,12 @@ pub fn set_runs_host_instructions(native: bool) {
     RUNS_HOST_INSTRUCTIONS.store(native, Ordering::Release);
 }
 
+pub(crate) fn runs_host_instructions() -> bool {
+    RUNS_HOST_INSTRUCTIONS.load(Ordering::Acquire)
+}
+
 fn host_has(feature: &str) -> bool {
-    if !RUNS_HOST_INSTRUCTIONS.load(Ordering::Acquire) {
+    if !runs_host_instructions() {
         return false;
     }
     #[cfg(target_arch = "x86_64")]

@@ -36,6 +36,8 @@ pub mod callback;
 pub mod clock;
 pub mod commoncrypto;
 #[cfg(not(target_os = "macos"))]
+pub mod commpage;
+#[cfg(not(target_os = "macos"))]
 pub mod compat;
 pub mod copyfile;
 pub mod credentials;
