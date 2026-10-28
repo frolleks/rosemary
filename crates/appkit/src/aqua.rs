@@ -820,38 +820,218 @@ pub(crate) fn progress_bar(
     }
 }
 
-/// A slider: a thin track and a round knob at `fraction` along it.
-pub(crate) fn slider(p: &Painter, r: NSRect, horizontal: bool, fraction: f64, look: Look) {
-    let knob = r.size.width.min(r.size.height).min(18.0) - 2.0;
-    let fraction = fraction.clamp(0.0, 1.0);
-    let (track, knob_rect) = match horizontal {
-        true => {
-            let cy = r.origin.y + r.size.height / 2.0;
-            let x = r.origin.x + knob / 2.0;
-            let len = r.size.width - knob;
-            (
-                rect(x, cy - 2.0, len, 4.0),
-                rect(x + len * fraction - knob / 2.0, cy - knob / 2.0, knob, knob),
-            )
+/// Which side of a slider's bar its tick marks are on: above or leading, or
+/// below or trailing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TickSide {
+    Before,
+    After,
+}
+
+/// Where a linear slider's bar, knob and tick marks lie within its frame, in
+/// y-down coordinates. The minimum is at the left, or at the bottom when the
+/// slider is vertical.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SliderLayout {
+    pub frame: NSRect,
+    pub horizontal: bool,
+    pub size: Size,
+    pub ticks: Option<TickSide>,
+}
+
+const SLIDER_BAR_END_INSET: f64 = 2.0;
+const SLIDER_TICK_GAP: f64 = 2.0;
+const SLIDER_TICK_WIDTH: f64 = 1.0;
+
+// FIXME (ACCURACY): the knob, bar and tick sizes are Aqua's proportions, not
+// measured from AppKit; with tick marks AppKit's knob is pointed, not round.
+impl SliderLayout {
+    fn knob_metric(&self) -> f64 {
+        match self.size {
+            Size::Regular => 18.0,
+            Size::Small => 14.0,
+            Size::Mini => 11.0,
         }
+    }
+
+    fn bar_thickness(&self) -> f64 {
+        match self.size {
+            Size::Regular => 4.0,
+            Size::Small => 3.0,
+            Size::Mini => 2.0,
+        }
+    }
+
+    fn tick_length(&self) -> f64 {
+        match self.size {
+            Size::Regular => 4.0,
+            Size::Small | Size::Mini => 3.0,
+        }
+    }
+
+    /// The frame's extent along the bar, and across it.
+    fn extents(&self) -> (f64, f64) {
+        let NSSize { width, height } = self.frame.size;
+        match self.horizontal {
+            true => (width, height),
+            false => (height, width),
+        }
+    }
+
+    /// A rectangle given along and across the bar, from the frame's top left.
+    fn place(&self, along: f64, across: f64, length: f64, breadth: f64) -> NSRect {
+        let NSPoint { x, y } = self.frame.origin;
+        match self.horizontal {
+            true => rect(x + along, y + across, length, breadth),
+            false => rect(x + across, y + along, breadth, length),
+        }
+    }
+
+    /// Where the knob and bar sit across the frame: what is left beside the
+    /// tick marks, as an offset and a breadth.
+    fn band(&self) -> (f64, f64) {
+        let (_, breadth) = self.extents();
+        let reserve = match self.ticks {
+            Some(_) => (SLIDER_TICK_GAP + self.tick_length()).min(breadth),
+            None => 0.0,
+        };
+        match self.ticks {
+            Some(TickSide::Before) => (reserve, breadth - reserve),
+            _ => (0.0, breadth - reserve),
+        }
+    }
+
+    /// The knob's side: its metric, or less in a frame too small for it.
+    pub(crate) fn knob_side(&self) -> f64 {
+        let (length, _) = self.extents();
+        self.knob_metric().min(self.band().1).min(length).max(0.0)
+    }
+
+    /// How far along the frame the centre of a knob at `fraction` is.
+    fn centre_along(&self, fraction: f64) -> f64 {
+        let (length, _) = self.extents();
+        let k = self.knob_side();
+        let fraction = fraction.clamp(0.0, 1.0);
+        let from_start = match self.horizontal {
+            true => fraction,
+            false => 1.0 - fraction,
+        };
+        k / 2.0 + from_start * (length - k)
+    }
+
+    pub(crate) fn knob(&self, fraction: f64) -> NSRect {
+        let k = self.knob_side();
+        let (offset, breadth) = self.band();
+        let along = (self.centre_along(fraction) - k / 2.0).round();
+        let across = (offset + (breadth - k) / 2.0).round();
+        self.place(along, across, k, k)
+    }
+
+    pub(crate) fn bar(&self) -> NSRect {
+        let (length, _) = self.extents();
+        let (offset, breadth) = self.band();
+        let t = self.bar_thickness().min(breadth);
+        let across = (offset + (breadth - t) / 2.0).round();
+        self.place(
+            SLIDER_BAR_END_INSET,
+            across,
+            length - 2.0 * SLIDER_BAR_END_INSET,
+            t,
+        )
+    }
+
+    /// Tick mark `index` of `count`, the first at the minimum; `None` for a
+    /// slider without tick marks.
+    pub(crate) fn tick(&self, index: usize, count: usize) -> Option<NSRect> {
+        let side = self.ticks?;
+        let fraction = match count {
+            0 | 1 => 0.5,
+            n => index as f64 / (n - 1) as f64,
+        };
+        let length = self.tick_length();
+        let (offset, breadth) = self.band();
+        let across = match side {
+            TickSide::Before => offset - SLIDER_TICK_GAP - length,
+            TickSide::After => offset + breadth + SLIDER_TICK_GAP,
+        };
+        let along = (self.centre_along(fraction) - SLIDER_TICK_WIDTH / 2.0).floor();
+        Some(self.place(along, across, SLIDER_TICK_WIDTH, length))
+    }
+}
+
+/// A slider's bar, filled with the accent colour from the minimum to
+/// `fraction` unless disabled.
+pub(crate) fn slider_bar(
+    p: &Painter,
+    bar: NSRect,
+    horizontal: bool,
+    fraction: f64,
+    disabled: bool,
+) {
+    let track = match crate::appearance::is_dark() {
+        true => [1.0, 1.0, 1.0, 0.2],
+        false => [0.0, 0.0, 0.0, 0.2],
+    };
+    let radius = bar.size.width.min(bar.size.height) / 2.0;
+    p.fill_rounded(bar, radius, track);
+    if disabled {
+        return;
+    }
+    let fraction = fraction.clamp(0.0, 1.0);
+    let filled = match horizontal {
+        true => rect(
+            bar.origin.x,
+            bar.origin.y,
+            bar.size.width * fraction,
+            bar.size.height,
+        ),
         false => {
-            let cx = r.origin.x + r.size.width / 2.0;
-            let y = r.origin.y + knob / 2.0;
-            let len = r.size.height - knob;
-            (
-                rect(cx - 2.0, y, 4.0, len),
-                // A vertical slider's minimum is at the bottom.
-                rect(
-                    cx - knob / 2.0,
-                    y + len * (1.0 - fraction) - knob / 2.0,
-                    knob,
-                    knob,
-                ),
+            let h = bar.size.height * fraction;
+            rect(
+                bar.origin.x,
+                bar.origin.y + bar.size.height - h,
+                bar.size.width,
+                h,
             )
         }
     };
-    p.fill_rounded(track, 2.0, [0.0, 0.0, 0.0, 0.2]);
-    p.face(knob_rect, knob / 2.0, look, false);
+    p.fill_rounded(filled, radius, ACCENT_BOTTOM);
+}
+
+pub(crate) fn slider_knob(p: &Painter, knob: NSRect, look: Look) {
+    p.face(
+        knob,
+        knob.size.width.min(knob.size.height) / 2.0,
+        look,
+        false,
+    );
+}
+
+pub(crate) fn slider_tick(p: &Painter, tick: NSRect) {
+    let color = match crate::appearance::is_dark() {
+        true => [1.0, 1.0, 1.0, 0.5],
+        false => [0.0, 0.0, 0.0, 0.5],
+    };
+    p.rect(tick, color);
+}
+
+/// A slider without tick marks: the bar and a round knob at `fraction`.
+pub(crate) fn slider(
+    p: &Painter,
+    r: NSRect,
+    horizontal: bool,
+    size: Size,
+    fraction: f64,
+    look: Look,
+) {
+    let layout = SliderLayout {
+        frame: r,
+        horizontal,
+        size,
+        ticks: None,
+    };
+    slider_bar(p, layout.bar(), horizontal, fraction, look.disabled);
+    slider_knob(p, layout.knob(fraction), look);
 }
 
 /// A group box or tab pane: a faintly shaded, rounded panel.
@@ -913,6 +1093,47 @@ mod tests {
     fn a_thumb_never_shrinks_below_its_minimum_or_outgrows_its_track() {
         assert_eq!(thumb_span(100.0, 0, 100_000, 0, 10), Some((0.0, 18.0)));
         assert_eq!(thumb_span(10.0, 0, 5, 0, 1000), Some((0.0, 10.0)));
+    }
+
+    fn horizontal(width: f64, height: f64, ticks: Option<TickSide>) -> SliderLayout {
+        SliderLayout {
+            frame: rect(0.0, 0.0, width, height),
+            horizontal: true,
+            size: Size::Regular,
+            ticks,
+        }
+    }
+
+    #[test]
+    fn a_slider_knob_travels_the_frame_between_its_ends() {
+        let layout = horizontal(100.0, 20.0, None);
+        assert_eq!(layout.knob(0.0), rect(0.0, 1.0, 18.0, 18.0));
+        assert_eq!(layout.knob(1.0), rect(82.0, 1.0, 18.0, 18.0));
+        assert_eq!(layout.knob(0.5), rect(41.0, 1.0, 18.0, 18.0));
+    }
+
+    #[test]
+    fn a_vertical_slider_has_its_minimum_at_the_bottom() {
+        let layout = SliderLayout {
+            frame: rect(0.0, 0.0, 20.0, 100.0),
+            horizontal: false,
+            size: Size::Regular,
+            ticks: None,
+        };
+        assert_eq!(layout.knob(0.0), rect(1.0, 82.0, 18.0, 18.0));
+        assert_eq!(layout.knob(1.0), rect(1.0, 0.0, 18.0, 18.0));
+    }
+
+    #[test]
+    fn slider_tick_marks_sit_beside_the_bar_under_the_knob_centres() {
+        let layout = horizontal(100.0, 26.0, Some(TickSide::After));
+        let bar = layout.bar();
+        let first = layout.tick(0, 3).expect("a tick mark");
+        let last = layout.tick(2, 3).expect("a tick mark");
+        assert!(first.origin.y >= bar.origin.y + bar.size.height);
+        assert_eq!(first.origin.x, 8.0);
+        assert_eq!(last.origin.x, 90.0);
+        assert_eq!(horizontal(100.0, 26.0, None).tick(0, 3), None);
     }
 
     #[test]

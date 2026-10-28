@@ -82,7 +82,8 @@ static HIERARCHY: &[(&str, Option<&str>, usize)] = &[
     // Qt's macOS style subclasses the first and draws with the rest.
     ("NSSplitView", Some("NSView"), 0),
     ("NSComboBox", Some("NSTextField"), 0),
-    ("NSSlider", Some("NSControl"), 0),
+    ("NSSlider", Some("NSControl"), crate::slider::INSTANCE_SIZE),
+    ("NSSliderCell", Some("NSActionCell"), 0),
     ("NSStepperCell", Some("NSActionCell"), 0),
     ("NSLayoutConstraint", None, crate::layout::INSTANCE_SIZE),
     ("NSLayoutAnchor", None, crate::layout::ANCHOR_INSTANCE_SIZE),

@@ -84,6 +84,7 @@ pub mod screen;
 pub mod script;
 mod scroll;
 mod segmented;
+mod slider;
 mod status;
 mod tab;
 mod table;
@@ -138,6 +139,7 @@ pub fn bootstrap() {
         popup::install();
         scroll::install();
         segmented::install();
+        slider::install();
         matrix::install();
         tab::install();
         table::install();

@@ -37,6 +37,7 @@ const KINDS: &[(&std::ffi::CStr, &std::ffi::CStr)] = &[
     (c"NSTextField", c"NSTextFieldCell"),
     (c"NSSegmentedControl", c"NSSegmentedCell"),
     (c"NSImageView", c"NSImageCell"),
+    (c"NSSlider", c"NSSliderCell"),
     (c"NSControl", c"NSActionCell"),
 ];
 
@@ -171,6 +172,17 @@ const FORWARDED: &[&str] = &[
     "setAutoenablesItems:",
     "autoenablesItems",
     "synchronizeTitleAndSelectedItem",
+    // `NSSliderCell`'s range and tick marks, which its slider keeps.
+    "minValue",
+    "setMinValue:",
+    "maxValue",
+    "setMaxValue:",
+    "numberOfTickMarks",
+    "setNumberOfTickMarks:",
+    "tickMarkPosition",
+    "setTickMarkPosition:",
+    "isVertical",
+    "setVertical:",
 ];
 
 fn cells() -> &'static Mutex<HashMap<usize, usize>> {
@@ -519,8 +531,13 @@ unsafe extern "C" fn cell(receiver: Id, _sel: Sel) -> Id {
 }
 
 unsafe extern "C" fn control_view(receiver: Id, _sel: Sel) -> Id {
+    control_of(receiver)
+}
+
+/// The control a cell keeps its state in.
+pub(crate) fn control_of(cell: Id) -> Id {
     // SAFETY: a cell this module made.
-    unsafe { (*(receiver as *const Cell)).control }
+    unsafe { (*(cell as *const Cell)).control }
 }
 
 /// `-accessibilitySetOverrideValue:forAttribute:`, an `NSObject` category.
