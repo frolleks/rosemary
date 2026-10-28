@@ -171,6 +171,8 @@ pub(super) static RUNTIME: &[Runtime] = &[
     rt!("ivar_getOffset", I64, P),
     // Both implementations are already the runtime's, so nothing crosses.
     rt!("method_exchangeImplementations", V, P, P),
+    rt!("method_getImplementation", P, P),
+    rt!("method_getTypeEncoding", P, P),
     rtb!([1], "method_setImplementation", P, P, P),
     // ARC and the `objc_msgSend` optimisations clang emits at `-O` whether or
     // not the file uses ARC.
@@ -237,6 +239,7 @@ pub(super) static RUNTIME: &[Runtime] = &[
     // `Class objc_loadClassref(Class *)` resolves a class reference slot, which
     // on Apple's runtime may hold a *stub* class marked by its low bit.
     rtc!([] -> true, "objc_loadClassref", P, P),
+    rtc!([] -> true, "objc_loadWeak", P, P),
     rtc!([] -> true, "objc_loadWeakRetained", P, P),
     rtc!([] -> true, "objc_lookUpClass", P, P),
     // `void objc_moveWeak(id *dst, id *src)` - the third of the four weak
