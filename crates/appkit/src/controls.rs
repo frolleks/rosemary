@@ -984,7 +984,10 @@ fn draw_group_box(receiver: Id) {
 /// the view's own coordinates.
 fn draw_pixels(receiver: Id, paint: impl FnOnce(&mut chrome::Canvas, NSPoint)) {
     let bounds = view::bounds_of(receiver);
-    let density = crate::backing::focus_density();
+    let port = crate::backing::current_port();
+    let density = port.map_or_else(crate::backing::focus_density, |(port, _)| {
+        crate::text::port_density(port)
+    });
     let width = (bounds.size.width * density).ceil() as usize;
     let height = (bounds.size.height * density).ceil() as usize;
     if width == 0 || height == 0 {
@@ -999,6 +1002,12 @@ fn draw_pixels(receiver: Id, paint: impl FnOnce(&mut chrome::Canvas, NSPoint)) {
             y: bounds.origin.y + bounds.size.height,
         },
     );
+    // A context made over a caller's `CGContext` is drawn into in the view's
+    // own coordinates, as `-displayRectIgnoringOpacity:inContext:` sets up.
+    if let Some((port, _)) = port {
+        let flipped = view::is_flipped(receiver);
+        return crate::text::draw_into_port(port, flipped, bounds, width, height, pixels);
+    }
     crate::backing::draw_image(
         &pixels,
         width,
@@ -1385,7 +1394,10 @@ fn button_surface(
 fn draw_check(receiver: Id, radio: bool) {
     use chrome::View;
     let bounds = view::bounds_of(receiver);
-    let density = crate::backing::focus_density();
+    let port = crate::backing::current_port();
+    let density = port.map_or_else(crate::backing::focus_density, |(port, _)| {
+        crate::text::port_density(port)
+    });
     let width = (bounds.size.width * density).ceil() as usize;
     let height = (bounds.size.height * density).ceil() as usize;
     if width == 0 || height == 0 {
