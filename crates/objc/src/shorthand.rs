@@ -44,22 +44,43 @@ unsafe fn send1_bool(receiver: Id, sel: Sel, argument: usize) -> bool {
     unsafe { f(receiver, sel, argument) }
 }
 
+/// Stop on a `cls` this runtime did not build.
+///
+/// The usual one is a guest `class_t` whose registration was refused, which
+/// the guest still holds in its class references. Read as a class, its
+/// garbage method-table lock hangs the first lookup instead of failing.
+fn expect_class(cls: Id, function: &str) {
+    if crate::debug::enabled() {
+        if !cls.is_null() && !crate::class::is_known(cls as *const crate::class::Class) {
+            crate::fail!(
+                "{function}({cls:p}): not a class this runtime built; a guest class whose \
+             registration was refused (see the refusals logged at load) is the usual cause"
+            );
+        }
+    }
+}
+
 pub unsafe extern "C" fn objc_alloc(cls: Id) -> Id {
+    expect_class(cls, "objc_alloc");
     // SAFETY: a class is an object.
     unsafe { send0(cls, crate::sel::get("alloc")) }
 }
 
 pub unsafe extern "C" fn objc_allocWithZone(cls: Id) -> Id {
+    expect_class(cls, "objc_allocWithZone");
     unsafe { send0(cls, crate::sel::get("allocWithZone:")) }
 }
 
 pub unsafe extern "C" fn objc_alloc_init(cls: Id) -> Id {
-    let object = unsafe { objc_alloc(cls) };
+    expect_class(cls, "objc_alloc_init");
+    // SAFETY: checked a class above.
+    let object = unsafe { send0(cls, crate::sel::get("alloc")) };
     // SAFETY: a freshly allocated object.
     unsafe { send0(object, crate::sel::get("init")) }
 }
 
 pub unsafe extern "C" fn objc_opt_new(cls: Id) -> Id {
+    expect_class(cls, "objc_opt_new");
     // SAFETY: a class is an object.
     unsafe { send0(cls, crate::sel::get("new")) }
 }
@@ -227,4 +248,45 @@ pub unsafe extern "C" fn objc_enumerationMutation(object: Id) {
 /// The `std::terminate` an uncaught Objective-C exception reaches.
 pub unsafe extern "C" fn objc_terminate() -> ! {
     crate::fail!("objc_terminate");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CHILD: &str = "ROSEMARY_OBJC_ALLOC_CHILD";
+
+    #[test]
+    fn allocating_from_a_pointer_that_is_not_a_class_stops_with_its_name() {
+        crate::bootstrap();
+        if std::env::var(CHILD).is_ok() {
+            // Shaped like a guest `class_t` that never registered: an `isa`
+            // word and nothing this runtime made.
+            let raw = [0usize; 8];
+            // SAFETY: the call is expected to stop before using it.
+            unsafe { objc_alloc(raw.as_ptr() as Id) };
+            return;
+        }
+        let class = crate::class::lookup(c"NSObject").expect("the runtime's own");
+        // SAFETY: a registered class.
+        let object = unsafe { objc_alloc(crate::class::ptr(class) as Id) };
+        assert!(!object.is_null());
+        crate::arc::release(object);
+
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "shorthand::tests::allocating_from_a_pointer_that_is_not_a_class_stops_with_its_name",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("run child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "survived: {stderr}");
+        assert!(
+            stderr.contains("objc_alloc(") && stderr.contains("not a class"),
+            "{stderr}"
+        );
+    }
 }
