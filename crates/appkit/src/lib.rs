@@ -164,6 +164,7 @@ pub fn bootstrap() {
 exports::exports! {
     functions {
         "NSApplicationMain" => application::NSApplicationMain,
+        "NSApplicationLoad" => application::NSApplicationLoad,
         "CAFrameRateRangeMake" => displaylink::CAFrameRateRangeMake,
         "CGMainDisplayID" => screen::CGMainDisplayID,
         "CGSessionCopyCurrentDictionary" => screen::CGSessionCopyCurrentDictionary,

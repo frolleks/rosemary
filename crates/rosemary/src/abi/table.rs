@@ -1441,6 +1441,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `applicationDidFinishLaunching:` to the guest's delegate, and does not return
     // until the application terminates.
     sig!("NSApplicationMain", I32, I32, P),
+    sig!("NSApplicationLoad", U8),
     // `NSLog` takes an `NSString` format, not a C one, so even the rendering
     // path the `printf` family uses needs a conversion first.
     vsig!("NSLog", V, P),
