@@ -492,6 +492,28 @@ unsafe extern "C" fn cell_size(receiver: Id, sel: Sel) -> foundation::geometry::
     unsafe { cell_size_for_bounds(receiver, sel, unbounded) }
 }
 
+/// How far `NSCell` insets its drawing for a border or a bezel; a bordered
+/// cell takes the border's inset even when it is also bezeled.
+const BORDERED_INSET: f64 = 2.0;
+const BEZELED_INSET: f64 = 3.0;
+
+/// `-[NSCell drawingRectForBounds:]`.
+unsafe extern "C" fn drawing_rect_for_bounds(
+    receiver: Id,
+    _sel: Sel,
+    bounds: foundation::geometry::NSRect,
+) -> foundation::geometry::NSRect {
+    let inset = if ask(receiver, "isBordered", 0) as u8 != 0 {
+        BORDERED_INSET
+    } else if ask(receiver, "isBezeled", 0) as u8 != 0 {
+        BEZELED_INSET
+    } else {
+        return bounds;
+    };
+    // SAFETY: a pure function of its arguments.
+    unsafe { crate::geometry::NSInsetRect(bounds, inset, inset) }
+}
+
 unsafe extern "C" fn cell(receiver: Id, _sel: Sel) -> Id {
     cell_of(receiver)
 }
@@ -905,6 +927,13 @@ pub(crate) fn install() {
         "usesItemFromMenu" => uses_item_from_menu, c"c16@0:8";
         "setUsesItemFromMenu:" => set_uses_item_from_menu, c"v20@0:8c16";
     });
+    // On NSStepperCell rather than NSCell: NSButtonCell and NSImageCell
+    // override it in AppKit, and must not inherit NSCell's answer.
+    let stepper_cell = objc::class::lookup(c"NSStepperCell").expect("declared before its methods");
+    methods!(stepper_cell, {
+        "drawingRectForBounds:" => drawing_rect_for_bounds,
+            c"{CGRect={CGPoint=dd}{CGSize=dd}}48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+    });
     methods!(cell_class, {
         "menuItem" => menu_item, c"@16@0:8";
         "setMenuItem:" => set_menu_item, c"v24@0:8@16";
@@ -1081,6 +1110,39 @@ mod tests {
             "setEditable:",
         ] {
             assert!(cell.method(objc::sel::get(name)).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_stepper_cell_draws_in_its_bounds_unless_bezeled() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSStepperCell").expect("NSStepperCell");
+        let cell = objc::object::create_instance(class, 0);
+        let bounds = foundation::geometry::NSRect {
+            origin: foundation::geometry::NSPoint { x: 10.0, y: 20.0 },
+            size: foundation::geometry::NSSize {
+                width: 19.0,
+                height: 27.0,
+            },
+        };
+        // SAFETY: `-init`, `-setBezeled:` and `-drawingRectForBounds:` with
+        // their declared types.
+        unsafe {
+            let cell = send(cell, "init") as Id;
+            let drawing_rect = |cell: Id| {
+                let f: unsafe extern "C" fn(
+                    Id,
+                    Sel,
+                    foundation::geometry::NSRect,
+                ) -> foundation::geometry::NSRect = std::mem::transmute(objc::msg::entry());
+                f(cell, objc::sel::get("drawingRectForBounds:"), bounds)
+            };
+            assert_eq!(drawing_rect(cell), bounds);
+            send_word(cell, "setBezeled:", 1);
+            let inset = drawing_rect(cell);
+            assert_eq!((inset.origin.x, inset.origin.y), (13.0, 23.0));
+            assert_eq!((inset.size.width, inset.size.height), (13.0, 21.0));
+            objc::arc::release(cell);
         }
     }
 }
