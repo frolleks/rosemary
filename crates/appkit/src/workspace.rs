@@ -210,7 +210,8 @@ fn object_for(application: &server::protocol::Application) -> Id {
     object
 }
 
-/// `-[NSWorkspace iconForFileType:]` and `-iconForFile:`: a blank 32x32 image.
+/// `-[NSWorkspace iconForFileType:]`, `-iconForFile:` and
+/// `-iconForContentType:`: a blank 32x32 image.
 ///
 /// Apple never answers nil - a type it knows nothing about gets the generic
 /// document icon - and a program puts the result straight into a cell or menu
@@ -563,6 +564,7 @@ pub(crate) fn install() {
             c"@48@0:8@16Q24@32^@40";
         "iconForFileType:" => icon_for_file_type, c"@24@0:8@16";
         "iconForFile:" => icon_for_file_type, c"@24@0:8@16";
+        "iconForContentType:" => icon_for_file_type, c"@24@0:8@16";
         "isFilePackageAtPath:" => is_file_package, c"c24@0:8@16";
     });
 

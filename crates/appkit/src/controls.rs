@@ -585,6 +585,8 @@ mod slot {
     pub const ALLOWS_MIXED_STATE: usize = 24;
     /// `NSImageScaling`; zero is proportionally down, a button's default.
     pub const BUTTON_IMAGE_SCALING: usize = 25;
+    /// `-hasDestructiveAction`, only read back: nothing here draws it red.
+    pub const DESTRUCTIVE: usize = 26;
     pub const BUTTON_OBJECTS: [usize; 8] = [
         TINT_COLOR,
         IMAGE,
@@ -609,7 +611,7 @@ mod slot {
     pub const SCROLLER_STYLE: usize = 3;
 }
 
-const ROW: usize = 26;
+const ROW: usize = 27;
 
 fn read(table: &Mutex<HashMap<usize, Vec<usize>>>, receiver: Id, at: usize) -> usize {
     table
@@ -1161,6 +1163,19 @@ unsafe extern "C" fn button_set_bordered(receiver: Id, _sel: Sel, value: u8) {
 
 unsafe extern "C" fn button_is_bordered(receiver: Id, _sel: Sel) -> u8 {
     u8::from(read(buttons(), receiver, slot::NOT_BORDERED) == 0)
+}
+
+unsafe extern "C" fn button_set_destructive(receiver: Id, _sel: Sel, value: u8) {
+    write(
+        buttons(),
+        receiver,
+        slot::DESTRUCTIVE,
+        usize::from(value != 0),
+    );
+}
+
+unsafe extern "C" fn button_is_destructive(receiver: Id, _sel: Sel) -> u8 {
+    u8::from(read(buttons(), receiver, slot::DESTRUCTIVE) != 0)
 }
 
 unsafe extern "C" fn button_set_transparent(receiver: Id, _sel: Sel, value: u8) {
@@ -2676,6 +2691,8 @@ pub(crate) fn install() {
         "alternateImage" => button_alternate_image, c"@16@0:8";
         "setBordered:" => button_set_bordered, c"v20@0:8c16";
         "isBordered" => button_is_bordered, c"c16@0:8";
+        "setHasDestructiveAction:" => button_set_destructive, c"v20@0:8c16";
+        "hasDestructiveAction" => button_is_destructive, c"c16@0:8";
         "setTransparent:" => button_set_transparent, c"v20@0:8c16";
         "isTransparent" => button_is_transparent, c"c16@0:8";
         "setHighlighted:" => button_set_highlighted, c"v20@0:8c16";

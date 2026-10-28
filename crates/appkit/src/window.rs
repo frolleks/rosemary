@@ -2324,6 +2324,7 @@ unsafe extern "C" fn order_out(receiver: Id, _sel: Sel, _sender: Id) {
 /// be keyed by it, and that table is not this crate's to clear.
 pub(crate) unsafe extern "C" fn dealloc(receiver: Id, sel: Sel) {
     crate::event::forget_announced(receiver);
+    crate::sheet::forget(receiver);
     children()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -2631,8 +2632,10 @@ unsafe extern "C" fn constrain_frame_rect(
     rect
 }
 
+/// An attached sheet is visible whether or not it has a window of its own:
+/// an alert's is drawn by `crate::dialog`.
 unsafe extern "C" fn is_visible(receiver: Id, _sel: Sel) -> u8 {
-    (window_of(receiver).shown != 0) as u8
+    (window_of(receiver).shown != 0 || crate::sheet::parent_of(receiver).is_some()) as u8
 }
 
 /// `-screen`: the display SDL puts the window on, so per-display answers such
@@ -3759,7 +3762,6 @@ pub(crate) fn install() {
         "orderFront:" => make_key_and_order_front, c"v24@0:8@16";
         "orderFrontRegardless" => order_front_regardless, c"v16@0:8";
         "orderOut:" => order_out, c"v24@0:8@16";
-        "endSheet:" => ignored_object, c"v24@0:8@16";
         "close" => close, c"v16@0:8";
         "dealloc" => dealloc, c"v16@0:8";
         "performClose:" => perform_close, c"v24@0:8@16";
@@ -3773,11 +3775,8 @@ pub(crate) fn install() {
         "isMainWindow" => is_key_window, c"c16@0:8";
         "isVisible" => is_visible, c"c16@0:8";
         "setIsVisible:" => set_is_visible, c"v20@0:8c16";
-        // No window is ever attached as a sheet: nothing implements -beginSheet:.
-        "isSheet" => no, c"c16@0:8";
         // One space: ordering any window in puts it on the active one.
         "isOnActiveSpace" => yes, c"c16@0:8";
-        "attachedSheet" => nil, c"@16@0:8";
         "screen" => screen, c"@16@0:8";
         "backingScaleFactor" => backing_scale_factor, c"d16@0:8";
         "userSpaceScaleFactor" => user_space_scale_factor, c"d16@0:8";

@@ -1372,7 +1372,8 @@ pub(crate) fn install() {
         "stopModal" => stop_modal, c"v16@0:8";
         "stopModalWithCode:" => stop_modal_with_code, c"v24@0:8q16";
         "occlusionState" => crate::window::visible_occlusion, c"Q16@0:8";
-        "endSheet:" => ignored_sender, c"v24@0:8@16";
+        "endSheet:" => crate::sheet::application_end_sheet, c"v24@0:8@16";
+        "endSheet:returnCode:" => crate::sheet::application_end_sheet_with_code, c"v32@0:8@16q24";
         "abortModal" => stop_modal, c"v16@0:8";
     });
 }

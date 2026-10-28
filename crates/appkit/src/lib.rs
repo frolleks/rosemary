@@ -84,6 +84,7 @@ pub mod screen;
 pub mod script;
 mod scroll;
 mod segmented;
+mod sheet;
 mod slider;
 mod status;
 mod tab;
@@ -128,6 +129,7 @@ pub fn bootstrap() {
         screen::install();
         displaylink::install();
         window::install();
+        sheet::install();
         window_controller::install();
         view::install();
         layout::install();
@@ -496,6 +498,8 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     "NSSystemColorsDidChangeNotification",
     window::WILL_START_LIVE_RESIZE,
     window::DID_END_LIVE_RESIZE,
+    sheet::WILL_BEGIN,
+    sheet::DID_END,
     "NSColorPanelColorDidChangeNotification",
     "NSPreferredScrollerStyleDidChangeNotification",
     "NSTextInputContextKeyboardSelectionDidChangeNotification",
