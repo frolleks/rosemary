@@ -57,6 +57,7 @@ exports::exports! {
         "CFGetRetainCount" => api::CFGetRetainCount,
         "CFGetTypeID" => api::CFGetTypeID,
         "CFCopyDescription" => api::CFCopyDescription,
+        "CFShow" => api::CFShow,
         "CFEqual" => api::CFEqual,
         "CFHash" => api::CFHash,
         "CFAllocatorGetTypeID" => api::CFAllocatorGetTypeID,

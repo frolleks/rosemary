@@ -224,6 +224,22 @@ pub unsafe extern "C" fn CFGetTypeID(object: CFTypeRef) -> CFTypeID {
     unsafe { crate::base::class_of(object) }.map_or(0, crate::base::type_id_of)
 }
 
+/// `void CFShow(CFTypeRef)`: the object's description on stderr, or `(null)`.
+pub unsafe extern "C" fn CFShow(object: CFTypeRef) {
+    // SAFETY: as `CFCopyDescription`'s caller states.
+    let description = unsafe { CFCopyDescription(object) };
+    // SAFETY: null or a string `CFCopyDescription` made.
+    let text = unsafe { crate::string::as_string(description) }.map_or_else(
+        || "(null)".to_string(),
+        |s| String::from_utf8_lossy(&s.utf8()).into_owned(),
+    );
+    eprintln!("{text}");
+    if !description.is_null() {
+        // SAFETY: the copy above is this call's own.
+        unsafe { CFRelease(description) };
+    }
+}
+
 /// `CFStringRef CFCopyDescription(CFTypeRef)`: NULL for NULL, as CFRuntime.c
 /// answers, and otherwise the object's `-description`, retained - the
 /// `_copyDescription` CF sends a bridged object. A handle with no class gets
