@@ -2019,6 +2019,66 @@ unsafe extern "C" fn data_init_with_contents_of_file(receiver: Id, sel: Sel, pat
     objc::arc::retain(unsafe { data_with_contents_of_file(receiver, sel, path) })
 }
 
+/// `NSDataBase64DecodingIgnoreUnknownCharacters`.
+const BASE64_IGNORE_UNKNOWN_CHARACTERS: usize = 1 << 0;
+
+/// Standard base64, padded as Apple's decoder requires; `None` for text it
+/// rejects. Unknown characters - line breaks included - are rejected unless
+/// `ignore_unknown`.
+fn base64_decode(text: &[u8], ignore_unknown: bool) -> Option<Vec<u8>> {
+    let mut symbols = Vec::with_capacity(text.len());
+    for &byte in text {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'/' | b'=' => symbols.push(byte),
+            _ if ignore_unknown => {}
+            _ => return None,
+        }
+    }
+    if symbols.len() % 4 != 0 {
+        return None;
+    }
+    let padding = symbols.iter().rev().take_while(|&&b| b == b'=').count();
+    if padding > 2 || symbols[..symbols.len() - padding].contains(&b'=') {
+        return None;
+    }
+    let value = |b: u8| -> u32 {
+        match b {
+            b'A'..=b'Z' => u32::from(b - b'A'),
+            b'a'..=b'z' => u32::from(b - b'a' + 26),
+            b'0'..=b'9' => u32::from(b - b'0' + 52),
+            b'+' => 62,
+            b'/' => 63,
+            _ => 0,
+        }
+    };
+    let mut out = Vec::with_capacity(symbols.len() / 4 * 3);
+    for quad in symbols.chunks(4) {
+        let word = quad.iter().fold(0, |word, &b| (word << 6) | value(b));
+        let bytes = [(word >> 16) as u8, (word >> 8) as u8, word as u8];
+        let kept = 3 - quad.iter().filter(|&&b| b == b'=').count();
+        out.extend_from_slice(&bytes[..kept]);
+    }
+    Some(out)
+}
+
+/// `-initWithBase64EncodedString:options:`, nil for text that is not base64.
+unsafe extern "C" fn data_init_with_base64_string(
+    receiver: Id,
+    _sel: Sel,
+    text: Id,
+    options: usize,
+) -> Id {
+    // SAFETY: an `NSString` or nil.
+    let text = unsafe { crate::string::bytes(text) };
+    match base64_decode(&text, options & BASE64_IGNORE_UNKNOWN_CHARACTERS != 0) {
+        Some(bytes) => replace_receiver(receiver, bytes),
+        None => {
+            objc::arc::release(receiver);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 unsafe extern "C" fn data_init_with_capacity(receiver: Id, _sel: Sel, capacity: usize) -> Id {
     replace_receiver(receiver, Vec::with_capacity(capacity.min(1 << 24)))
 }
@@ -2966,6 +3026,7 @@ pub(crate) fn install() {
         "writeToFile:atomically:" => write_to_file, c"B28@0:8@16c24";
         "init" => data_init, c"@16@0:8";
         "initWithData:" => data_init_with_data, c"@24@0:8@16";
+        "initWithBase64EncodedString:options:" => data_init_with_base64_string, c"@32@0:8@16Q24";
         "initWithBytes:length:" => data_init_with_bytes, c"@32@0:8r^v16Q24";
         "initWithBytesNoCopy:length:" => data_init_no_copy, c"@32@0:8^v16Q24";
         "initWithBytesNoCopy:length:freeWhenDone:" => data_init_no_copy_free, c"@36@0:8^v16Q24B32";
@@ -3061,4 +3122,22 @@ pub(crate) fn install() {
         "numberWithUnsignedChar:" => number_with_unsigned_char, c"@24@0:8C16";
         "numberWithFloat:" => number_with_float, c"@24@0:8f16";
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_decodes_padded_text_and_rejects_the_rest() {
+        assert_eq!(base64_decode(b"aGk=", false).as_deref(), Some(&b"hi"[..]));
+        assert_eq!(base64_decode(b"aGV5", false).as_deref(), Some(&b"hey"[..]));
+        assert_eq!(base64_decode(b"aGk", false), None);
+        assert_eq!(base64_decode(b"aG=k", false), None);
+        assert_eq!(base64_decode(b"aGV5\naGk=", false), None);
+        assert_eq!(
+            base64_decode(b"aGV5\naGk=", true).as_deref(),
+            Some(&b"heyhi"[..])
+        );
+    }
 }
