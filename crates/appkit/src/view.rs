@@ -4905,6 +4905,8 @@ mod tests {
             return;
         }
         crate::bootstrap();
+        // The empty window's background is checked as Aqua's.
+        crate::appearance::use_aqua_on_this_thread();
         if !sdl3::may_pump() {
             return;
         }
@@ -5068,6 +5070,8 @@ mod tests {
             return;
         }
         crate::bootstrap();
+        // The empty window's background is checked as Aqua's.
+        crate::appearance::use_aqua_on_this_thread();
         if !sdl3::may_pump() {
             return;
         }
@@ -6883,6 +6887,8 @@ mod tests {
             return;
         }
         crate::bootstrap();
+        // The empty window's background is checked as Aqua's.
+        crate::appearance::use_aqua_on_this_thread();
         if !sdl3::may_pump() {
             return;
         }

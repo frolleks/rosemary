@@ -3199,7 +3199,7 @@ pub fn gpu_under_metal(sdl: sdl3::Window, source: &Store) -> Option<Store> {
         width: i64::from(source.width),
         height: i64::from(source.height),
     };
-    let background = crate::window::background_pixel(window).unwrap_or(DEFAULT_BACKGROUND);
+    let background = crate::window::background_pixel(window);
     for pixel in bottom.pixels.as_chunks_mut::<4>().0 {
         *pixel = background;
     }
@@ -3391,7 +3391,7 @@ fn compose_window(window: Id) {
     // program that draws only a logo and a bar relies on for everything else.
     // With none set it is `windowBackgroundColor`, AppKit's default; a layer
     // view's hole is the layer's either way.
-    let background = crate::window::background_pixel(window).unwrap_or(DEFAULT_BACKGROUND);
+    let background = crate::window::background_pixel(window);
     let logical = logical_pixel_bounds(sdl, whole);
     for row in region.y..region.y + region.height {
         let base = (row as usize * width as usize + region.x as usize) * 4;
@@ -3478,9 +3478,6 @@ pub fn present_again(sdl: sdl3::Window) {
 }
 
 /// Recompose the whole of a window, whose background changed.
-/// `windowBackgroundColor` (0.93 grey, opaque) as premultiplied BGRA.
-const DEFAULT_BACKGROUND: [u8; 4] = [237, 237, 237, 255];
-
 pub(crate) fn window_background_changed(window: Id) {
     // SAFETY: a window this crate made.
     let sdl = unsafe { crate::window::sdl_window(window) };

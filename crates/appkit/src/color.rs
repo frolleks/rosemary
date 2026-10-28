@@ -189,7 +189,23 @@ unsafe extern "C" fn named(_class: Id, sel: Sel) -> Id {
     // SAFETY: a registered selector is a NUL-terminated interned name.
     let name = unsafe { std::ffi::CStr::from_ptr(sel) };
     let name = name.to_string_lossy();
-    let dark = match name.as_ref() {
+    let dark = dark_variant(&name).is_some() && crate::appearance::is_dark();
+    let key = match dark {
+        true => format!("{name}:dark"),
+        false => name.to_string(),
+    };
+    match components_in(&name, dark) {
+        Some((r, g, b, a)) => singleton(&key, r, g, b, a),
+        // Unreachable through dispatch - the selector was installed from this
+        // very table - and named rather than silent in case it stops being.
+        None => objc::fail!("+[NSColor {name}]: not one of this runtime's named colours"),
+    }
+}
+
+/// The gray and alpha a semantic colour has in the dark appearance, or `None`
+/// for one that looks the same in both.
+fn dark_variant(name: &str) -> Option<(f64, f64)> {
+    match name {
         "textColor"
         | "labelColor"
         | "controlTextColor"
@@ -211,18 +227,23 @@ unsafe extern "C" fn named(_class: Id, sel: Sel) -> Id {
         "underPageBackgroundColor" => Some((0.10, 1.0)),
         "alternatingContentBackgroundColor" => Some((0.16, 1.0)),
         _ => None,
-    };
-    if let Some((gray, alpha)) = dark
-        && crate::appearance::is_dark()
-    {
-        return singleton(&format!("{name}:dark"), gray, gray, gray, alpha);
     }
-    match NAMED.iter().find(|(n, ..)| *n == name) {
-        Some((_, r, g, b, a)) => singleton(&name, *r, *g, *b, *a),
-        // Unreachable through dispatch - the selector was installed from this
-        // very table - and named rather than silent in case it stops being.
-        None => objc::fail!("+[NSColor {name}]: not one of this runtime's named colours"),
+}
+
+/// The straight RGBA of the named system colour `name` in the current
+/// appearance, without making a colour object.
+pub(crate) fn named_components(name: &str) -> Option<(f64, f64, f64, f64)> {
+    components_in(name, crate::appearance::is_dark())
+}
+
+fn components_in(name: &str, dark: bool) -> Option<(f64, f64, f64, f64)> {
+    if let Some((gray, alpha)) = dark_variant(name).filter(|_| dark) {
+        return Some((gray, gray, gray, alpha));
     }
+    NAMED
+        .iter()
+        .find(|(n, ..)| *n == name)
+        .map(|(_, r, g, b, a)| (*r, *g, *b, *a))
 }
 
 /// An autoreleased colour of these components, for a decoder.

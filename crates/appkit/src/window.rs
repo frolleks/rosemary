@@ -1235,10 +1235,9 @@ pub(crate) fn facts(object: Id) -> Option<crate::decor::Facts> {
             .to_string_lossy()
             .into_owned(),
         title_hidden: window.title_visibility == 1,
-        // A transparent titlebar shows the window behind it, which is its
-        // background colour, or AppKit's window background when none was set.
+        // A transparent titlebar shows the window behind it.
         titlebar_color: (window.titlebar_transparent != 0).then(|| {
-            let (r, g, b, a) = background_rgba(object).unwrap_or((0.93, 0.93, 0.93, 1.0));
+            let (r, g, b, a) = background_rgba(object);
             let byte = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
             [byte(r), byte(g), byte(b), byte(a)]
         }),
@@ -2706,30 +2705,40 @@ unsafe extern "C" fn set_background_color(receiver: Id, _sel: Sel, color: Id) {
     crate::backing::window_background_changed(receiver);
 }
 
-/// The window's `backgroundColor` as straight RGBA, or `None` when the
-/// program never set one.
-fn background_rgba(window: Id) -> Option<(f64, f64, f64, f64)> {
+/// The window's `backgroundColor` as straight RGBA: `windowBackgroundColor`
+/// in the current appearance when the program never set one.
+fn background_rgba(window: Id) -> (f64, f64, f64, f64) {
     let color = window_of(window).background;
-    // SAFETY: an object the window retained.
-    (!color.is_null()).then(|| unsafe { crate::color::components(color) })
+    match color.is_null() {
+        true => crate::color::named_components(WINDOW_BACKGROUND)
+            .expect("windowBackgroundColor is a named colour"),
+        // SAFETY: an object the window retained.
+        false => unsafe { crate::color::components(color) },
+    }
 }
 
-/// The window's `backgroundColor` as one premultiplied BGRA pixel, or `None`
-/// when the program never set one.
-pub(crate) fn background_pixel(window: Id) -> Option<[u8; 4]> {
-    let (red, green, blue, alpha) = background_rgba(window)?;
+/// The window's `backgroundColor` as one premultiplied BGRA pixel.
+pub(crate) fn background_pixel(window: Id) -> [u8; 4] {
+    let (red, green, blue, alpha) = background_rgba(window);
     let alpha = alpha.clamp(0.0, 1.0);
     let channel = |value: f64| (value.clamp(0.0, 1.0) * alpha * 255.0).round() as u8;
-    Some([
+    [
         channel(blue),
         channel(green),
         channel(red),
         (alpha * 255.0).round() as u8,
-    ])
+    ]
 }
 
+/// The colour a window has until the program sets its own.
+const WINDOW_BACKGROUND: &str = "windowBackgroundColor";
+
 unsafe extern "C" fn background_color(receiver: Id, _sel: Sel) -> Id {
-    window_of(receiver).background
+    let color = window_of(receiver).background;
+    match color.is_null() {
+        true => crate::color::named_color(WINDOW_BACKGROUND).unwrap_or(color),
+        false => color,
+    }
 }
 
 unsafe extern "C" fn set_accepts_mouse_moved(receiver: Id, _sel: Sel, accepts: u8) {

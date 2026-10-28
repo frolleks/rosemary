@@ -30,6 +30,9 @@ const FOCUS: Rgba = [0.23, 0.53, 0.96, 0.55];
 const TRACK: Rgba = [0.98, 0.98, 0.98, 1.0];
 const TRACK_EDGE: Rgba = [0.0, 0.0, 0.0, 0.12];
 const THUMB: Rgba = [0.0, 0.0, 0.0, 0.38];
+const DARK_TRACK: Rgba = [0.17, 0.17, 0.17, 1.0];
+const DARK_TRACK_EDGE: Rgba = [1.0, 1.0, 1.0, 0.08];
+const LIGHT_THUMB: Rgba = [1.0, 1.0, 1.0, 0.38];
 const FIELD_TOP: Rgba = [0.0, 0.0, 0.0, 0.42];
 const FIELD_SIDE: Rgba = [0.0, 0.0, 0.0, 0.25];
 
@@ -699,7 +702,7 @@ pub(crate) fn scroll_bar(
     thumb: Option<(f64, f64)>,
     pressed: bool,
 ) {
-    scroll_track(p, r, horizontal);
+    scroll_track(p, r, horizontal, Shade::Light);
     let Some((at, length)) = thumb else {
         return;
     };
@@ -708,22 +711,40 @@ pub(crate) fn scroll_bar(
         true => rect(x + at, y, length, h),
         false => rect(x, y + at, w, length),
     };
-    scroll_thumb(p, knob, horizontal, pressed);
+    scroll_thumb(p, knob, horizontal, pressed, Shade::Light);
+}
+
+/// What a scroll bar is drawn to sit on: a light background, with a pale
+/// track and a dark thumb, or a dark one with the reverse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Shade {
+    Light,
+    Dark,
 }
 
 /// A scroll bar's track, edged on the side facing the content.
-pub(crate) fn scroll_track(p: &Painter, r: NSRect, horizontal: bool) {
-    p.rect(r, TRACK);
+pub(crate) fn scroll_track(p: &Painter, r: NSRect, horizontal: bool, shade: Shade) {
+    let (fill, edge) = match shade {
+        Shade::Light => (TRACK, TRACK_EDGE),
+        Shade::Dark => (DARK_TRACK, DARK_TRACK_EDGE),
+    };
+    p.rect(r, fill);
     let (x, y, w, h) = (r.origin.x, r.origin.y, r.size.width, r.size.height);
     match horizontal {
-        true => p.rect(rect(x, y, w, 1.0), TRACK_EDGE),
-        false => p.rect(rect(x, y, 1.0, h), TRACK_EDGE),
+        true => p.rect(rect(x, y, w, 1.0), edge),
+        false => p.rect(rect(x, y, 1.0, h), edge),
     }
 }
 
 /// A scroll bar's capsule thumb, inset within `knob` - the span it occupies
 /// along the track, the track's full breadth across.
-pub(crate) fn scroll_thumb(p: &Painter, knob: NSRect, horizontal: bool, pressed: bool) {
+pub(crate) fn scroll_thumb(
+    p: &Painter,
+    knob: NSRect,
+    horizontal: bool,
+    pressed: bool,
+    shade: Shade,
+) {
     let (x, y, w, h) = (
         knob.origin.x,
         knob.origin.y,
@@ -736,10 +757,11 @@ pub(crate) fn scroll_thumb(p: &Painter, knob: NSRect, horizontal: bool, pressed:
         true => rect(x + 2.0, y + pad, w - 4.0, h - 2.0 * pad + 1.0),
         false => rect(x + pad, y + 2.0, w - 2.0 * pad + 1.0, h - 4.0),
     };
-    let color = if pressed {
-        [0.0, 0.0, 0.0, 0.55]
-    } else {
-        THUMB
+    let color = match (shade, pressed) {
+        (Shade::Light, false) => THUMB,
+        (Shade::Light, true) => [0.0, 0.0, 0.0, 0.55],
+        (Shade::Dark, false) => LIGHT_THUMB,
+        (Shade::Dark, true) => [1.0, 1.0, 1.0, 0.55],
     };
     let radius = (girth - 2.0 * pad + 1.0) / 2.0;
     p.fill_rounded(thumb, radius, color);

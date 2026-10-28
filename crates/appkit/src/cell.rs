@@ -33,6 +33,7 @@ const KINDS: &[(&std::ffi::CStr, &std::ffi::CStr)] = &[
     (c"NSPopUpButton", c"NSPopUpButtonCell"),
     (c"NSButton", c"NSButtonCell"),
     (c"NSSearchField", c"NSSearchFieldCell"),
+    (c"NSComboBox", c"NSComboBoxCell"),
     (c"NSTextField", c"NSTextFieldCell"),
     (c"NSSegmentedControl", c"NSSegmentedCell"),
     (c"NSImageView", c"NSImageCell"),
@@ -767,8 +768,13 @@ fn draw_cell(cell: Id, frame: foundation::geometry::NSRect, interior: bool) {
     };
     let size = crate::aqua::Size::from_control_size(get(cell, Slot::ControlSize));
     let key = ask(cell, "keyEquivalent", 0) as Id;
+    // A combo box's arrow is its own button cell, which takes the highlight.
+    let highlighted = match drawn {
+        Drawn::Combo => objc::arc::associated(cell, combo_button_key()),
+        _ => cell,
+    };
     let look = crate::aqua::Look {
-        pressed: ask(cell, "isHighlighted", 0) as u8 != 0,
+        pressed: !highlighted.is_null() && ask(highlighted, "isHighlighted", 0) as u8 != 0,
         disabled: ask(cell, "isEnabled", 1) as u8 == 0,
         focused: get(cell, Slot::ShowsFirstResponder) != 0,
         // SAFETY: a string or nil.
@@ -795,6 +801,32 @@ fn draw_cell(cell: Id, frame: foundation::geometry::NSRect, interior: bool) {
         Drawn::Search => aqua::round_field(&p, frame, look.focused),
         Drawn::Field => aqua::text_field(&p, frame, look.focused),
     }
+}
+
+fn combo_button_key() -> *const std::ffi::c_void {
+    static KEY: u8 = 0;
+    (&raw const KEY).cast()
+}
+
+/// `-[NSComboBoxCell _buttonCell]`: the private arrow button, made on first
+/// request. Qt's style reaches it through key-value coding to draw a pressed
+/// combo box.
+unsafe extern "C" fn combo_button_cell(receiver: Id, _sel: Sel) -> Id {
+    let existing = objc::arc::associated(receiver, combo_button_key());
+    if !existing.is_null() {
+        return existing;
+    }
+    let class = objc::class::lookup(c"NSButtonCell").expect("declared before its methods");
+    // SAFETY: a fresh cell, initialised as `-init` would.
+    let button = unsafe {
+        init(
+            objc::object::create_instance(class, 0),
+            objc::sel::get("init"),
+        )
+    };
+    objc::arc::set_associated_with_policy(receiver, combo_button_key(), button, 1);
+    objc::arc::release(button);
+    button
 }
 
 /// `-[NSPopUpButtonCell initTextCell:pullsDown:]`
@@ -859,6 +891,10 @@ pub(crate) fn install() {
         "setDoubleValue:" => set_double_value, c"v24@0:8d16";
         "drawWithFrame:inView:" => draw_with_frame, c"v56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
         "drawInteriorWithFrame:inView:" => draw_interior_with_frame, c"v56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
+    });
+    let combo_cell = objc::class::lookup(c"NSComboBoxCell").expect("declared before its methods");
+    methods!(combo_cell, {
+        "_buttonCell" => combo_button_cell, c"@16@0:8";
     });
     let popup_cell =
         objc::class::lookup(c"NSPopUpButtonCell").expect("declared before its methods");

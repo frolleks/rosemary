@@ -540,7 +540,12 @@ mod slot {
     pub const INDETERMINATE: usize = 0;
     pub const STYLE: usize = 1;
     pub const ANIMATING: usize = 2;
+    /// `f64` bits, as are the bounds.
     pub const VALUE: usize = 3;
+    pub const MIN_VALUE: usize = 4;
+    pub const MAX_VALUE: usize = 5;
+    /// Nonzero once `-setMaxValue:` was called, before which it is 100.
+    pub const MAX_VALUE_SET: usize = 6;
 
     pub const IMAGE: usize = 0;
     pub const TARGET: usize = 1;
@@ -976,7 +981,7 @@ unsafe extern "C" fn indicator_style(receiver: Id, _sel: Sel) -> usize {
     read(indicators(), receiver, slot::STYLE)
 }
 
-/// `-startAnimation:`. Nothing spins, since nothing draws; the state is kept
+/// `-startAnimation:`. Nothing animates; the state is kept
 /// for `-isAnimating`-style reads a program makes of its own indicator.
 unsafe extern "C" fn indicator_start_animation(receiver: Id, _sel: Sel, _sender: Id) {
     write(indicators(), receiver, slot::ANIMATING, 1);
@@ -997,6 +1002,74 @@ unsafe extern "C" fn indicator_set_double_value(receiver: Id, _sel: Sel, value: 
 
 unsafe extern "C" fn indicator_double_value(receiver: Id, _sel: Sel) -> f64 {
     f64::from_bits(read(indicators(), receiver, slot::VALUE) as u64)
+}
+
+unsafe extern "C" fn indicator_set_min_value(receiver: Id, _sel: Sel, value: f64) {
+    write(
+        indicators(),
+        receiver,
+        slot::MIN_VALUE,
+        value.to_bits() as usize,
+    );
+}
+
+unsafe extern "C" fn indicator_min_value(receiver: Id, _sel: Sel) -> f64 {
+    f64::from_bits(read(indicators(), receiver, slot::MIN_VALUE) as u64)
+}
+
+unsafe extern "C" fn indicator_set_max_value(receiver: Id, _sel: Sel, value: f64) {
+    write(
+        indicators(),
+        receiver,
+        slot::MAX_VALUE,
+        value.to_bits() as usize,
+    );
+    write(indicators(), receiver, slot::MAX_VALUE_SET, 1);
+}
+
+unsafe extern "C" fn indicator_max_value(receiver: Id, _sel: Sel) -> f64 {
+    /// AppKit's `maxValue` for a fresh indicator.
+    const DEFAULT_MAX: f64 = 100.0;
+    match read(indicators(), receiver, slot::MAX_VALUE_SET) {
+        0 => DEFAULT_MAX,
+        _ => f64::from_bits(read(indicators(), receiver, slot::MAX_VALUE) as u64),
+    }
+}
+
+/// `-[NSProgressIndicator drawRect:]`: a bar over the bounds, filled to the
+/// value's share of the range, or half filled while indeterminate.
+// FIXME (ACCURACY): the spinning style and the indeterminate animation are
+// not drawn.
+unsafe extern "C" fn indicator_draw_rect(receiver: Id, sel: Sel, _dirty: NSRect) {
+    /// `NSProgressIndicatorStyleSpinning`.
+    const SPINNING: usize = 1;
+    // SAFETY: the getters take only the receiver and selector.
+    let (style, indeterminate, value, min, max) = unsafe {
+        (
+            indicator_style(receiver, sel),
+            indicator_is_indeterminate(receiver, sel) != 0,
+            indicator_double_value(receiver, sel),
+            indicator_min_value(receiver, sel),
+            indicator_max_value(receiver, sel),
+        )
+    };
+    if style == SPINNING {
+        return;
+    }
+    let Some((port, flipped)) = crate::cell::current_port() else {
+        return;
+    };
+    let bounds = view::bounds_of(receiver);
+    let Some(p) = crate::aqua::Painter::new(port, bounds, flipped) else {
+        return;
+    };
+    let fraction = match indeterminate || max <= min {
+        true => None,
+        false => Some((value - min) / (max - min)),
+    };
+    let size = crate::aqua::Size::from_control_size(crate::props::integer(receiver, "controlSize"));
+    let horizontal = bounds.size.width >= bounds.size.height;
+    crate::aqua::progress_bar(&p, bounds, horizontal, fraction, size);
 }
 
 unsafe extern "C" fn button_set_image(receiver: Id, _sel: Sel, value: Id) {
@@ -2198,6 +2271,12 @@ unsafe extern "C" fn scroller_init_with_frame(receiver: Id, sel: Sel, frame: NSR
 const MIN_KNOB_LENGTH: f64 = 18.0;
 
 /// `NSScrollerPart`.
+/// `NSScrollerKnobStyle`.
+mod knob_style {
+    pub const DARK: isize = 1;
+    pub const LIGHT: isize = 2;
+}
+
 mod part {
     pub const DECREMENT_PAGE: usize = 1;
     pub const KNOB: usize = 2;
@@ -2303,8 +2382,12 @@ unsafe extern "C" fn scroller_draw_knob_slot(
     slot: NSRect,
     _highlight: u8,
 ) {
+    let shade = match crate::appearance::is_dark() {
+        true => crate::aqua::Shade::Dark,
+        false => crate::aqua::Shade::Light,
+    };
     paint_scroller(receiver, |p, _, horizontal| {
-        crate::aqua::scroll_track(p, slot, horizontal)
+        crate::aqua::scroll_track(p, slot, horizontal, shade)
     });
 }
 
@@ -2315,9 +2398,21 @@ unsafe extern "C" fn scroller_draw_knob(receiver: Id, sel: Sel) {
     if knob.size.width <= 0.0 || knob.size.height <= 0.0 {
         return;
     }
+    let shade = knob_shade(read(scrollers(), receiver, slot::KNOB_STYLE) as isize);
     paint_scroller(receiver, |p, _, horizontal| {
-        crate::aqua::scroll_thumb(p, knob, horizontal, false)
+        crate::aqua::scroll_thumb(p, knob, horizontal, false, shade)
     });
+}
+
+/// The background a knob of this `NSScrollerKnobStyle` is drawn for: a light
+/// knob is for a dark background, and the default follows the appearance.
+fn knob_shade(style: isize) -> crate::aqua::Shade {
+    match style {
+        knob_style::DARK => crate::aqua::Shade::Light,
+        knob_style::LIGHT => crate::aqua::Shade::Dark,
+        _ if crate::appearance::is_dark() => crate::aqua::Shade::Dark,
+        _ => crate::aqua::Shade::Light,
+    }
 }
 
 fn scroller_part(size: NSSize, value: f64, proportion: f64, which: usize) -> NSRect {
@@ -2446,11 +2541,18 @@ pub(crate) fn install() {
         "stopAnimation:" => indicator_stop_animation, c"v24@0:8@16";
         "setDoubleValue:" => indicator_set_double_value, c"v24@0:8d16";
         "doubleValue" => indicator_double_value, c"d16@0:8";
+        "setMinValue:" => indicator_set_min_value, c"v24@0:8d16";
+        "minValue" => indicator_min_value, c"d16@0:8";
+        "setMaxValue:" => indicator_set_max_value, c"v24@0:8d16";
+        "maxValue" => indicator_max_value, c"d16@0:8";
+        "drawRect:" => indicator_draw_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "setDisplayedWhenStopped:" => indicator_set_displayed_when_stopped, c"v20@0:8c16";
         "isDisplayedWhenStopped" => indicator_is_displayed_when_stopped, c"c16@0:8";
-        // FIXME (ACCURACY): kept, and not drawn: an indicator draws nothing.
         "controlSize" => crate::props::get_integer, c"Q16@0:8";
         "setControlSize:" => crate::props::set_integer, c"v24@0:8Q16";
+        // Kept only: nothing animates, on any thread.
+        "usesThreadedAnimation" => crate::props::get_bool, c"c16@0:8";
+        "setUsesThreadedAnimation:" => crate::props::set_bool, c"v20@0:8c16";
     });
 
     // Every control has a target and an action; a subclass a program writes
