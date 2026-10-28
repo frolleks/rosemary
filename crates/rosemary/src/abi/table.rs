@@ -1545,6 +1545,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("SecRequirementCreateWithData", I32, P, U32, P),
     sig!("SecCodeCopySelf", I32, U32, P),
     sig!("SecCodeCheckValidity", I32, P, U32, P),
+    sig!("SecStaticCodeCheckValidity", I32, P, U32, P),
     sig!("SecStaticCodeCheckValidityWithErrors", I32, P, U64, P, P),
     //
     // SDL3 asks the current layout for its Unicode key-layout data so it can
