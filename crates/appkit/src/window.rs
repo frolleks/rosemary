@@ -95,6 +95,8 @@ pub struct Window {
     window_controller: Id,
     /// `-setHidesOnDeactivate:`, kept so a program reads back what it set.
     hides_on_deactivate: usize,
+    /// `-setExcludedFromWindowsMenu:`, likewise; no Windows menu lists windows.
+    excluded_from_windows_menu: usize,
     /// When this window was last ordered front, from [`ORDERED`]: the stacking
     /// order, which creation order is not.
     ordered: u64,
@@ -2584,6 +2586,14 @@ unsafe extern "C" fn set_hides_on_deactivate(receiver: Id, _sel: Sel, value: u8)
     window_of(receiver).hides_on_deactivate = value as usize;
 }
 
+unsafe extern "C" fn is_excluded_from_windows_menu(receiver: Id, _sel: Sel) -> u8 {
+    (window_of(receiver).excluded_from_windows_menu != 0) as u8
+}
+
+unsafe extern "C" fn set_excluded_from_windows_menu(receiver: Id, _sel: Sel, value: u8) {
+    window_of(receiver).excluded_from_windows_menu = value as usize;
+}
+
 unsafe extern "C" fn is_key_window(receiver: Id, _sel: Sel) -> u8 {
     (key_window() == receiver) as u8
 }
@@ -3779,6 +3789,8 @@ pub(crate) fn install() {
         "setOpaque:" => ignored_flag, c"v20@0:8c16";
         "setHidesOnDeactivate:" => set_hides_on_deactivate, c"v20@0:8c16";
         "hidesOnDeactivate" => hides_on_deactivate, c"c16@0:8";
+        "setExcludedFromWindowsMenu:" => set_excluded_from_windows_menu, c"v20@0:8c16";
+        "isExcludedFromWindowsMenu" => is_excluded_from_windows_menu, c"c16@0:8";
         "orderBack:" => ignored_object, c"v24@0:8@16";
         "occlusionState" => visible_occlusion, c"Q16@0:8";
         "setToolbar:" => ignored_object, c"v24@0:8@16";
