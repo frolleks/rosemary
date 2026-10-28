@@ -170,6 +170,7 @@ exports::exports! {
         "vm_write" | "mach_vm_write" => vm::vm_write,
         "vm_protect" | "mach_vm_protect" => vm::vm_protect,
         "vm_map" | "vm_map_64" | "mach_vm_map" => vm::mach_vm_map,
+        "vm_remap" | "mach_vm_remap" => vm::mach_vm_remap,
         "mach_make_memory_entry" | "mach_make_memory_entry_64" => entry::mach_make_memory_entry_64,
         "vm_copy" | "mach_vm_copy" => vm::vm_copy,
 

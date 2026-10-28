@@ -1,4 +1,7 @@
 pub const DARWIN_ENOSYS: i32 = 78;
+/// Darwin's `EOPNOTSUPP`, which this host numbers the same as `ENOTSUP` and so
+/// hands back as that. Set with [`set_guest`].
+pub const DARWIN_EOPNOTSUPP: i32 = 102;
 
 /// Darwin's `EPROCLIM`, `EBADRPC`, `ERPCMISMATCH`, `EPROGUNAVAIL`,
 /// `EPROGMISMATCH`, `EPROCUNAVAIL`, `EFTYPE`, `EAUTH`, `ENEEDAUTH`, `EPWROFF`,

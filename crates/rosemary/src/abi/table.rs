@@ -2904,6 +2904,27 @@ pub static SIGNATURES: &[FunctionAbi] = &[
         I32,
         U32
     ),
+    // `kern_return_t mach_vm_remap(vm_map_t, mach_vm_address_t *, mach_vm_size_t,
+    // mach_vm_offset_t mask, int flags, vm_map_t src, mach_vm_address_t src_address,
+    // boolean_t copy, vm_prot_t *cur, vm_prot_t *max, vm_inherit_t)`.
+    sig!(
+        "mach_vm_remap",
+        I32,
+        U32,
+        P,
+        U64,
+        U64,
+        I32,
+        U32,
+        U64,
+        U32,
+        P,
+        P,
+        U32
+    ),
+    sig!(
+        "vm_remap", I32, U32, P, U64, U64, I32, U32, U64, U32, P, P, U32
+    ),
     sig!("mach_thread_self", U32),
     sig!("mach_timebase_info", I32, P),
     sig!("madvise", U64, P, U64, I32),
@@ -4067,6 +4088,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("removexattr", I32, P, P, I32),
     sig!("sendfile", I32, I32, I32, I64, P, P, I32),
     sig!("connectx", I32, I32, P, U32, U32, P, U32, P, P),
+    sig!("disconnectx", I32, I32, U32, U32),
     sig!("posix_spawnattr_setsigdefault", I32, P, P),
     sig!("pthread_mutexattr_setpolicy_np", I32, P, I32),
     sig!("pthread_rwlock_tryrdlock", I32, P),

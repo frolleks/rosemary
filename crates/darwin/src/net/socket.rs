@@ -931,6 +931,14 @@ struct Endpoints {
     dstaddrlen: u32,
 }
 
+/// The `sae_connid_t` Darwin's TCP and UDP number their one connection with.
+const SAE_CONNID_ONLY: u32 = 1;
+
+/// `SAE_ASSOCID_ANY` and `SAE_ASSOCID_ALL`, the only associations a socket
+/// that is not multipath has.
+const SAE_ASSOCID_ANY: u32 = 0;
+const SAE_ASSOCID_ALL: u32 = u32::MAX;
+
 /// Implements `connectx` with `bind`, `connect`, and `writev`. Refuses a source
 /// interface because binding to a different interface would be incorrect.
 ///
@@ -972,9 +980,8 @@ unsafe extern "C" fn connectx(
         return rc;
     }
     if !connid.is_null() {
-        // SAFETY: the caller's slot. `SAE_CONNID_ANY` is the only connection
-        // this socket has, there being no association to number it within.
-        unsafe { connid.write(0) };
+        // SAFETY: the caller's slot.
+        unsafe { connid.write(SAE_CONNID_ONLY) };
     }
     if iov.is_null() || iovcnt == 0 {
         return 0;
@@ -992,6 +999,85 @@ unsafe extern "C" fn connectx(
         unsafe { len.write(written as usize) };
     }
     0
+}
+
+/// `int disconnectx(int s, sae_associd_t aid, sae_connid_t cid)`
+///
+/// Darwin's TCP and UDP answer it, ignoring `cid` because each has only one
+/// connection; every other protocol refuses it.
+///
+/// FIXME (ACCURACY): a TCP disconnect is a `shutdown`, which sends a FIN where
+/// Darwin resets a connection with unread data or a zero linger, and leaves
+/// unread data to be received where Darwin discards it. A UDP disconnect keeps
+/// an address the socket was explicitly bound to where Darwin clears it.
+unsafe extern "C" fn disconnectx(fd: i32, aid: u32, _cid: u32) -> i32 {
+    let Some((family, kind)) = family_and_type(fd) else {
+        return -1;
+    };
+    if !matches!(family, libc::AF_INET | libc::AF_INET6)
+        || !matches!(kind, libc::SOCK_STREAM | libc::SOCK_DGRAM)
+    {
+        crate::errno::set_guest(crate::errno::DARWIN_EOPNOTSUPP);
+        return -1;
+    }
+    if aid != SAE_ASSOCID_ANY && aid != SAE_ASSOCID_ALL {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    if kind == libc::SOCK_STREAM {
+        // SAFETY: a call on a descriptor number.
+        if unsafe { libc::shutdown(fd, libc::SHUT_RDWR) } < 0 {
+            // Darwin closes a connection that never was without complaint.
+            return match crate::errno::get() {
+                libc::ENOTCONN => 0,
+                _ => -1,
+            };
+        }
+        return 0;
+    }
+    // SAFETY: a zeroed `sockaddr_storage` is a valid empty address.
+    let mut peer: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = size_of_val(&peer) as libc::socklen_t;
+    // SAFETY: a local to receive the address.
+    if unsafe { libc::getpeername(fd, (&raw mut peer).cast(), &raw mut len) } < 0 {
+        return -1;
+    }
+    // SAFETY: as above.
+    let mut unspecified: libc::sockaddr = unsafe { std::mem::zeroed() };
+    unspecified.sa_family = libc::AF_UNSPEC as libc::sa_family_t;
+    // SAFETY: an address this function owns, at its own length.
+    unsafe {
+        libc::connect(
+            fd,
+            &raw const unspecified,
+            size_of_val(&unspecified) as libc::socklen_t,
+        )
+    }
+}
+
+/// The host address family and `SOCK_*` type of socket `fd`, or `None` with
+/// `errno` set.
+fn family_and_type(fd: i32) -> Option<(i32, i32)> {
+    // SAFETY: a zeroed `sockaddr_storage` is a valid empty address.
+    let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = size_of_val(&address) as libc::socklen_t;
+    // SAFETY: a local to receive the address.
+    if unsafe { libc::getsockname(fd, (&raw mut address).cast(), &raw mut len) } < 0 {
+        return None;
+    }
+    let mut kind = 0i32;
+    let mut len = size_of::<i32>() as libc::socklen_t;
+    // SAFETY: a local to receive the type.
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&raw mut kind).cast(),
+            &raw mut len,
+        )
+    };
+    (rc == 0).then_some((i32::from(address.ss_family), kind))
 }
 
 // Not in the `libc` crate on any platform, so declared here. Both take an
@@ -1048,6 +1134,7 @@ exports::exports! {
         "writev" => writev,
         "sendfile" => sendfile,
         "connectx" => connectx,
+        "disconnectx" => disconnectx,
         "socket" => socket,
         "socketpair" => socketpair,
         "bind" => bind,
@@ -1625,5 +1712,66 @@ mod tests {
             core::mem::size_of::<libc::msghdr>() > core::mem::size_of::<MsgHdr>(),
             "this host's struct msghdr is Darwin-shaped after all"
         );
+    }
+    /// A TCP disconnect ends the connection the way a close would, so the
+    /// peer reads the end of the stream.
+    #[test]
+    fn disconnectx_ends_a_tcp_connection() {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let ours = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut theirs, _) = listener.accept().unwrap();
+        // SAFETY: a live socket.
+        assert_eq!(
+            unsafe { disconnectx(ours.as_raw_fd(), SAE_ASSOCID_ANY, 0) },
+            0
+        );
+        let mut byte = [0u8];
+        assert_eq!(theirs.read(&mut byte).unwrap(), 0);
+    }
+
+    /// A UDP disconnect dissolves the association, and a second has nothing
+    /// left to dissolve.
+    #[test]
+    fn disconnectx_dissolves_a_udp_association() {
+        use std::os::fd::AsRawFd;
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket.connect("127.0.0.1:9").unwrap();
+        let fd = socket.as_raw_fd();
+        // SAFETY: a live socket.
+        assert_eq!(
+            unsafe { disconnectx(fd, SAE_ASSOCID_ALL, SAE_CONNID_ONLY) },
+            0
+        );
+        assert!(socket.peer_addr().is_err());
+        // SAFETY: as above.
+        assert_eq!(unsafe { disconnectx(fd, SAE_ASSOCID_ANY, 0) }, -1);
+        assert_eq!(crate::errno::get(), libc::ENOTCONN);
+    }
+
+    #[test]
+    fn disconnectx_refuses_an_association_a_socket_cannot_have() {
+        use std::os::fd::AsRawFd;
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        // SAFETY: a live socket.
+        assert_eq!(unsafe { disconnectx(socket.as_raw_fd(), 7, 0) }, -1);
+        assert_eq!(crate::errno::get(), libc::EINVAL);
+    }
+
+    /// Darwin's local sockets have no disconnect, and the guest is told so in
+    /// Darwin's own number, which this host would otherwise call `ENOTSUP`.
+    #[test]
+    fn disconnectx_is_not_supported_on_a_local_socket() {
+        let (one, other) = pair();
+        // SAFETY: a live socket.
+        assert_eq!(unsafe { disconnectx(one, SAE_ASSOCID_ANY, 0) }, -1);
+        assert_eq!(crate::errno::guest_errno(), crate::errno::DARWIN_EOPNOTSUPP);
+        crate::errno::set(0);
+        // SAFETY: descriptors this test opened.
+        unsafe {
+            libc::close(one);
+            libc::close(other);
+        }
     }
 }

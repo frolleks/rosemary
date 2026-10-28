@@ -179,6 +179,7 @@ pub const NAMES: &[(&str, &str)] = &[
     ("inet_pton", SOCKET),
     ("inet_ntop", SOCKET),
     ("connectx", SOCKET),
+    ("disconnectx", SOCKET),
     // Not socket calls, and here for what they do to a socket: `SO_NOSIGPIPE` is a
     // property of the descriptor on Darwin and of the call here, and neither takes
     // flags. See `crate::net::socket`.
@@ -366,9 +367,8 @@ mod tests {
         // itself was here until `crate::dirent` answered it, and is asserted
         // the other way round below.
         assert_eq!(reason("getdirentries"), Some(DIRENT));
-        // A Mach call that maps another task's memory into this one, which
-        // `crate::mach` does not answer.
-        assert_eq!(reason("mach_vm_remap"), Some(MACH));
+        // A Mach call that `crate::mach` does not answer.
+        assert_eq!(reason("mach_vm_purgable_control"), Some(MACH));
         assert_eq!(
             reason("strlen"),
             None,
@@ -400,6 +400,7 @@ mod tests {
             "mach_vm_read",
             "mach_vm_write",
             "mach_vm_protect",
+            "mach_vm_remap",
             "dispatch_once_f",
             // The libdispatch this crate implements, which the `dispatch_` prefix
             // would otherwise deny along with the rest of the family.
@@ -417,9 +418,9 @@ mod tests {
         // And the families around them are still shut: a member of one that this
         // crate has *not* implemented is refused rather than passed through.
         assert!(contains("dispatch_io_create"));
-        // The half of Mach that is still refused: mapping another task's
-        // memory, and ending it.
-        assert!(contains("mach_vm_remap"));
+        // The half of Mach that is still refused: purgeable memory, and ending
+        // another task.
+        assert!(contains("mach_vm_purgable_control"));
         assert!(contains("task_terminate"));
         for name in ["task_for_pid", "task_threads", "pid_for_task"] {
             assert!(!contains(name), "{name} is answered by the process server");

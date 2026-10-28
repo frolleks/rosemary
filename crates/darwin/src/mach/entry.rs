@@ -222,6 +222,13 @@ fn mapped_at(start: u64, len: u64) -> Option<(Arc<Object>, u64, u64, i32)> {
     (covered >= end).then_some((object, offset, mapped_end, protection))
 }
 
+/// The object all of `[start, start + len)` maps, through one mapping of it,
+/// and its offset at `start`. `None` for memory a second mapping cannot share.
+pub fn shared_range(start: u64, len: u64) -> Option<(Arc<Object>, u64)> {
+    let (object, offset, mapped_end, _) = mapped_at(start, len)?;
+    (start + len <= mapped_end).then_some((object, offset))
+}
+
 /// Say once what was refused, because the alternative is a caller left with a
 /// bare `KERN_INVALID_ARGUMENT` for a call that works on Darwin.
 fn unsupported(why: std::fmt::Arguments) {
