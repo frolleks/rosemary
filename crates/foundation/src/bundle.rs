@@ -859,7 +859,7 @@ pub mod cf {
     /// `CFBundleGetFunctionPointerForName`.
     ///
     /// A `Get`, so not retained: every bundle here lives for the process.
-    unsafe extern "C" fn CFBundleGetBundleWithIdentifier(identifier: Id) -> Id {
+    pub(crate) unsafe extern "C" fn CFBundleGetBundleWithIdentifier(identifier: Id) -> Id {
         if identifier.is_null() {
             return std::ptr::null_mut();
         }
@@ -1352,6 +1352,13 @@ pub(crate) mod class {
             return std::ptr::null_mut();
         };
         at_path(class, guest)
+    }
+
+    /// `+bundleWithIdentifier:`, which finds the bundles
+    /// `CFBundleGetBundleWithIdentifier` does - the two are one object here.
+    unsafe extern "C" fn bundle_with_identifier(_class: Id, _sel: Sel, identifier: Id) -> Id {
+        // SAFETY: an `NSString`, or nil.
+        unsafe { crate::bundle::cf::CFBundleGetBundleWithIdentifier(identifier) }
     }
 
     /// `+bundleWithURL:`: `+bundleWithPath:` for a `file:` URL, nil for any
@@ -1873,6 +1880,7 @@ pub(crate) mod class {
             "bundleForClass:" => bundle_for_class, c"@24@0:8#16";
             "pathsForResourcesOfType:inDirectory:" => class_paths_for_resources_of_type, c"@32@0:8@16@24";
             "bundleWithPath:" => bundle_with_path, c"@24@0:8@16";
+            "bundleWithIdentifier:" => bundle_with_identifier, c"@24@0:8@16";
             "bundleWithURL:" => bundle_with_url, c"@24@0:8@16"
         });
     }
