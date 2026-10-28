@@ -4538,7 +4538,7 @@ unsafe extern "C" fn zero(_receiver: Id, _sel: Sel) -> isize {
     0
 }
 
-unsafe extern "C" fn shared_color_space(_receiver: Id, _sel: Sel) -> Id {
+pub(crate) unsafe extern "C" fn shared_color_space(_receiver: Id, _sel: Sel) -> Id {
     shared_instance(c"NSColorSpace")
 }
 
@@ -4550,11 +4550,12 @@ unsafe extern "C" fn cg_color_space(_receiver: Id, _sel: Sel) -> *const c_void {
         as *const c_void
 }
 
-/// `-[NSColorSpace ICCProfileData]`: nil, the documented answer for a space
-/// with no profile, as `-[NSScreen colorSpace]` is nil for the same reason - see
-/// `crate::screen`. A caller takes its sRGB fallback, which is what this is.
+/// `-[NSColorSpace ICCProfileData]`: the one space's sRGB profile, kept for
+/// the process like the space itself.
 unsafe extern "C" fn icc_profile_data(_receiver: Id, _sel: Sel) -> Id {
-    std::ptr::null_mut()
+    static DATA: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *DATA.get_or_init(|| corefoundation::collections::new_data(crate::icc::srgb_profile()) as usize)
+        as Id
 }
 
 pub(crate) fn install() {

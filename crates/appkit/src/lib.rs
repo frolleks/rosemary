@@ -57,6 +57,7 @@ mod visual_format;
 pub use chrome::fonts;
 pub mod geometry;
 pub mod graphics;
+mod icc;
 pub mod icon;
 pub mod image;
 mod input_context;
