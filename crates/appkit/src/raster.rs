@@ -32,6 +32,14 @@ impl Bitmap {
     }
 }
 
+/// The uniform type identifiers of the containers [`decode`] reads.
+pub const TYPE_IDENTIFIERS: &[&str] = &[
+    "com.microsoft.bmp",
+    "public.tiff",
+    "public.png",
+    "com.apple.icns",
+];
+
 /// Decode whatever `bytes` is, or `None` for a container this cannot read.
 pub fn decode(bytes: &[u8]) -> Option<Bitmap> {
     if bytes.starts_with(b"BM") {
