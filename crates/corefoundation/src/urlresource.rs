@@ -81,6 +81,14 @@ pub const KEYS: &[(&str, &str)] = &[
     ("_NSURLVolumeIsInternalKey", VOLUME_IS_INTERNAL),
     ("_kCFURLVolumeIsLocalKey", VOLUME_IS_LOCAL),
     ("_NSURLVolumeIsLocalKey", VOLUME_IS_LOCAL),
+    (
+        "_kCFURLVolumeSupportsCaseSensitiveNamesKey",
+        VOLUME_SUPPORTS_CASE_SENSITIVE_NAMES,
+    ),
+    (
+        "_NSURLVolumeSupportsCaseSensitiveNamesKey",
+        VOLUME_SUPPORTS_CASE_SENSITIVE_NAMES,
+    ),
     // An icon is an `NSImage`, which AppKit answers if it is loaded.
     ("_kCFURLEffectiveIconKey", EFFECTIVE_ICON),
     ("_NSURLEffectiveIconKey", EFFECTIVE_ICON),
@@ -134,6 +142,7 @@ const PARENT_DIRECTORY_URL: &str = "NSURLParentDirectoryURLKey";
 const TAG_NAMES: &str = "NSURLTagNamesKey";
 const VOLUME_IS_INTERNAL: &str = "NSURLVolumeIsInternalKey";
 const VOLUME_IS_LOCAL: &str = "NSURLVolumeIsLocalKey";
+const VOLUME_SUPPORTS_CASE_SENSITIVE_NAMES: &str = "NSURLVolumeSupportsCaseSensitiveNamesKey";
 pub const EFFECTIVE_ICON: &str = "NSURLEffectiveIconKey";
 const TYPE_NAMED_PIPE: &str = "NSFileTypeNamedPipe";
 const TYPE_CHARACTER_SPECIAL: &str = "NSFileTypeCharacterSpecial";
@@ -355,6 +364,9 @@ pub fn property(guest: &str, key: &str) -> Option<CFTypeRef> {
             false,
         ),
         VOLUME_IS_INTERNAL | VOLUME_IS_LOCAL => crate::collections::boolean(true),
+        // Every guest path falls back to a case-folded lookup (`prefix::ns::fold`),
+        // so a volume reads as case-insensitive, as a Mac's default one is.
+        VOLUME_SUPPORTS_CASE_SENSITIVE_NAMES => crate::collections::boolean(false),
         _ => return None,
     })
 }
@@ -806,6 +818,13 @@ mod tests {
         let (total, available) = capacity(&volume).expect("a mounted filesystem has a size");
         assert!(total > 0, "a volume with no bytes at all");
         assert!(available <= total);
+    }
+
+    #[test]
+    fn a_volume_reports_case_insensitive_names() {
+        crate::bootstrap();
+        let value = property("/", VOLUME_SUPPORTS_CASE_SENSITIVE_NAMES);
+        assert_eq!(value, Some(crate::collections::boolean(false)));
     }
 
     #[test]
