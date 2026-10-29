@@ -86,6 +86,7 @@ mod scroll;
 mod segmented;
 mod sheet;
 mod slider;
+mod split;
 mod status;
 mod tab;
 mod table;
@@ -142,6 +143,7 @@ pub fn bootstrap() {
         scroll::install();
         segmented::install();
         slider::install();
+        split::install();
         matrix::install();
         tab::install();
         table::install();

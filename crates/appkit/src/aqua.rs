@@ -1199,6 +1199,18 @@ pub(crate) fn separator(p: &Painter, r: NSRect) {
     p.rect(rect(r.origin.x, y, r.size.width, 1.0), p.palette.edge);
 }
 
+/// The side of the round dimple in a thick split view divider.
+const DIMPLE: f64 = 6.0;
+
+/// A thick split view divider's dimple, centred in `r`.
+pub(crate) fn split_dimple(p: &Painter, r: NSRect) {
+    let side = DIMPLE.min(r.size.width).min(r.size.height);
+    let x = r.origin.x + (r.size.width - side) / 2.0;
+    let y = r.origin.y + (r.size.height - side) / 2.0;
+    p.ellipse(rect(x, y, side, side));
+    p.fill(p.palette.mark_disabled);
+}
+
 /// A window's grow box: three diagonal ridges in its corner.
 pub(crate) fn grow_box(p: &Painter, r: NSRect) {
     let (x1, y1) = (
