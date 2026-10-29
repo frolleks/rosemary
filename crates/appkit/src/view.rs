@@ -2790,6 +2790,38 @@ unsafe extern "C" fn next_key_view(receiver: Id, _sel: Sel) -> Id {
         .map_or(std::ptr::null_mut(), |(_, next)| *next as Id)
 }
 
+/// The first view after `receiver` in the key view loop that can become key,
+/// or nil when the loop returns to `receiver` or ends first.
+unsafe extern "C" fn next_valid_key_view(receiver: Id, _sel: Sel) -> Id {
+    // SAFETY: `-nextKeyView` is `id (id, SEL)`, `-canBecomeKeyView` is `BOOL (id, SEL)`.
+    let (next, can_become_key): (
+        unsafe extern "C" fn(Id, Sel) -> Id,
+        unsafe extern "C" fn(Id, Sel) -> u8,
+    ) = unsafe {
+        (
+            std::mem::transmute(objc::msg::entry()),
+            std::mem::transmute(objc::msg::entry()),
+        )
+    };
+    let (next_sel, can_become_key_sel) = (
+        objc::sel::get("nextKeyView"),
+        objc::sel::get("canBecomeKeyView"),
+    );
+    // A loop that never comes back to `receiver` still ends: stop at a view
+    // already visited.
+    let mut visited = Vec::new();
+    // SAFETY: each candidate is a live view the loop links to.
+    let mut candidate = unsafe { next(receiver, next_sel) };
+    while !candidate.is_null() && candidate != receiver && !visited.contains(&candidate) {
+        if unsafe { can_become_key(candidate, can_become_key_sel) } != 0 {
+            return candidate;
+        }
+        visited.push(candidate);
+        candidate = unsafe { next(candidate, next_sel) };
+    }
+    std::ptr::null_mut()
+}
+
 /// `(view, retained tool tip)`. Kept for `-toolTip`; nothing here shows one.
 fn tool_tips() -> &'static std::sync::Mutex<Vec<(usize, usize)>> {
     static TIPS: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
@@ -3491,6 +3523,7 @@ pub(crate) fn install() {
         "setToolTip:" => set_tool_tip, c"v24@0:8@16";
         "toolTip" => tool_tip, c"@16@0:8";
         "nextKeyView" => next_key_view, c"@16@0:8";
+        "nextValidKeyView" => next_valid_key_view, c"@16@0:8";
         "viewWithTag:" => view_with_tag, c"@24@0:8q16";
         "window" => window, c"@16@0:8";
         "isInFullScreenMode" => is_in_full_screen_mode, c"c16@0:8";
@@ -5912,6 +5945,43 @@ mod tests {
         assert!(unsafe { presentation_frame(orphan) }.is_none());
         // SAFETY: null is one of the values this accepts.
         assert!(unsafe { presentation_frame(std::ptr::null_mut()) }.is_none());
+    }
+
+    #[test]
+    fn next_valid_key_view_skips_views_that_cannot_become_key() {
+        crate::bootstrap();
+        unsafe extern "C" fn refuse(_receiver: Id, _sel: Sel) -> u8 {
+            0
+        }
+        let base = objc::class::lookup(c"NSView").expect("NSView");
+        let class =
+            objc::class::allocate_pair(Some(base), c"KeyViewRefuser", 0).expect("a subclass");
+        class.add_method(
+            objc::sel::get("canBecomeKeyView"),
+            refuse as objc::class::Imp,
+            c"c16@0:8",
+        );
+        objc::class::register_pair(class);
+        let first = view(rect(0.0, 0.0, 10.0, 10.0));
+        let skipped = objc::object::create_instance(class, 0);
+        let last = view(rect(0.0, 0.0, 10.0, 10.0));
+        let set = objc::sel::get("setNextKeyView:");
+        let valid = objc::sel::get("nextValidKeyView");
+        // SAFETY: views of this crate's.
+        unsafe {
+            set_next_key_view(first, set, skipped);
+            set_next_key_view(skipped, set, last);
+            assert_eq!(next_valid_key_view(first, valid), last);
+            // A loop back to `first` has no other view that can become key.
+            set_next_key_view(skipped, set, first);
+            assert!(next_valid_key_view(first, valid).is_null());
+            set_next_key_view(first, set, std::ptr::null_mut());
+            set_next_key_view(skipped, set, std::ptr::null_mut());
+            set_next_key_view(last, set, std::ptr::null_mut());
+        }
+        objc::arc::release(first);
+        objc::arc::release(skipped);
+        objc::arc::release(last);
     }
 
     #[test]
