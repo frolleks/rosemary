@@ -484,24 +484,37 @@ unsafe extern "C" fn sorted_array_using_function(
     }
 }
 
-unsafe extern "C" fn sorted_array_using_comparator(receiver: Id, _sel: Sel, block: Id) -> Id {
-    // SAFETY: an array.
-    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
-        return std::ptr::null_mut();
-    };
-    // SAFETY: null or a block.
+/// `values` ordered by an `NSComparator` block, stably; `false` for a nil one.
+///
+/// # Safety
+/// `block` is null or a block of type `NSComparisonResult (^)(id, id)`.
+unsafe fn sort_by_comparator(values: &mut [CFTypeRef], block: Id) -> bool {
+    // SAFETY: null or a block, per the caller.
     let Some(invoke) = (unsafe { objc::block::invoke(block) }) else {
-        return std::ptr::null_mut();
+        return false;
     };
-    // SAFETY: the block is `NSComparisonResult (^)(id, id)`.
+    // SAFETY: the block is `NSComparisonResult (^)(id, id)`, per the caller.
     let call: unsafe extern "C" fn(Id, Id, Id) -> isize = unsafe { std::mem::transmute(invoke) };
-    // Sorted out of place: the block may read the array it is sorting.
-    let mut values = array.values.clone();
+    // SAFETY: the guest's block, given two of the array's objects.
     values.sort_by(|a, b| match unsafe { call(block, *a as Id, *b as Id) } {
         ..0 => std::cmp::Ordering::Less,
         0 => std::cmp::Ordering::Equal,
         _ => std::cmp::Ordering::Greater,
     });
+    true
+}
+
+unsafe extern "C" fn sorted_array_using_comparator(receiver: Id, _sel: Sel, block: Id) -> Id {
+    // SAFETY: an array.
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return std::ptr::null_mut();
+    };
+    // Sorted out of place: the block may read the array it is sorting.
+    let mut values = array.values.clone();
+    // SAFETY: null or an `NSComparator`.
+    if !unsafe { sort_by_comparator(&mut values, block) } {
+        return std::ptr::null_mut();
+    }
     // SAFETY: a fresh array follows the convenience-constructor rule.
     unsafe {
         api::CFAutorelease(collections::new_array(
@@ -531,6 +544,26 @@ unsafe extern "C" fn sort_using_function(
         sort_by_function(&mut values, compare, context);
     }
     // SAFETY: the same array; the comparator is done with it.
+    if let Some(array) = unsafe { collections::array(receiver as CFTypeRef) } {
+        array.values = values;
+    }
+}
+
+unsafe extern "C" fn sort_using_comparator(receiver: Id, _sel: Sel, block: Id) {
+    // SAFETY: an array.
+    let Some(array) = (unsafe { collections::array(receiver as CFTypeRef) }) else {
+        return;
+    };
+    if !array.mutable {
+        immutable("NSArray", "sortUsingComparator:");
+    }
+    // Sorted out of place: the block may read the array it is sorting.
+    let mut values = array.values.clone();
+    // SAFETY: null or an `NSComparator`.
+    if !unsafe { sort_by_comparator(&mut values, block) } {
+        return;
+    }
+    // SAFETY: the same array; the block is done with it.
     if let Some(array) = unsafe { collections::array(receiver as CFTypeRef) } {
         array.values = values;
     }
@@ -2960,6 +2993,7 @@ pub(crate) fn install() {
         "replaceObjectAtIndex:withObject:" => replace_object_at_index, c"v32@0:8Q16@24";
         "setObject:atIndexedSubscript:" => set_object_at_indexed_subscript, c"v32@0:8@16Q24";
         "sortUsingFunction:context:" => sort_using_function, c"v32@0:8^?16^v24";
+        "sortUsingComparator:" => sort_using_comparator, c"v24@0:8@?16";
         "removeAllObjects" => remove_all_objects, c"v16@0:8";
         "setArray:" => set_array, c"v24@0:8@16";
     });
@@ -3162,6 +3196,28 @@ mod tests {
             base64_decode(b"aGV5\naGk=", true).as_deref(),
             Some(&b"heyhi"[..])
         );
+    }
+
+    #[test]
+    fn sort_using_comparator_orders_a_mutable_array_in_place() {
+        crate::bootstrap();
+        unsafe extern "C" fn compare(_block: Id, a: Id, b: Id) -> isize {
+            // SAFETY: the array holds only strings.
+            unsafe { api::CFStringCompare(a as CFTypeRef, b as CFTypeRef, 0) }
+        }
+        let block = crate::block::fake::block(compare as *const std::ffi::c_void);
+        let strings = ["c", "a", "b"].map(|s| crate::string::from_str(s) as CFTypeRef);
+        let array = collections::new_array(&strings, Policy::from_type_callbacks(), true) as Id;
+        // SAFETY: a mutable array and an `NSComparator`.
+        unsafe { sort_using_comparator(array, objc::sel::get("sortUsingComparator:"), block.id()) };
+        let at = objc::sel::get("objectAtIndex:");
+        // SAFETY: an array of three.
+        let sorted = [0, 1, 2].map(|i| unsafe { object_at_index(array, at, i) } as CFTypeRef);
+        assert_eq!(sorted, [strings[1], strings[2], strings[0]]);
+        objc::arc::release(array);
+        for string in strings {
+            objc::arc::release(string as Id);
+        }
     }
 
     #[test]
