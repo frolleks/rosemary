@@ -381,17 +381,6 @@ pub unsafe extern "C" fn NSBestDepth(
     WINDOW_DEPTH_24_BIT_RGB
 }
 
-/// `-[NSScreen colorSpace]`, an `NSColorSpace`.
-///
-/// Nil, and deliberately. A colour space here would have to be one this tree can
-/// convert *through*, and `crate::color`'s note says why there is no conversion:
-/// every colour in this runtime is already in the space its only consumer wants.
-/// Nil is the documented answer for a screen whose profile cannot be read, and a
-/// caller takes its "assume sRGB" branch - which is what the display is.
-unsafe extern "C" fn color_space(_receiver: Id, _sel: Sel) -> Id {
-    std::ptr::null_mut()
-}
-
 /// AppKit's user-space unit is 1/72 inch, so an unscaled display is 72 dpi by
 /// definition rather than by measurement.
 const POINTS_PER_INCH: f64 = 72.0;
@@ -1188,7 +1177,7 @@ pub(crate) fn install() {
         "maximumRefreshInterval" => refresh_interval, c"d16@0:8";
         "displayUpdateGranularity" => refresh_interval, c"d16@0:8";
         "depth" => depth, c"i16@0:8";
-        "colorSpace" => color_space, c"@16@0:8";
+        "colorSpace" => crate::backing::shared_color_space, c"@16@0:8";
         "deviceDescription" => device_description, c"@16@0:8";
         "localizedName" => localized_name, c"@16@0:8";
         "safeAreaInsets" => safe_area_insets, c"{NSEdgeInsets=dddd}16@0:8";

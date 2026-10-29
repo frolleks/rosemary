@@ -66,18 +66,6 @@ static CURRENT_EVENT: AtomicUsize = AtomicUsize::new(0);
 static POSTED_SOURCE: std::sync::OnceLock<std::sync::Arc<corefoundation::runloop::Source>> =
     std::sync::OnceLock::new();
 
-/// The main run loop's source for the main dispatch queue, which also exists
-/// only to end its wait: `turn` drains the queue once the loop returns.
-static MAIN_QUEUE_SOURCE: std::sync::OnceLock<std::sync::Arc<corefoundation::runloop::Source>> =
-    std::sync::OnceLock::new();
-
-fn main_queue_submitted() {
-    if let Some(source) = MAIN_QUEUE_SOURCE.get() {
-        source.signal();
-        corefoundation::runloop::main().wake();
-    }
-}
-
 /// Nothing to do: the events are sent by `turn`, or taken by
 /// `-nextEventMatchingMask:`, once the loop returns for this source.
 unsafe extern "C" fn posted_source_fired(_info: *mut c_void) {}
@@ -518,12 +506,6 @@ fn register_common_modes() {
         let source = POSTED_SOURCE
             .get_or_init(|| corefoundation::runloop::new_source(Some(posted_source_fired), 0));
         loop_.add_source(source, corefoundation::runloop::COMMON_MODES);
-        // Drained by `service_run_loop`, not by the source, so a main-queue block
-        // that runs a nested loop does not start the next one inside it.
-        let source = MAIN_QUEUE_SOURCE
-            .get_or_init(|| corefoundation::runloop::new_source(Some(posted_source_fired), 0));
-        loop_.add_source(source, corefoundation::runloop::COMMON_MODES);
-        darwin::dispatch::queue::set_main_wake_hook(main_queue_submitted);
     });
 }
 
@@ -563,18 +545,17 @@ unsafe fn turn_in_pool(receiver: Id, mode: &str) {
     unsafe { service_run_loop(mode, 0.002) };
 }
 
-/// Drain the main queue and run the main run loop in `mode` for `seconds`.
+/// Run the main run loop in `mode` for `seconds`, which also drains the main
+/// queue in the common modes.
 ///
-/// The main queue is drained here because this is the main thread: a block sent
-/// to it with `dispatch_async` runs nowhere else. The slice is short because the
-/// run loop's timers are what drive a frame - see `corevideo` - and the window
-/// system is pumped between slices, not by the loop.
+/// The slice is short because the run loop's timers are what drive a frame -
+/// see `corevideo` - and the window system is pumped between slices, not by the
+/// loop.
 ///
 /// # Safety
 ///
 /// Called on the main thread, from a place a run loop callback may reenter.
 unsafe fn service_run_loop(mode: &str, seconds: f64) {
-    darwin::dispatch::queue::drain_main();
     // Returning after a source lets an event posted from another thread be sent
     // now rather than when the slice ends - see `POSTED_SOURCE`.
     let result = corefoundation::runloop::main().run_in_mode(mode, seconds, true);
@@ -776,8 +757,53 @@ pub(crate) fn check_last_window_closed() {
 /// window to bring forward.
 unsafe extern "C" fn activate(_receiver: Id, _sel: Sel, _flag: u8) {}
 
-/// `-setActivationPolicy:`, which answers that it succeeded.
-unsafe extern "C" fn set_activation_policy(_receiver: Id, _sel: Sel, _policy: isize) -> u8 {
+/// `NSApplicationActivationPolicy`.
+mod activation_policy {
+    pub const REGULAR: isize = 0;
+    pub const ACCESSORY: isize = 1;
+    pub const PROHIBITED: isize = 2;
+}
+
+/// What `-setActivationPolicy:` was last told, or `UNSET` before then.
+static ACTIVATION_POLICY: std::sync::atomic::AtomicIsize =
+    std::sync::atomic::AtomicIsize::new(UNSET_POLICY);
+const UNSET_POLICY: isize = -1;
+
+/// The policy Launch Services starts a bundle with, from its `Info.plist`.
+fn initial_activation_policy() -> isize {
+    use corefoundation::plist::Value;
+    let claims = |key: &str| {
+        foundation::bundle::main()
+            .and_then(|bundle| bundle.info.get(key))
+            .is_some_and(|value| match value {
+                Value::Bool(set) => *set,
+                Value::Integer(set) => *set != 0,
+                Value::String(set) => matches!(set.as_str(), "1" | "YES" | "true"),
+                _ => false,
+            })
+    };
+    match (claims("LSBackgroundOnly"), claims("LSUIElement")) {
+        (true, _) => activation_policy::PROHIBITED,
+        (_, true) => activation_policy::ACCESSORY,
+        _ => activation_policy::REGULAR,
+    }
+}
+
+/// `-activationPolicy`, read back as it was set.
+unsafe extern "C" fn activation_policy_of(_receiver: Id, _sel: Sel) -> isize {
+    match ACTIVATION_POLICY.load(std::sync::atomic::Ordering::Acquire) {
+        UNSET_POLICY => initial_activation_policy(),
+        policy => policy,
+    }
+}
+
+/// `-setActivationPolicy:`, kept so it reads back; there is no Dock or menu
+/// bar here for it to change.
+unsafe extern "C" fn set_activation_policy(_receiver: Id, _sel: Sel, policy: isize) -> u8 {
+    if !(activation_policy::REGULAR..=activation_policy::PROHIBITED).contains(&policy) {
+        return 0;
+    }
+    ACTIVATION_POLICY.store(policy, std::sync::atomic::Ordering::Release);
     1
 }
 
@@ -1170,6 +1196,23 @@ unsafe fn send_if_implemented(target: Id, selector: &str, argument: Id) {
     unsafe { f(target, sel, argument) };
 }
 
+/// `BOOL NSApplicationLoad(void)`: makes sure `NSApp` exists - the program's
+/// own, if it made one - so Cocoa can be used from code that did not start
+/// with `NSApplicationMain`.
+#[expect(non_snake_case, reason = "the C spelling is the interface")]
+pub unsafe extern "C" fn NSApplicationLoad() -> u8 {
+    crate::bootstrap();
+    let class = objc::class::lookup(c"NSApplication").expect("declared during bootstrap");
+    // SAFETY: `+sharedApplication` is `id (Class, SEL)`, installed on this class.
+    let app = unsafe {
+        shared_application(
+            objc::class::ptr(class) as Id,
+            objc::sel::get("sharedApplication"),
+        )
+    };
+    u8::from(!app.is_null())
+}
+
 /// `int NSApplicationMain(int argc, const char *argv[])`.
 ///
 /// The arguments are ignored, as Apple's are: everything it needs is in the
@@ -1276,6 +1319,7 @@ pub(crate) fn install() {
         "terminate:" => terminate, c"v24@0:8@16";
         "activateIgnoringOtherApps:" => activate, c"v20@0:8c16";
         "setActivationPolicy:" => set_activation_policy, c"c24@0:8q16";
+        "activationPolicy" => activation_policy_of, c"q16@0:8";
         "currentSystemPresentationOptions" => presentation_options, c"Q16@0:8";
         "presentationOptions" => presentation_options, c"Q16@0:8";
         "setPresentationOptions:" => set_presentation_options, c"v24@0:8Q16";
@@ -1328,7 +1372,8 @@ pub(crate) fn install() {
         "stopModal" => stop_modal, c"v16@0:8";
         "stopModalWithCode:" => stop_modal_with_code, c"v24@0:8q16";
         "occlusionState" => crate::window::visible_occlusion, c"Q16@0:8";
-        "endSheet:" => ignored_sender, c"v24@0:8@16";
+        "endSheet:" => crate::sheet::application_end_sheet, c"v24@0:8@16";
+        "endSheet:returnCode:" => crate::sheet::application_end_sheet_with_code, c"v32@0:8@16q24";
         "abortModal" => stop_modal, c"v16@0:8";
     });
 }

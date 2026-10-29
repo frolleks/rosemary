@@ -38,7 +38,7 @@ use crate::process::{
     Audit, Descriptor, Footprint, Identity, Process, Region, State, Thread, Usage,
 };
 use crate::socket::Peer;
-use crate::system::{CpuTicks, Memory, page_size};
+use crate::system::{CpuTicks, Memory, Swap, page_size};
 
 /// `NODEV`: no controlling terminal.
 const NODEV: u64 = u64::MAX;
@@ -298,6 +298,33 @@ pub fn physical_cores() -> Option<u32> {
 
 pub fn cpu_brand() -> Option<String> {
     sysctl::string_by_name(c"hw.model")
+}
+
+/// FreeBSD keeps no count of sockets apart from its topology description.
+pub fn packages() -> Option<u32> {
+    None
+}
+
+pub fn cpu_frequency() -> Option<u64> {
+    const HZ_PER_MHZ: u64 = 1_000_000;
+    sysctl::by_name::<libc::c_int>(c"hw.clockrate")
+        .filter(|&mhz| mhz > 0)
+        .map(|mhz| mhz as u64 * HZ_PER_MHZ)
+}
+
+pub fn booted() -> Option<std::time::SystemTime> {
+    let boot = boot_time()?;
+    let since = std::time::Duration::new(boot.tv_sec as u64, boot.tv_usec as u32 * 1000);
+    Some(std::time::UNIX_EPOCH + since)
+}
+
+/// Swap is reported per device, through `vm.swap_info`, which is not read here.
+pub fn swap() -> Option<Swap> {
+    None
+}
+
+pub fn max_processes() -> Option<u32> {
+    sysctl::by_name::<libc::c_int>(c"kern.maxproc").map(|n| n as u32)
 }
 
 pub fn host_uuid() -> Option<[u8; 16]> {

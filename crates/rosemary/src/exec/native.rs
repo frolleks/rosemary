@@ -196,7 +196,7 @@ impl Native {
             true => darwin::sysctl::GuestArch::Arm64,
             false => darwin::sysctl::GuestArch::X86_64,
         });
-        darwin::sysctl::set_runs_host_instructions(true);
+        darwin::cpu::set_runs_host_instructions(true);
         // The guest's instructions run on this CPU, so its raw syscalls would
         // reach the host kernel under Darwin's numbering.
         match darwin::syscall::setup_syscall_handler() {
@@ -361,6 +361,7 @@ impl Execution for Native {
             // and `GuestStack` owns the aligned, writable frame at `sp`.
             unsafe { enter_unix_thread(entry, sp) }
         }
+        darwin::pthread::commit_main_stack();
         let (argc, argv, envp, apple) = self.main_args();
         self.call(entry, &[argc, argv, envp, apple])
     }

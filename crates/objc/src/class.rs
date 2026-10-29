@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 
 use crate::sel::Sel;
@@ -72,6 +72,9 @@ struct Contents {
     ivars: Vec<&'static Ivar>,
     protocols: Vec<&'static crate::protocol::Protocol>,
     properties: Vec<&'static crate::property::Property>,
+    /// The ARC layouts `class_setIvarLayout` and `class_setWeakIvarLayout` set.
+    ivar_layout: Option<&'static CStr>,
+    weak_ivar_layout: Option<&'static CStr>,
 }
 
 /// A class.
@@ -95,6 +98,8 @@ pub struct Class {
     initialized: AtomicBool,
     /// For a metaclass, the class it is the metaclass of.
     instances: AtomicPtr<Class>,
+    /// `class_getVersion`'s answer.
+    version: AtomicI32,
     contents: RwLock<Contents>,
 }
 
@@ -229,6 +234,8 @@ impl Class {
             registered: AtomicUsize::new(0),
             initialized: AtomicBool::new(false),
             instances: AtomicPtr::new(std::ptr::null_mut()),
+            // What Apple's runtime starts a class at when it realizes one.
+            version: AtomicI32::new(if is_meta { 7 } else { 0 }),
             contents: RwLock::new(Contents::default()),
         };
         let _building = BUILDING.lock().unwrap_or_else(|e| e.into_inner());
@@ -415,6 +422,47 @@ impl Class {
         true
     }
 
+    /// The ivars this class declares itself, in the order they were added.
+    pub fn own_ivars(&self) -> Vec<&'static Ivar> {
+        self.contents
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .ivars
+            .clone()
+    }
+
+    pub fn version(&self) -> i32 {
+        self.version.load(Ordering::Acquire)
+    }
+
+    pub fn set_version(&self, version: i32) {
+        self.version.store(version, Ordering::Release);
+    }
+
+    /// The strong (`weak` false) or weak ivar layout, if one was set.
+    pub fn ivar_layout(&self, weak: bool) -> Option<&'static CStr> {
+        let contents = self.contents.read().unwrap_or_else(|e| e.into_inner());
+        match weak {
+            true => contents.weak_ivar_layout,
+            false => contents.ivar_layout,
+        }
+    }
+
+    /// Set a layout. Only before registration, as with ivars: the layout
+    /// describes them.
+    pub fn set_ivar_layout(&self, weak: bool, layout: Option<&CStr>) -> bool {
+        if self.is_registered() {
+            return false;
+        }
+        let layout = layout.map(|l| &*Box::leak(CString::from(l).into_boxed_c_str()));
+        let mut contents = self.contents.write().unwrap_or_else(|e| e.into_inner());
+        match weak {
+            true => contents.weak_ivar_layout = layout,
+            false => contents.ivar_layout = layout,
+        }
+        true
+    }
+
     /// The ivar this class or a superclass declares under `name`.
     pub fn ivar(&'static self, name: &CStr) -> Option<&'static Ivar> {
         self.chain().find_map(|c| {
@@ -491,6 +539,15 @@ impl Class {
         }
         contents.protocols.push(protocol);
         true
+    }
+
+    /// The protocols this class adopts itself, in the order it adopted them.
+    pub fn own_protocols(&self) -> Vec<&'static crate::protocol::Protocol> {
+        self.contents
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .protocols
+            .clone()
     }
 
     /// Whether this class or a superclass adopts `protocol`.
@@ -615,6 +672,16 @@ thread_local! {
 /// Every registered class, by name.
 static CLASSES: LazyLock<RwLock<HashMap<String, &'static Class>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// Every registered class, in no particular order.
+pub fn registered() -> Vec<&'static Class> {
+    CLASSES
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .copied()
+        .collect()
+}
 
 /// Guards a class pair being built, so two threads cannot allocate the same name.
 static ALLOCATION: Mutex<()> = Mutex::new(());

@@ -95,6 +95,8 @@ pub struct Window {
     window_controller: Id,
     /// `-setHidesOnDeactivate:`, kept so a program reads back what it set.
     hides_on_deactivate: usize,
+    /// `-setExcludedFromWindowsMenu:`, likewise; no Windows menu lists windows.
+    excluded_from_windows_menu: usize,
     /// When this window was last ordered front, from [`ORDERED`]: the stacking
     /// order, which creation order is not.
     ordered: u64,
@@ -1233,10 +1235,9 @@ pub(crate) fn facts(object: Id) -> Option<crate::decor::Facts> {
             .to_string_lossy()
             .into_owned(),
         title_hidden: window.title_visibility == 1,
-        // A transparent titlebar shows the window behind it, which is its
-        // background colour, or AppKit's window background when none was set.
+        // A transparent titlebar shows the window behind it.
         titlebar_color: (window.titlebar_transparent != 0).then(|| {
-            let (r, g, b, a) = background_rgba(object).unwrap_or((0.93, 0.93, 0.93, 1.0));
+            let (r, g, b, a) = background_rgba(object);
             let byte = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
             [byte(r), byte(g), byte(b), byte(a)]
         }),
@@ -2323,6 +2324,7 @@ unsafe extern "C" fn order_out(receiver: Id, _sel: Sel, _sender: Id) {
 /// be keyed by it, and that table is not this crate's to clear.
 pub(crate) unsafe extern "C" fn dealloc(receiver: Id, sel: Sel) {
     crate::event::forget_announced(receiver);
+    crate::sheet::forget(receiver);
     children()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -2584,6 +2586,14 @@ unsafe extern "C" fn set_hides_on_deactivate(receiver: Id, _sel: Sel, value: u8)
     window_of(receiver).hides_on_deactivate = value as usize;
 }
 
+unsafe extern "C" fn is_excluded_from_windows_menu(receiver: Id, _sel: Sel) -> u8 {
+    (window_of(receiver).excluded_from_windows_menu != 0) as u8
+}
+
+unsafe extern "C" fn set_excluded_from_windows_menu(receiver: Id, _sel: Sel, value: u8) {
+    window_of(receiver).excluded_from_windows_menu = value as usize;
+}
+
 unsafe extern "C" fn is_key_window(receiver: Id, _sel: Sel) -> u8 {
     (key_window() == receiver) as u8
 }
@@ -2622,8 +2632,10 @@ unsafe extern "C" fn constrain_frame_rect(
     rect
 }
 
+/// An attached sheet is visible whether or not it has a window of its own:
+/// an alert's is drawn by `crate::dialog`.
 unsafe extern "C" fn is_visible(receiver: Id, _sel: Sel) -> u8 {
-    (window_of(receiver).shown != 0) as u8
+    (window_of(receiver).shown != 0 || crate::sheet::parent_of(receiver).is_some()) as u8
 }
 
 /// `-screen`: the display SDL puts the window on, so per-display answers such
@@ -2696,30 +2708,40 @@ unsafe extern "C" fn set_background_color(receiver: Id, _sel: Sel, color: Id) {
     crate::backing::window_background_changed(receiver);
 }
 
-/// The window's `backgroundColor` as straight RGBA, or `None` when the
-/// program never set one.
-fn background_rgba(window: Id) -> Option<(f64, f64, f64, f64)> {
+/// The window's `backgroundColor` as straight RGBA: `windowBackgroundColor`
+/// in the current appearance when the program never set one.
+fn background_rgba(window: Id) -> (f64, f64, f64, f64) {
     let color = window_of(window).background;
-    // SAFETY: an object the window retained.
-    (!color.is_null()).then(|| unsafe { crate::color::components(color) })
+    match color.is_null() {
+        true => crate::color::named_components(WINDOW_BACKGROUND)
+            .expect("windowBackgroundColor is a named colour"),
+        // SAFETY: an object the window retained.
+        false => unsafe { crate::color::components(color) },
+    }
 }
 
-/// The window's `backgroundColor` as one premultiplied BGRA pixel, or `None`
-/// when the program never set one.
-pub(crate) fn background_pixel(window: Id) -> Option<[u8; 4]> {
-    let (red, green, blue, alpha) = background_rgba(window)?;
+/// The window's `backgroundColor` as one premultiplied BGRA pixel.
+pub(crate) fn background_pixel(window: Id) -> [u8; 4] {
+    let (red, green, blue, alpha) = background_rgba(window);
     let alpha = alpha.clamp(0.0, 1.0);
     let channel = |value: f64| (value.clamp(0.0, 1.0) * alpha * 255.0).round() as u8;
-    Some([
+    [
         channel(blue),
         channel(green),
         channel(red),
         (alpha * 255.0).round() as u8,
-    ])
+    ]
 }
 
+/// The colour a window has until the program sets its own.
+const WINDOW_BACKGROUND: &str = "windowBackgroundColor";
+
 unsafe extern "C" fn background_color(receiver: Id, _sel: Sel) -> Id {
-    window_of(receiver).background
+    let color = window_of(receiver).background;
+    match color.is_null() {
+        true => crate::color::named_color(WINDOW_BACKGROUND).unwrap_or(color),
+        false => color,
+    }
 }
 
 unsafe extern "C" fn set_accepts_mouse_moved(receiver: Id, _sel: Sel, accepts: u8) {
@@ -3740,7 +3762,6 @@ pub(crate) fn install() {
         "orderFront:" => make_key_and_order_front, c"v24@0:8@16";
         "orderFrontRegardless" => order_front_regardless, c"v16@0:8";
         "orderOut:" => order_out, c"v24@0:8@16";
-        "endSheet:" => ignored_object, c"v24@0:8@16";
         "close" => close, c"v16@0:8";
         "dealloc" => dealloc, c"v16@0:8";
         "performClose:" => perform_close, c"v24@0:8@16";
@@ -3754,11 +3775,8 @@ pub(crate) fn install() {
         "isMainWindow" => is_key_window, c"c16@0:8";
         "isVisible" => is_visible, c"c16@0:8";
         "setIsVisible:" => set_is_visible, c"v20@0:8c16";
-        // No window is ever attached as a sheet: nothing implements -beginSheet:.
-        "isSheet" => no, c"c16@0:8";
         // One space: ordering any window in puts it on the active one.
         "isOnActiveSpace" => yes, c"c16@0:8";
-        "attachedSheet" => nil, c"@16@0:8";
         "screen" => screen, c"@16@0:8";
         "backingScaleFactor" => backing_scale_factor, c"d16@0:8";
         "userSpaceScaleFactor" => user_space_scale_factor, c"d16@0:8";
@@ -3779,6 +3797,8 @@ pub(crate) fn install() {
         "setOpaque:" => ignored_flag, c"v20@0:8c16";
         "setHidesOnDeactivate:" => set_hides_on_deactivate, c"v20@0:8c16";
         "hidesOnDeactivate" => hides_on_deactivate, c"c16@0:8";
+        "setExcludedFromWindowsMenu:" => set_excluded_from_windows_menu, c"v20@0:8c16";
+        "isExcludedFromWindowsMenu" => is_excluded_from_windows_menu, c"c16@0:8";
         "orderBack:" => ignored_object, c"v24@0:8@16";
         "occlusionState" => visible_occlusion, c"Q16@0:8";
         "setToolbar:" => ignored_object, c"v24@0:8@16";

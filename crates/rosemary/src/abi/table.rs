@@ -258,6 +258,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("AudioQueueStart", I32, P, P),
     sig!("AudioQueueStop", I32, P, BOOL),
     sig!("AudioUnitGetProperty", I32, P, U32, U32, U32, P, P),
+    sig!("AudioUnitGetPropertyInfo", I32, P, U32, U32, U32, P, P),
     sig!("AudioUnitInitialize", I32, P),
     sig!("AudioUnitRender", I32, P, P, P, U32, U32, P),
     sig!("AudioUnitSetProperty", I32, P, U32, U32, U32, P, U32),
@@ -909,6 +910,10 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CGImageGetWidth", U64, P),
     sig!("CGImageSourceCreateImageAtIndex", P, P, U64, P),
     sig!("CGImageSourceCreateWithData", P, P, P),
+    sig!("CGImageSourceCopyTypeIdentifiers", P),
+    sig!("CGImageDestinationCopyTypeIdentifiers", P),
+    sig!("CGImageDestinationCreateWithData", P, P, P, U64, P),
+    sig!("CGImageDestinationCreateWithDataConsumer", P, P, P, U64, P),
     sig!("CGMainDisplayID", U32),
     sig!("CGDisplayRestoreColorSyncSettings", V),
     sig!("NXGetLocalArchInfo", P),
@@ -1437,6 +1442,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // `applicationDidFinishLaunching:` to the guest's delegate, and does not return
     // until the application terminates.
     sig!("NSApplicationMain", I32, I32, P),
+    sig!("NSApplicationLoad", U8),
     // `NSLog` takes an `NSString` format, not a C one, so even the rendering
     // path the `printf` family uses needs a conversion first.
     vsig!("NSLog", V, P),
@@ -1523,6 +1529,8 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("SCPreferencesCreate", P, P, P, P),
     sig!("SCPreferencesGetValue", P, P, P),
     sig!("SCNetworkReachabilityCreateWithAddress", P, P, P),
+    sig!("SCNetworkReachabilityCreateWithAddressPair", P, P, P, P),
+    sig!("SCNetworkReachabilitySetDispatchQueue", U8, P, P),
     sig!("SCNetworkReachabilityCreateWithName", P, P, P),
     sig!("SCNetworkReachabilityGetFlags", U8, P, P),
     sig!("SCNetworkReachabilityScheduleWithRunLoop", U8, P, P, P),
@@ -1540,11 +1548,15 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("SecKeychainSearchCopyNext", I32, P, P),
     sig!("SecKeychainSearchCreateFromAttributes", I32, P, U32, P, P),
     sig!("SecTrustCopyAnchorCertificates", I32, P),
+    sig!("SecTrustSettingsCopyCertificates", I32, U32, P),
+    sig!("SecTrustSettingsCopyTrustSettings", I32, P, U32, P),
+    sig!("SecPolicyCopyProperties", P, P),
     sig!("SecStaticCodeCreateWithPath", I32, P, U64, P),
     sig!("SecRequirementCreateWithString", I32, P, U64, P),
     sig!("SecRequirementCreateWithData", I32, P, U32, P),
     sig!("SecCodeCopySelf", I32, U32, P),
     sig!("SecCodeCheckValidity", I32, P, U32, P),
+    sig!("SecStaticCodeCheckValidity", I32, P, U32, P),
     sig!("SecStaticCodeCheckValidityWithErrors", I32, P, U64, P, P),
     //
     // SDL3 asks the current layout for its Unicode key-layout data so it can
@@ -2893,6 +2905,27 @@ pub static SIGNATURES: &[FunctionAbi] = &[
         I32,
         U32
     ),
+    // `kern_return_t mach_vm_remap(vm_map_t, mach_vm_address_t *, mach_vm_size_t,
+    // mach_vm_offset_t mask, int flags, vm_map_t src, mach_vm_address_t src_address,
+    // boolean_t copy, vm_prot_t *cur, vm_prot_t *max, vm_inherit_t)`.
+    sig!(
+        "mach_vm_remap",
+        I32,
+        U32,
+        P,
+        U64,
+        U64,
+        I32,
+        U32,
+        U64,
+        U32,
+        P,
+        P,
+        U32
+    ),
+    sig!(
+        "vm_remap", I32, U32, P, U64, U64, I32, U32, U64, U32, P, P, U32
+    ),
     sig!("mach_thread_self", U32),
     sig!("mach_timebase_info", I32, P),
     sig!("madvise", U64, P, U64, I32),
@@ -3802,6 +3835,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("CTFontDescriptorCreateMatchingFontDescriptor", P, P, P),
     sig!("CTFontCreateWithFontDescriptor", P, P, F64, P),
     sig!("CTFontCopyTable", P, P, U32, U32),
+    sig!("CTFontCopyVariationAxes", P, P),
     sig!("CTFontCopyDefaultCascadeListForLanguages", P, P, P),
     sig!("CTFontManagerCopyAvailableFontFamilyNames", P),
     sig!("CTFontManagerCreateFontDescriptorsFromURL", P, P),
@@ -3837,6 +3871,9 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     // *format, uint8_t *buf, uint32_t size)` - **not** variadic, which is the
     // surprise.
     sig!("_os_log_impl", V, P, P, U8, P, P, U32),
+    sig!("_os_log_debug_impl", V, P, P, U8, P, P, U32),
+    sig!("_os_log_error_impl", V, P, P, U8, P, P, U32),
+    sig!("_os_log_fault_impl", V, P, P, U8, P, P, U32),
     sig!("os_log_create", P, P, P),
     sig!("os_log_type_enabled", BOOL, P, U8),
     sig!("os_release", V, P),
@@ -4055,6 +4092,7 @@ pub static SIGNATURES: &[FunctionAbi] = &[
     sig!("removexattr", I32, P, P, I32),
     sig!("sendfile", I32, I32, I32, I64, P, P, I32),
     sig!("connectx", I32, I32, P, U32, U32, P, U32, P, P),
+    sig!("disconnectx", I32, I32, U32, U32),
     sig!("posix_spawnattr_setsigdefault", I32, P, P),
     sig!("pthread_mutexattr_setpolicy_np", I32, P, I32),
     sig!("pthread_rwlock_tryrdlock", I32, P),

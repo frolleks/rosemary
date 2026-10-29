@@ -3199,7 +3199,7 @@ pub fn gpu_under_metal(sdl: sdl3::Window, source: &Store) -> Option<Store> {
         width: i64::from(source.width),
         height: i64::from(source.height),
     };
-    let background = crate::window::background_pixel(window).unwrap_or(DEFAULT_BACKGROUND);
+    let background = crate::window::background_pixel(window);
     for pixel in bottom.pixels.as_chunks_mut::<4>().0 {
         *pixel = background;
     }
@@ -3391,7 +3391,7 @@ fn compose_window(window: Id) {
     // program that draws only a logo and a bar relies on for everything else.
     // With none set it is `windowBackgroundColor`, AppKit's default; a layer
     // view's hole is the layer's either way.
-    let background = crate::window::background_pixel(window).unwrap_or(DEFAULT_BACKGROUND);
+    let background = crate::window::background_pixel(window);
     let logical = logical_pixel_bounds(sdl, whole);
     for row in region.y..region.y + region.height {
         let base = (row as usize * width as usize + region.x as usize) * 4;
@@ -3478,9 +3478,6 @@ pub fn present_again(sdl: sdl3::Window) {
 }
 
 /// Recompose the whole of a window, whose background changed.
-/// `windowBackgroundColor` (0.93 grey, opaque) as premultiplied BGRA.
-const DEFAULT_BACKGROUND: [u8; 4] = [237, 237, 237, 255];
-
 pub(crate) fn window_background_changed(window: Id) {
     // SAFETY: a window this crate made.
     let sdl = unsafe { crate::window::sdl_window(window) };
@@ -4428,6 +4425,74 @@ unsafe extern "C" fn current_context(_class: Id, _sel: Sel) -> Id {
     current_graphics_context()
 }
 
+/// `-displayRectIgnoringOpacity:inContext:`: the view and its subviews drawn
+/// into `context` under that context's current transform, which stands for
+/// the view's own coordinates, rather than into the window.
+unsafe extern "C" fn display_rect_ignoring_opacity(view: Id, _sel: Sel, rect: NSRect, context: Id) {
+    if context.is_null() {
+        return;
+    }
+    // SAFETY: an `NSGraphicsContext`, whose port is the caller's.
+    let port = unsafe { cg_context(context, objc::sel::get("CGContext")) };
+    if port.is_null() {
+        return;
+    }
+    let depth = focus_depth();
+    let Ok(previous) = CURRENT_GRAPHICS_CONTEXT.try_with(|current| {
+        current.0.replace(Some(ContextOverride {
+            context: objc::arc::retain(context),
+            depth,
+        }))
+    }) else {
+        return;
+    };
+    draw_tree_into(view, rect, port);
+    let _ = CURRENT_GRAPHICS_CONTEXT.try_with(|current| {
+        if let Some(held) = current.0.replace(previous) {
+            objc::arc::release(held.context);
+        }
+    });
+}
+
+/// Send `-drawRect:` to `view`, clipped to `rect`, then to each visible
+/// subview with `port`'s transform moved into that subview's coordinates.
+fn draw_tree_into(view: Id, rect: NSRect, port: *const c_void) {
+    use crate::cgcontext::{
+        CGContextClipToRect, CGContextRestoreGState, CGContextSaveGState, CGContextScaleCTM,
+        CGContextTranslateCTM,
+    };
+    // SAFETY: the caller's live context; every save is restored below.
+    unsafe {
+        CGContextSaveGState(port);
+        CGContextClipToRect(port, rect);
+        let draw: unsafe extern "C" fn(Id, Sel, NSRect) = std::mem::transmute(objc::msg::entry());
+        draw(view, objc::sel::get("drawRect:"), rect);
+    }
+    let flipped = crate::view::is_flipped(view);
+    for child in crate::view::subviews_of(view) {
+        if crate::view::is_hidden_itself(child) {
+            continue;
+        }
+        let frame = crate::view::frame_of(child);
+        let bounds = crate::view::bounds_of(child);
+        // SAFETY: as above.
+        unsafe {
+            CGContextSaveGState(port);
+            CGContextTranslateCTM(port, frame.origin.x, frame.origin.y);
+            if crate::view::is_flipped(child) != flipped {
+                CGContextTranslateCTM(port, 0.0, frame.size.height);
+                CGContextScaleCTM(port, 1.0, -1.0);
+            }
+            CGContextTranslateCTM(port, -bounds.origin.x, -bounds.origin.y);
+        }
+        draw_tree_into(child, bounds, port);
+        // SAFETY: the state saved above.
+        unsafe { CGContextRestoreGState(port) };
+    }
+    // SAFETY: the state saved on entry.
+    unsafe { CGContextRestoreGState(port) };
+}
+
 /// The `CGContext` the current `NSGraphicsContext` was made over with
 /// `+graphicsContextWithGraphicsPort:flipped:` (or a bitmap rep), and whether
 /// it is flipped; `None` while drawing goes to the focused view.
@@ -4541,7 +4606,7 @@ unsafe extern "C" fn zero(_receiver: Id, _sel: Sel) -> isize {
     0
 }
 
-unsafe extern "C" fn shared_color_space(_receiver: Id, _sel: Sel) -> Id {
+pub(crate) unsafe extern "C" fn shared_color_space(_receiver: Id, _sel: Sel) -> Id {
     shared_instance(c"NSColorSpace")
 }
 
@@ -4553,6 +4618,14 @@ unsafe extern "C" fn cg_color_space(_receiver: Id, _sel: Sel) -> *const c_void {
         as *const c_void
 }
 
+/// `-[NSColorSpace ICCProfileData]`: the one space's sRGB profile, kept for
+/// the process like the space itself.
+unsafe extern "C" fn icc_profile_data(_receiver: Id, _sel: Sel) -> Id {
+    static DATA: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *DATA.get_or_init(|| corefoundation::collections::new_data(crate::icc::srgb_profile()) as usize)
+        as Id
+}
+
 pub(crate) fn install() {
     let view = objc::class::lookup(c"NSView").expect("declared before its methods");
     methods!(view, {
@@ -4560,6 +4633,8 @@ pub(crate) fn install() {
         "lockFocus" => lock_focus, c"v16@0:8";
         "unlockFocus" => unlock_focus, c"v16@0:8";
         "getRectsBeingDrawn:count:" => get_rects_being_drawn, c"v32@0:8^^{CGRect}16^q24";
+        "displayRectIgnoringOpacity:inContext:" => display_rect_ignoring_opacity,
+            c"v56@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16@48";
     });
     class_methods!(view, {
         "focusView" => focus_view, c"@16@0:8";
@@ -4591,9 +4666,15 @@ pub(crate) fn install() {
     });
     methods!(space, {
         "CGColorSpace" => cg_color_space, c"^v16@0:8";
+        "ICCProfileData" => icc_profile_data, c"@16@0:8";
     });
     let window = objc::class::lookup(c"NSWindow").expect("declared");
     methods!(window, {
+        "colorSpace" => shared_color_space, c"@16@0:8";
+    });
+    // Every colour is in the one space; see `crate::color`.
+    let color = objc::class::lookup(c"NSColor").expect("declared");
+    methods!(color, {
         "colorSpace" => shared_color_space, c"@16@0:8";
     });
 }

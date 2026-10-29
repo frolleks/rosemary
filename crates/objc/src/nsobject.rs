@@ -67,6 +67,7 @@ pub(crate) fn install() {
     add(class, "class", class_of as Imp, c"#16@0:8");
     add(class, "superclass", instance_superclass as Imp, c"#16@0:8");
     add(class, "isEqual:", is_equal as Imp, c"B24@0:8@16");
+    add(class, "isEqualTo:", is_equal_to as Imp, c"B24@0:8@16");
     add(class, "hash", hash as Imp, c"Q16@0:8");
     add(class, "isKindOfClass:", is_kind_of as Imp, c"B24@0:8#16");
     add(
@@ -356,6 +357,19 @@ unsafe extern "C" fn instance_superclass(receiver: Id, _sel: Sel) -> Id {
 
 unsafe extern "C" fn is_equal(receiver: Id, _sel: Sel, other: Id) -> bool {
     receiver == other
+}
+
+/// `-isEqualTo:`, of `NSComparisonMethods`: the receiver's own `-isEqual:`.
+unsafe extern "C" fn is_equal_to(receiver: Id, _sel: Sel, other: Id) -> bool {
+    let Some(method) = (unsafe { crate::object::class_of(receiver) })
+        .and_then(|class| class.method(crate::sel::get("isEqual:")))
+    else {
+        return false;
+    };
+    // SAFETY: `-isEqual:` is `BOOL (id, SEL, id)`.
+    let f: unsafe extern "C" fn(Id, Sel, Id) -> bool =
+        unsafe { std::mem::transmute(method.implementation()) };
+    unsafe { f(receiver, crate::sel::get("isEqual:"), other) }
 }
 
 unsafe extern "C" fn hash(receiver: Id, _sel: Sel) -> usize {

@@ -88,7 +88,48 @@ impl Table {
                 listed: true,
             });
         }
-        Table::new(mounts)
+        let mut table = Table::new(mounts);
+        table.alias_through_root_links(root);
+        table
+    }
+
+    /// Give each mount a guest spelling through every top-level symlink of the
+    /// root that leads to it.
+    ///
+    /// A Mac's `/etc`, `/tmp` and `/var` are links into `/private`. Mapped
+    /// lexically, `/etc/resolv.conf` is a path in the prefix that the host
+    /// kernel resolves inside the prefix, never reaching a mount at
+    /// `/private/etc/resolv.conf`.
+    fn alias_through_root_links(&mut self, root: &Path) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        let mut aliases = Vec::new();
+        for entry in entries.flatten() {
+            let (Ok(target), Some(name)) = (
+                std::fs::read_link(entry.path()),
+                entry.file_name().to_str().map(str::to_owned),
+            ) else {
+                continue;
+            };
+            let Some(target) = target.to_str().and_then(|t| normalise(&format!("/{t}"))) else {
+                continue;
+            };
+            if target.contains("/..") {
+                continue;
+            }
+            for mount in &self.by_guest {
+                if mount.guest != "/" && under(&mount.guest, &target) {
+                    aliases.push(Mount {
+                        guest: format!("/{name}{}", &mount.guest[target.len()..]),
+                        ..mount.clone()
+                    });
+                }
+            }
+        }
+        self.by_guest.extend(aliases);
+        self.by_guest
+            .sort_by_key(|m| std::cmp::Reverse(m.guest.len()));
     }
 
     /// A table of the root and exactly the mounts given, for tests that need
@@ -418,6 +459,32 @@ mod tests {
             table().to_host("/usr/lib/../lib"),
             Some(PathBuf::from("/prefixes/default/root/usr/lib/../lib"))
         );
+    }
+
+    /// `/etc` is a link to `private/etc`, so the guest's `/etc/resolv.conf`
+    /// must reach the mount at `/private/etc/resolv.conf`, as on a Mac.
+    #[test]
+    fn a_mount_is_reached_through_a_root_symlink() {
+        let at = std::env::temp_dir().join(format!("rosemary-mount-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&at);
+        std::fs::create_dir_all(at.join("private/etc")).unwrap();
+        std::os::unix::fs::symlink("private/etc", at.join("etc")).unwrap();
+        let table = Table::rooted(&at, "user", None);
+        assert_eq!(
+            table.to_host("/etc/resolv.conf"),
+            Some(PathBuf::from("/etc/resolv.conf"))
+        );
+        assert_eq!(table.to_host("/etc/hosts"), Some(at.join("etc/hosts")));
+        assert_eq!(
+            point(&table, "/etc/resolv.conf").map(|p| p.host),
+            Some(Path::new("/etc/resolv.conf"))
+        );
+        assert_eq!(
+            table.to_guest(Path::new("/etc/resolv.conf")),
+            Some(PathBuf::from("/private/etc/resolv.conf")),
+            "the canonical spelling names the host file"
+        );
+        std::fs::remove_dir_all(at).unwrap();
     }
 
     fn point<'a>(table: &'a Table, guest: &str) -> Option<MountPoint<'a>> {

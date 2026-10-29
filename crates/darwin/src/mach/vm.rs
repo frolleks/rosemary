@@ -1,14 +1,15 @@
 use std::ffi::c_void;
+use std::sync::Arc;
 
 use starnix::process::Region;
 
 use server::task::{TaskOp, TaskOutcome};
 
-use super::entry::{self, Entry};
+use super::entry::{self, Entry, Object};
 use super::kern::*;
 use super::local::{
-    self, Backing, VM_FLAGS_ANYWHERE, VM_PROT_ALL, VM_PROT_EXECUTE, VM_PROT_IS_MASK, VM_PROT_READ,
-    VM_PROT_WRITE,
+    self, Backing, VM_FLAGS_ANYWHERE, VM_FLAGS_OVERWRITE, VM_FLAGS_RANDOM_ADDR, VM_PROT_ALL,
+    VM_PROT_EXECUTE, VM_PROT_IS_MASK, VM_PROT_READ, VM_PROT_WRITE,
 };
 use super::remote;
 use super::space::{self, MACH_PORT_NULL, Name, Target};
@@ -103,23 +104,29 @@ const _: () = {
 /// The first mapping of `task` ending above `address`, which is Mach's own
 /// search: the one containing it, or the next one up if there is a hole there.
 /// `Ok(None)` past the last one.
+fn region_at_or_after(task: Name, address: u64) -> Result<Option<Region>, i32> {
+    Ok(regions(task)?
+        .into_iter()
+        .find(|region| region.end > address))
+}
+
+/// Every mapping of `task`, in address order.
 ///
 /// Another task's map is the host's to say, and the server asks it: reading a
 /// map needs no access to the memory behind it.
-fn region_at_or_after(task: Name, address: u64) -> Result<Option<Region>, i32> {
+fn regions(task: Name) -> Result<Vec<Region>, i32> {
     let _host = crate::syscall::ScopedHostSyscallContext::new();
-    let regions = match space::target(task)? {
-        Target::Local => starnix::process::regions().map_err(|_| KERN_FAILURE)?,
+    match space::target(task)? {
+        Target::Local => starnix::process::regions().map_err(|_| KERN_FAILURE),
         Target::Remote { pid, image } => match server::client::regions(pid, image) {
-            Some(Some(regions)) => regions,
+            Some(Some(regions)) => Ok(regions),
             Some(None) => {
                 space::task_died(task);
-                return Err(MACH_SEND_INVALID_DEST);
+                Err(MACH_SEND_INVALID_DEST)
             }
-            None => return Err(KERN_FAILURE),
+            None => Err(KERN_FAILURE),
         },
-    };
-    Ok(regions.into_iter().find(|region| region.end > address))
+    }
 }
 
 /// [`region_at_or_after`] as the `vm_region` calls answer it: past the last
@@ -546,9 +553,14 @@ pub unsafe extern "C" fn mach_vm_map(
         }
     };
     let placed = match source {
-        Some((entry, offset)) if copy == 0 => {
-            map_shared(start, length, mask, flags, &entry, offset)
-        }
+        Some((entry, offset)) if copy == 0 => map_shared(
+            start,
+            length,
+            mask,
+            flags,
+            &entry.object,
+            entry.offset + offset,
+        ),
         Some((entry, offset)) => map_copy(start, length, mask, flags, inheritance, &entry, offset),
         None => {
             let backing = match inheritance {
@@ -611,23 +623,22 @@ pub unsafe fn mach_vm_map_trap(
     }
 }
 
-/// `entry`'s object from `offset`, shared, and recorded so an entry can be
-/// made from the mapping in turn.
+/// `object` from `offset`, shared, and recorded so an entry can be made from
+/// the mapping in turn.
 fn map_shared(
     start: u64,
     length: u64,
     mask: u64,
     flags: i32,
-    entry: &Entry,
+    object: &Arc<Object>,
     offset: u64,
 ) -> Result<u64, i32> {
-    let at = entry.offset + offset;
     let backing = Backing::Object {
-        fd: entry.object.fd(),
-        offset: at,
+        fd: object.fd(),
+        offset,
     };
     let placed = local::place(start, length, mask, flags, backing, libc::PROT_NONE)?;
-    entry::record(placed, length, entry.object.clone(), at);
+    entry::record(placed, length, object.clone(), offset);
     Ok(placed)
 }
 
@@ -668,6 +679,208 @@ fn finish(placed: u64, length: u64, protection: i32, inheritance: u32) -> i32 {
         return KERN_FAILURE;
     }
     local::protect(placed, length, false, protection)
+}
+
+/// `VM_FLAGS_*` only `mach_vm_remap` takes. The two `RESILIENT` flags are
+/// about faults on code-signed and file-backed pages, which a host has none
+/// of beyond what they also require of the mapping.
+const VM_FLAGS_RESILIENT_CODESIGN: i32 = 0x0020;
+const VM_FLAGS_RESILIENT_MEDIA: i32 = 0x0040;
+const VM_FLAGS_RETURN_DATA_ADDR: i32 = 0x0010_0000;
+/// `VM_FLAGS_USER_REMAP`, which unlike `mach_vm_map` takes no `VM_MAKE_TAG`.
+const VM_FLAGS_USER_REMAP: i32 = VM_FLAGS_ANYWHERE
+    | VM_FLAGS_RANDOM_ADDR
+    | VM_FLAGS_OVERWRITE
+    | VM_FLAGS_RETURN_DATA_ADDR
+    | VM_FLAGS_RESILIENT_CODESIGN
+    | VM_FLAGS_RESILIENT_MEDIA;
+
+/// `kern_return_t mach_vm_remap(vm_map_t target_task, mach_vm_address_t
+/// *target_address, mach_vm_size_t size, mach_vm_offset_t mask, int flags,
+/// vm_map_read_t src_task, mach_vm_address_t src_address, boolean_t copy,
+/// vm_prot_t *cur_protection, vm_prot_t *max_protection, vm_inherit_t
+/// inheritance)`, and `vm_remap`, the same call on a 64-bit task.
+///
+/// The source's pages mapped again into this task: with `copy` a private copy
+/// of them as they are now, and without it the same memory - which a host can
+/// only give for memory mapped from a memory entry, see [`entry`]. The new
+/// mapping has the strictest protection across the source, which is handed
+/// back.
+///
+/// FIXME (ACCURACY): the maximum handed back is the current protection, as in
+/// [`vm_region_64`]. A copy is read through the source's protection, so a page
+/// that cannot be read fails it where Darwin copies the page regardless.
+///
+/// # Safety
+///
+/// `address` is readable and writable, and both protections writable.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn mach_vm_remap(
+    task: Name,
+    address: *mut u64,
+    size: u64,
+    mask: u64,
+    flags: i32,
+    source_task: Name,
+    source: u64,
+    copy: u32,
+    cur_protection: *mut i32,
+    max_protection: *mut i32,
+    inheritance: u32,
+) -> i32 {
+    if address.is_null() || cur_protection.is_null() || max_protection.is_null() {
+        return KERN_INVALID_ARGUMENT;
+    }
+    if flags & !VM_FLAGS_USER_REMAP != 0 {
+        return KERN_INVALID_ARGUMENT;
+    }
+    match space::target(task) {
+        Err(code) => return code,
+        Ok(Target::Local) => {}
+        Ok(Target::Remote { .. }) => {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                eprintln!("rosemary: mach_vm_remap: another target task is not supported")
+            });
+            return KERN_INVALID_ARGUMENT;
+        }
+    }
+    let source_target = match space::target(source_task) {
+        Ok(target) => target,
+        Err(code) => return code,
+    };
+    let copy = copy != 0;
+    if inheritance > VM_INHERIT_NONE || (flags & VM_FLAGS_RESILIENT_MEDIA != 0 && !copy) {
+        return KERN_INVALID_ARGUMENT;
+    }
+    let page = super::info::page_size();
+    let data_address = flags & VM_FLAGS_RETURN_DATA_ADDR != 0;
+    // Without `RETURN_DATA_ADDR` Mach keeps its original rounding: `size` from
+    // the start of the source's page, which can leave out the page its last
+    // byte is on. Callers depend on that.
+    let pages = match data_address {
+        true => local::pages(source, size),
+        false => local::pages(source & !(page - 1), size),
+    };
+    let Some((start, length)) = pages.filter(|&(_, length)| length != 0) else {
+        return KERN_INVALID_ARGUMENT;
+    };
+    let mut protection = match strictest_protection(source_task, start, length) {
+        Ok(protection) => protection,
+        Err(code) => return code,
+    };
+    if flags & VM_FLAGS_RESILIENT_CODESIGN != 0 {
+        protection = VM_PROT_READ;
+    }
+    // SAFETY: the caller states `address` is readable.
+    let hint = unsafe { *address };
+    let at = match flags & VM_FLAGS_ANYWHERE {
+        0 => hint & !(page - 1),
+        _ => 0,
+    };
+    let placement = flags & (VM_FLAGS_ANYWHERE | VM_FLAGS_RANDOM_ADDR | VM_FLAGS_OVERWRITE);
+    let placed = match (copy, source_target) {
+        (true, _) => remap_copy(source_task, start, length, at, mask, placement, inheritance),
+        (false, Target::Local) => remap_shared(start, length, at, mask, placement),
+        (false, Target::Remote { .. }) => {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                eprintln!("rosemary: mach_vm_remap: sharing another task's memory is not supported")
+            });
+            Err(KERN_INVALID_ARGUMENT)
+        }
+    };
+    let placed = match placed {
+        Ok(placed) => placed,
+        Err(code) => return code,
+    };
+    let rc = finish(placed, length, protection, inheritance);
+    if rc != KERN_SUCCESS {
+        entry::forget(placed, length);
+        // SAFETY: the mapping just made, which nothing else has been told of.
+        unsafe { libc::munmap(placed as *mut c_void, length as usize) };
+        return rc;
+    }
+    // SAFETY: the caller's out-parameters.
+    unsafe {
+        *address = match data_address {
+            true => placed + (source & (page - 1)),
+            false => placed,
+        };
+        *cur_protection = protection;
+        *max_protection = protection;
+    }
+    KERN_SUCCESS
+}
+
+/// The protection every page of `[start, start + length)` of `task` has, or
+/// `KERN_INVALID_ADDRESS` where one is not mapped.
+fn strictest_protection(task: Name, start: u64, length: u64) -> Result<i32, i32> {
+    let end = start + length;
+    let mut strictest = VM_PROT_ALL;
+    let mut covered = start;
+    for region in regions(task)?
+        .iter()
+        .filter(|r| r.end > start && r.start < end)
+    {
+        if region.start > covered {
+            return Err(KERN_INVALID_ADDRESS);
+        }
+        strictest &= protection(region);
+        covered = region.end;
+    }
+    match covered >= end {
+        true => Ok(strictest),
+        false => Err(KERN_INVALID_ADDRESS),
+    }
+}
+
+/// Fresh memory holding `[start, start + length)` of `task` as it is now.
+///
+/// Read before anything is placed, so an `OVERWRITE` over the source copies
+/// what was there, and a source that cannot be read leaves the target alone.
+fn remap_copy(
+    task: Name,
+    start: u64,
+    length: u64,
+    at: u64,
+    mask: u64,
+    flags: i32,
+    inheritance: u32,
+) -> Result<u64, i32> {
+    let mut bytes = vec![0u8; length as usize];
+    let rc = read_task(task, start, length, |offset, chunk| {
+        bytes[offset as usize..][..chunk.len()].copy_from_slice(chunk);
+        KERN_SUCCESS
+    });
+    if rc != KERN_SUCCESS {
+        return Err(rc);
+    }
+    let backing = match inheritance {
+        VM_INHERIT_SHARE => Backing::Shared,
+        _ => Backing::Private,
+    };
+    let writable = libc::PROT_READ | libc::PROT_WRITE;
+    let placed = local::place(at, length, mask, flags, backing, writable)?;
+    // SAFETY: the mapping just made writable, `length` bytes long.
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), placed as *mut u8, bytes.len()) };
+    Ok(placed)
+}
+
+/// The memory object behind `[start, start + length)` of this task, mapped
+/// again.
+fn remap_shared(start: u64, length: u64, at: u64, mask: u64, flags: i32) -> Result<u64, i32> {
+    let Some((object, offset)) = entry::shared_range(start, length) else {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| {
+            eprintln!(
+                "rosemary: mach_vm_remap: {start:#x}+{length:#x} is not mapped from one memory \
+                 entry, and this host cannot share any other memory"
+            )
+        });
+        return Err(KERN_INVALID_ARGUMENT);
+    };
+    map_shared(at, length, mask, flags, &object, offset)
 }
 
 /// `kern_return_t vm_deallocate(vm_map_t target_task, vm_address_t address,
@@ -1236,5 +1449,140 @@ mod tests {
             vm_map(&mut address, 0, 0, anywhere, rw, rw),
             KERN_INVALID_ARGUMENT
         );
+    }
+    /// `mach_vm_remap` of `size` bytes at `source` in this task, anywhere.
+    fn remap(source: u64, size: u64, flags: i32, copy: u32) -> Result<(u64, i32), i32> {
+        let (mut address, mut cur, mut max) = (0, 0, 0);
+        // SAFETY: writable out-parameters.
+        let rc = unsafe {
+            mach_vm_remap(
+                TASK_SELF,
+                &mut address,
+                size,
+                0,
+                VM_FLAGS_ANYWHERE | flags,
+                TASK_SELF,
+                source,
+                copy,
+                &mut cur,
+                &mut max,
+                VM_INHERIT_COPY,
+            )
+        };
+        match rc {
+            KERN_SUCCESS => Ok((address, cur)),
+            code => Err(code),
+        }
+    }
+
+    /// A copy holds the source's bytes as they were, with the source's
+    /// protection, and is no longer tied to it.
+    #[test]
+    fn a_remapped_copy_keeps_the_bytes_it_was_made_with() {
+        let source = map(VM_PROT_READ | VM_PROT_WRITE);
+        // SAFETY: the readable, writable mapping above.
+        unsafe { *((source + 5) as *mut u8) = 7 };
+        let (copy, cur) = remap(source, 2 * 4096, 0, 1).unwrap();
+        assert_eq!(cur, VM_PROT_READ | VM_PROT_WRITE);
+        // SAFETY: both mappings are readable and writable.
+        unsafe {
+            *((source + 5) as *mut u8) = 9;
+            assert_eq!(*((copy + 5) as *const u8), 7);
+            vm_deallocate(TASK_SELF, source, 2 * 4096);
+            vm_deallocate(TASK_SELF, copy, 2 * 4096);
+        }
+    }
+
+    /// The legacy rounding covers `size` from the source's page, and
+    /// `RETURN_DATA_ADDR` covers the bytes asked for and points at the first.
+    #[test]
+    fn a_remap_rounds_from_the_page_unless_asked_for_the_data_address() {
+        let page = page_size();
+        let source = map(VM_PROT_READ | VM_PROT_WRITE);
+        let start = source + page - 1;
+        // SAFETY: inside the mapping above.
+        unsafe { *(start as *mut u8) = 3 };
+        let (legacy, _) = remap(start, 2, 0, 1).unwrap();
+        assert_eq!(legacy % page, 0);
+        let (data, _) = remap(start, 2, VM_FLAGS_RETURN_DATA_ADDR, 1).unwrap();
+        assert_eq!(data % page, page - 1);
+        // SAFETY: the copies above, the second of which spans two pages.
+        unsafe {
+            assert_eq!(*(data as *const u8), 3);
+            assert_eq!(*((data + 1) as *const u8), 0);
+            vm_deallocate(TASK_SELF, legacy, page);
+            vm_deallocate(TASK_SELF, data - (page - 1), 2 * page);
+            vm_deallocate(TASK_SELF, source, 2 * 4096);
+        }
+    }
+
+    /// Without `copy`, memory mapped from an entry is the same memory twice.
+    #[test]
+    fn a_shared_remap_of_an_entry_mapping_aliases_it() {
+        let rw = VM_PROT_READ | VM_PROT_WRITE;
+        let (mut size, mut entry) = (page_size(), MACH_PORT_NULL);
+        // `MAP_MEM_NAMED_CREATE`.
+        let named_create = 0x2_0000;
+        // SAFETY: writable out-parameters.
+        let rc = unsafe {
+            entry::mach_make_memory_entry_64(
+                TASK_SELF,
+                &mut size,
+                0,
+                rw | named_create,
+                &mut entry,
+                MACH_PORT_NULL,
+            )
+        };
+        assert_eq!(rc, KERN_SUCCESS);
+        let mut first = 0;
+        // SAFETY: a writable out-parameter.
+        let rc = unsafe {
+            mach_vm_map(
+                TASK_SELF,
+                &mut first,
+                size,
+                0,
+                VM_FLAGS_ANYWHERE,
+                entry,
+                0,
+                0,
+                rw,
+                rw,
+                VM_INHERIT_COPY,
+            )
+        };
+        assert_eq!(rc, KERN_SUCCESS);
+        let (second, cur) = remap(first, size, 0, 0).unwrap();
+        assert_eq!(cur, rw);
+        // SAFETY: both mappings are readable and writable.
+        unsafe {
+            *((first + 3) as *mut u8) = 0x5a;
+            assert_eq!(*((second + 3) as *const u8), 0x5a);
+            vm_deallocate(TASK_SELF, first, size);
+            vm_deallocate(TASK_SELF, second, size);
+        }
+        assert_eq!(space::mach_port_deallocate(TASK_SELF, entry), KERN_SUCCESS);
+    }
+
+    /// Private memory has no object a second mapping could share, and the
+    /// call says so rather than handing back a copy.
+    #[test]
+    fn a_shared_remap_of_private_memory_is_refused() {
+        let source = map(VM_PROT_READ | VM_PROT_WRITE);
+        assert_eq!(remap(source, 4096, 0, 0), Err(KERN_INVALID_ARGUMENT));
+        unsafe { vm_deallocate(TASK_SELF, source, 2 * 4096) };
+    }
+
+    #[test]
+    fn a_remap_of_unmapped_memory_or_with_a_tag_is_refused() {
+        // The first page above zero, which no host lets anything map.
+        let unmapped = page_size();
+        assert_eq!(remap(unmapped, 1, 0, 1), Err(KERN_INVALID_ADDRESS));
+        let buffer = vec![0u8; 4096];
+        // `VM_MAKE_TAG(VM_MEMORY_MALLOC)`, which `mach_vm_map` takes and this does not.
+        let tag = 1 << 24;
+        let source = buffer.as_ptr() as u64;
+        assert_eq!(remap(source, 1, tag, 1), Err(KERN_INVALID_ARGUMENT));
     }
 }

@@ -36,8 +36,11 @@ pub mod callback;
 pub mod clock;
 pub mod commoncrypto;
 #[cfg(not(target_os = "macos"))]
+pub mod commpage;
+#[cfg(not(target_os = "macos"))]
 pub mod compat;
 pub mod copyfile;
+pub mod cpu;
 pub mod credentials;
 pub mod data;
 pub mod dirent;
@@ -45,10 +48,13 @@ pub mod dispatch;
 pub mod distnote;
 pub mod divergent;
 pub mod env;
+pub mod err;
 pub mod errno;
 pub mod exe;
 pub mod exit;
 pub mod fcntl;
+#[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
+pub mod fenv;
 pub mod fmtcheck;
 pub mod fortify;
 pub mod fs;
@@ -319,6 +325,7 @@ fn registered(name: &str) -> Option<u64> {
 /// Guest-aware overrides enabled on every host, even with native libc.
 static DEFAULT_MODULES: &[exports::Module] = &[
     idle::MODULE,
+    err::MODULE,
     errno::MODULE,
     sysctl::MODULE,
     sysinfo::MODULE,
@@ -396,6 +403,8 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     printf_l::MODULE,
     #[cfg(target_arch = "x86_64")]
     asl::MODULE,
+    #[cfg(target_arch = "x86_64")]
+    fenv::MODULE,
     acl::MODULE,
     fmtcheck::MODULE,
     langinfo::MODULE,

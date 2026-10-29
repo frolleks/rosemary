@@ -965,8 +965,20 @@ fn open_with<S: MachSpec + 'static>(
     extra.push(&program as &dyn machish::resolve::SymbolProvider);
     extra.push(&loaded as &dyn machish::resolve::SymbolProvider);
     let mut loader = Loader::new(spec);
-    // `@executable_path` is the program's directory, not the plugin's.
+    // `@executable_path` is the program's directory, not the plugin's, and the
+    // program's rpaths are searched after the plugin's own: a Qt plugin whose
+    // one rpath names nothing finds its framework through the executable's.
     if let Some((executable, _)) = EXECUTABLE.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        let ctx = PathContext {
+            executable: Some(&executable),
+            loader: Some(&executable),
+            rpaths: &[],
+        };
+        let inherited = rpaths_of(&executable)
+            .iter()
+            .flat_map(|entry| machish::install_name::expand_rpath(entry, &ctx))
+            .collect();
+        loader.inherit_rpaths(inherited);
         loader.executable_path(executable);
     }
     let mut report = loader

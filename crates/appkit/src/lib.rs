@@ -57,6 +57,7 @@ mod visual_format;
 pub use chrome::fonts;
 pub mod geometry;
 pub mod graphics;
+mod icc;
 pub mod icon;
 pub mod image;
 mod input_context;
@@ -83,6 +84,9 @@ pub mod screen;
 pub mod script;
 mod scroll;
 mod segmented;
+mod sheet;
+mod slider;
+mod split;
 mod status;
 mod tab;
 mod table;
@@ -126,6 +130,7 @@ pub fn bootstrap() {
         screen::install();
         displaylink::install();
         window::install();
+        sheet::install();
         window_controller::install();
         view::install();
         layout::install();
@@ -137,6 +142,8 @@ pub fn bootstrap() {
         popup::install();
         scroll::install();
         segmented::install();
+        slider::install();
+        split::install();
         matrix::install();
         tab::install();
         table::install();
@@ -164,6 +171,7 @@ pub fn bootstrap() {
 exports::exports! {
     functions {
         "NSApplicationMain" => application::NSApplicationMain,
+        "NSApplicationLoad" => application::NSApplicationLoad,
         "CAFrameRateRangeMake" => displaylink::CAFrameRateRangeMake,
         "CGMainDisplayID" => screen::CGMainDisplayID,
         "CGSessionCopyCurrentDictionary" => screen::CGSessionCopyCurrentDictionary,
@@ -269,6 +277,10 @@ exports::exports! {
         "CGImageGetAlphaInfo" => graphics::CGImageGetAlphaInfo,
         "CGImageGetColorSpace" => graphics::CGImageGetColorSpace,
         "CGImageSourceCreateWithData" => graphics::CGImageSourceCreateWithData,
+        "CGImageSourceCopyTypeIdentifiers" => graphics::CGImageSourceCopyTypeIdentifiers,
+        "CGImageDestinationCopyTypeIdentifiers" => graphics::CGImageDestinationCopyTypeIdentifiers,
+        "CGImageDestinationCreateWithData" => graphics::CGImageDestinationCreateWithData,
+        "CGImageDestinationCreateWithDataConsumer" => graphics::CGImageDestinationCreateWithData,
         "CGImageSourceCreateImageAtIndex" => graphics::CGImageSourceCreateImageAtIndex,
         "CGRectGetWidth" => geometry::CGRectGetWidth,
         "CGRectGetHeight" => geometry::CGRectGetHeight,
@@ -488,6 +500,8 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     "NSSystemColorsDidChangeNotification",
     window::WILL_START_LIVE_RESIZE,
     window::DID_END_LIVE_RESIZE,
+    sheet::WILL_BEGIN,
+    sheet::DID_END,
     "NSColorPanelColorDidChangeNotification",
     "NSPreferredScrollerStyleDidChangeNotification",
     "NSTextInputContextKeyboardSelectionDidChangeNotification",
@@ -508,6 +522,12 @@ pub const NOTIFICATION_NAMES: &[&str] = &[
     "NSOutlineViewItemDidCollapseNotification",
     "NSOutlineViewItemDidExpandNotification",
     "NSPopUpButtonWillPopUpNotification",
+    // Observed by Qt's font database; no font is ever installed while running.
+    "NSFontSetChangedNotification",
+    // Observed by Qt's Cocoa platform plugin; no menu tracking or other
+    // application's activation posts them here.
+    "NSMenuDidBeginTrackingNotification",
+    "NSWorkspaceDidActivateApplicationNotification",
     // Keys and option names whose text is their own name.
     "NSApplicationLaunchUserNotificationKey",
     "NSAccessibilityException",
@@ -668,6 +688,30 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     // that writes with one and reads with the other has to name the same type.
     ("_NSPasteboardTypeString", "public.utf8-plain-text"),
     ("_NSStringPboardType", "public.utf8-plain-text"),
+    ("_NSPasteboardTypeColor", "com.apple.cocoa.pasteboard.color"),
+    ("_NSPasteboardTypeFileURL", "public.file-url"),
+    (
+        "_NSPasteboardTypeFont",
+        "com.apple.cocoa.pasteboard.character-formatting",
+    ),
+    ("_NSPasteboardTypeHTML", "public.html"),
+    (
+        "_NSPasteboardTypeMultipleTextSelection",
+        "com.apple.cocoa.pasteboard.multiple-text-selection",
+    ),
+    ("_NSPasteboardTypePDF", "com.adobe.pdf"),
+    ("_NSPasteboardTypeRTF", "public.rtf"),
+    ("_NSPasteboardTypeRTFD", "com.apple.flat-rtfd"),
+    (
+        "_NSPasteboardTypeRuler",
+        "com.apple.cocoa.pasteboard.paragraph-formatting",
+    ),
+    ("_NSPasteboardTypeTIFF", "public.tiff"),
+    (
+        "_NSPasteboardTypeTabularText",
+        "public.utf8-tab-separated-values-text",
+    ),
+    ("_NSPasteboardTypeURL", "public.url"),
     // The rest of the deprecated pasteboard types, whose values are their own
     // names - which is what they are on a Mac, and what makes a program that
     // writes with the old spelling and reads with it find its own data.
@@ -818,6 +862,58 @@ pub const STRING_GLOBALS: &[(&str, &str)] = &[
     ("_NSAccessibilityTextAreaRole", "AXTextArea"),
     ("_NSAccessibilityTextFieldRole", "AXTextField"),
     ("_NSAccessibilityTextLinkSubrole", "AXTextLink"),
+    ("_NSAccessibilityApplicationRole", "AXApplication"),
+    ("_NSAccessibilityButtonRole", "AXButton"),
+    ("_NSAccessibilityCellRole", "AXCell"),
+    ("_NSAccessibilityCheckBoxRole", "AXCheckBox"),
+    ("_NSAccessibilityColorWellRole", "AXColorWell"),
+    ("_NSAccessibilityColumnRole", "AXColumn"),
+    ("_NSAccessibilityComboBoxRole", "AXComboBox"),
+    ("_NSAccessibilityGrowAreaRole", "AXGrowArea"),
+    ("_NSAccessibilityImageRole", "AXImage"),
+    ("_NSAccessibilityIncrementorRole", "AXIncrementor"),
+    ("_NSAccessibilityListRole", "AXList"),
+    ("_NSAccessibilityMenuBarRole", "AXMenuBar"),
+    ("_NSAccessibilityMenuButtonRole", "AXMenuButton"),
+    ("_NSAccessibilityMenuItemRole", "AXMenuItem"),
+    ("_NSAccessibilityMenuRole", "AXMenu"),
+    ("_NSAccessibilityOutlineRole", "AXOutline"),
+    ("_NSAccessibilityPopUpButtonRole", "AXPopUpButton"),
+    (
+        "_NSAccessibilityProgressIndicatorRole",
+        "AXProgressIndicator",
+    ),
+    ("_NSAccessibilityRowRole", "AXRow"),
+    ("_NSAccessibilityScrollBarRole", "AXScrollBar"),
+    ("_NSAccessibilitySliderRole", "AXSlider"),
+    ("_NSAccessibilitySplitGroupRole", "AXSplitGroup"),
+    ("_NSAccessibilitySplitterRole", "AXSplitter"),
+    ("_NSAccessibilityTableRole", "AXTable"),
+    ("_NSAccessibilityToolbarRole", "AXToolbar"),
+    ("_NSAccessibilityUnknownRole", "AXUnknown"),
+    ("_NSAccessibilityValueIndicatorRole", "AXValueIndicator"),
+    ("_NSAccessibilityWindowRole", "AXWindow"),
+    ("_NSAccessibilitySearchFieldSubrole", "AXSearchField"),
+    (
+        "_NSAccessibilitySecureTextFieldSubrole",
+        "AXSecureTextField",
+    ),
+    ("_NSAccessibilityTabButtonSubrole", "AXTabButton"),
+    ("_NSAccessibilityDecrementAction", "AXDecrement"),
+    ("_NSAccessibilityIncrementAction", "AXIncrement"),
+    ("_NSAccessibilityRaiseAction", "AXRaise"),
+    ("_NSAccessibilityShowMenuAction", "AXShowMenu"),
+    ("_NSAccessibilityFocusedAttribute", "AXFocused"),
+    ("_NSAccessibilityPriorityKey", "AXPriorityKey"),
+    (
+        "_NSAccessibilityFocusedUIElementChangedNotification",
+        "AXFocusedUIElementChanged",
+    ),
+    ("_NSAccessibilityTitleChangedNotification", "AXTitleChanged"),
+    (
+        "_NSAccessibilityUIElementDestroyedNotification",
+        "AXUIElementDestroyed",
+    ),
     ("_NSAccessibilityPressAction", "AXPress"),
     (
         "_NSAccessibilitySelectedRowsChangedNotification",

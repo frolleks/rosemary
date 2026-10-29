@@ -408,6 +408,15 @@ pub fn empty(size: NSSize) -> Id {
     image
 }
 
+/// `+[NSImage imageWithSystemSymbolName:accessibilityDescription:]`: nil,
+/// Apple's answer for a name that is not a symbol. Qt then falls back to its
+/// own icons.
+// FIXME (ACCURACY): the SF Symbols artwork is Apple's and not shipped, so
+// every name is answered as unknown.
+unsafe extern "C" fn system_symbol(_class: Id, _sel: Sel, _name: Id, _description: Id) -> Id {
+    std::ptr::null_mut()
+}
+
 /// The extensions `+imageNamed:` tries after the name as given, in the order
 /// Apple's lookup prefers them.
 const NAMED_EXTENSIONS: &[&str] = &[
@@ -1008,6 +1017,7 @@ pub(crate) fn install() {
     class_methods!(class, {
         "imageNamed:" => image_named, c"@24@0:8@16";
         "imageWithSize:flipped:drawingHandler:" => image_with_size, c"@44@0:8{CGSize=dd}16c32@?36";
+        "imageWithSystemSymbolName:accessibilityDescription:" => system_symbol, c"@32@0:8@16@24";
     });
     methods!(class, {
         "initWithData:" => init_with_data, c"@24@0:8@16";

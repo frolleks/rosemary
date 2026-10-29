@@ -2550,6 +2550,12 @@ unsafe extern "C" fn set_frame_origin(receiver: Id, _sel: Sel, origin: NSPoint) 
     note_geometry_change(receiver, before);
 }
 
+/// `-safeAreaInsets`: none, because no window here extends its content view
+/// under the title bar.
+unsafe extern "C" fn safe_area_insets(_receiver: Id, _sel: Sel) -> crate::controls::NSEdgeInsets {
+    crate::controls::NSEdgeInsets::default()
+}
+
 /// `-bounds`: the frame's size at the origin, which is what a view with no
 /// transform of its own has.
 unsafe extern "C" fn bounds(receiver: Id, _sel: Sel) -> NSRect {
@@ -3460,6 +3466,7 @@ pub(crate) fn install() {
         "setFrameSize:" => set_frame_size, c"v32@0:8{CGSize=dd}16";
         "setFrameOrigin:" => set_frame_origin, c"v32@0:8{CGPoint=dd}16";
         "bounds" => bounds, c"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8";
+        "safeAreaInsets" => safe_area_insets, c"{NSEdgeInsets=dddd}16@0:8";
         "visibleRect" => visible_rect, c"{CGRect={CGPoint=dd}{CGSize=dd}}16@0:8";
         "setBounds:" => set_bounds, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "setBoundsOrigin:" => set_bounds_origin, c"v32@0:8{CGPoint=dd}16";
@@ -3507,6 +3514,8 @@ pub(crate) fn install() {
         "didAddSubview:" => hook_with_object, c"v24@0:8@16";
         "willRemoveSubview:" => hook_with_object, c"v24@0:8@16";
         "removeFromSuperview" => remove_from_superview, c"v16@0:8";
+        // The same: removing a view here marks nothing as needing display.
+        "removeFromSuperviewWithoutNeedingDisplay" => remove_from_superview, c"v16@0:8";
         "dealloc" => dealloc, c"v16@0:8";
         "setWantsBestResolutionOpenGLSurface:" => set_wants_best_resolution, c"v20@0:8c16";
         "wantsBestResolutionOpenGLSurface" => wants_best_resolution, c"c16@0:8";
@@ -4896,6 +4905,8 @@ mod tests {
             return;
         }
         crate::bootstrap();
+        // The empty window's background is checked as Aqua's.
+        crate::appearance::use_aqua_on_this_thread();
         if !sdl3::may_pump() {
             return;
         }
@@ -5059,6 +5070,8 @@ mod tests {
             return;
         }
         crate::bootstrap();
+        // The empty window's background is checked as Aqua's.
+        crate::appearance::use_aqua_on_this_thread();
         if !sdl3::may_pump() {
             return;
         }
@@ -6874,6 +6887,8 @@ mod tests {
             return;
         }
         crate::bootstrap();
+        // The empty window's background is checked as Aqua's.
+        crate::appearance::use_aqua_on_this_thread();
         if !sdl3::may_pump() {
             return;
         }

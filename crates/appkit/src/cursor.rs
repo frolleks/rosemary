@@ -25,7 +25,8 @@ pub const TRACKING_AREA_INSTANCE_SIZE: usize = size_of::<TrackingArea>();
 #[repr(C)]
 pub struct Cursor {
     isa: *const c_void,
-    /// Which of the named cursors this is, an index into [`SHAPES`].
+    /// Which of the named cursors this is: an index into [`SHAPES`], then
+    /// past its end into [`FRAME_RESIZE`].
     shape: usize,
     /// The image a custom cursor was made from, retained, and where its point
     /// is. Both are read back by a program, and both are what `sdl` was built
@@ -145,7 +146,7 @@ fn show(cursor: Id) {
 fn sdl_of(cursor: &mut Cursor) -> sdl3::Cursor {
     if cursor.sdl.is_null()
         && cursor.image.is_null()
-        && let Some(id) = SHAPES.get(cursor.shape).and_then(|s| system_cursor(s))
+        && let Some(id) = shape_cursor(cursor.shape)
     {
         cursor.sdl = sdl3::video::create_system_cursor(id).unwrap_or(std::ptr::null_mut());
     }
@@ -820,6 +821,96 @@ fn cursor_for(shape: usize) -> Id {
     cursor as Id
 }
 
+/// The frame-resize cursors' shapes, after [`SHAPES`]: each edge's and corner's
+/// one-way arrow, then the two-way ones.
+static FRAME_RESIZE: &[std::ffi::c_int] = {
+    use sdl3::video::system_cursor::*;
+    &[
+        N_RESIZE,
+        S_RESIZE,
+        E_RESIZE,
+        W_RESIZE,
+        NW_RESIZE,
+        NE_RESIZE,
+        SW_RESIZE,
+        SE_RESIZE,
+        NS_RESIZE,
+        EW_RESIZE,
+        NWSE_RESIZE,
+        NESW_RESIZE,
+    ]
+};
+
+/// The desktop's shape for any cursor shape, or `None` to show its arrow.
+fn shape_cursor(shape: usize) -> Option<std::ffi::c_int> {
+    match SHAPES.get(shape) {
+        Some(name) => system_cursor(name),
+        None => FRAME_RESIZE.get(shape - SHAPES.len()).copied(),
+    }
+}
+
+/// `NSCursorFrameResizePosition`.
+mod position {
+    pub const TOP: usize = 1 << 0;
+    pub const LEFT: usize = 1 << 1;
+    pub const BOTTOM: usize = 1 << 2;
+    pub const RIGHT: usize = 1 << 3;
+}
+
+/// `NSCursorFrameResizeDirections`.
+mod directions {
+    pub const INWARD: usize = 1 << 0;
+    pub const OUTWARD: usize = 1 << 1;
+    pub const ALL: usize = INWARD | OUTWARD;
+}
+
+/// The frame-resize shape for an edge or corner, as the index into
+/// [`FRAME_RESIZE`]; `None` for a position that is neither.
+fn frame_resize_shape(at: usize, toward: usize) -> Option<usize> {
+    use sdl3::video::system_cursor::*;
+    // The outward direction from the edge, y growing downward.
+    let dy: i32 = match at & (position::TOP | position::BOTTOM) {
+        0 => 0,
+        position::TOP => -1,
+        position::BOTTOM => 1,
+        _ => return None,
+    };
+    let dx: i32 = match at & (position::LEFT | position::RIGHT) {
+        0 => 0,
+        position::LEFT => -1,
+        position::RIGHT => 1,
+        _ => return None,
+    };
+    let (dx, dy) = match toward {
+        directions::INWARD => (-dx, -dy),
+        directions::OUTWARD | directions::ALL => (dx, dy),
+        _ => return None,
+    };
+    let id = match (toward == directions::ALL, dx, dy) {
+        (_, 0, 0) => return None,
+        (true, 0, _) => NS_RESIZE,
+        (true, _, 0) => EW_RESIZE,
+        (true, _, _) if dx == dy => NWSE_RESIZE,
+        (true, _, _) => NESW_RESIZE,
+        (false, 0, -1) => N_RESIZE,
+        (false, 0, _) => S_RESIZE,
+        (false, 1, 0) => E_RESIZE,
+        (false, _, 0) => W_RESIZE,
+        (false, -1, -1) => NW_RESIZE,
+        (false, 1, -1) => NE_RESIZE,
+        (false, -1, _) => SW_RESIZE,
+        (false, _, _) => SE_RESIZE,
+    };
+    FRAME_RESIZE.iter().position(|shape| *shape == id)
+}
+
+/// `+[NSCursor frameResizeCursorFromPosition:inDirections:]`
+unsafe extern "C" fn frame_resize_cursor(_class: Id, _sel: Sel, at: usize, toward: usize) -> Id {
+    frame_resize_shape(at, toward).map_or(std::ptr::null_mut(), |index| {
+        cursor_for(SHAPES.len() + index)
+    })
+}
+
 /// The desktop's shape for a named cursor, or `None` to show its arrow. The
 /// hands, drag badges and menu cursor have no counterpart among SDL's shapes.
 fn system_cursor(name: &str) -> Option<std::ffi::c_int> {
@@ -1120,6 +1211,7 @@ pub(crate) fn install() {
     class_methods!(cursor, {
         "currentCursor" => current_cursor, c"@16@0:8";
         "currentSystemCursor" => current_system_cursor, c"@16@0:8";
+        "frameResizeCursorFromPosition:inDirections:" => frame_resize_cursor, c"@32@0:8Q16Q24";
         "pop" => class_pop, c"v16@0:8";
         "hide" => hide, c"v16@0:8";
         "unhide" => unhide, c"v16@0:8";
@@ -1145,6 +1237,25 @@ pub(crate) fn install() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_resize_cursors_point_along_their_edge() {
+        use sdl3::video::system_cursor::*;
+        let shape = |at, toward| frame_resize_shape(at, toward).map(|i| FRAME_RESIZE[i]);
+        assert_eq!(shape(position::TOP, directions::OUTWARD), Some(N_RESIZE));
+        assert_eq!(shape(position::TOP, directions::INWARD), Some(S_RESIZE));
+        assert_eq!(shape(position::LEFT, directions::ALL), Some(EW_RESIZE));
+        let top_left = position::TOP | position::LEFT;
+        assert_eq!(shape(top_left, directions::OUTWARD), Some(NW_RESIZE));
+        assert_eq!(shape(top_left, directions::INWARD), Some(SE_RESIZE));
+        assert_eq!(shape(top_left, directions::ALL), Some(NWSE_RESIZE));
+        let bottom_left = position::BOTTOM | position::LEFT;
+        assert_eq!(shape(bottom_left, directions::ALL), Some(NESW_RESIZE));
+        assert_eq!(
+            shape(position::TOP | position::BOTTOM, directions::ALL),
+            None
+        );
+    }
 
     /// The hide state is process-wide, so the tests that touch it take turns.
     static HIDE_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());

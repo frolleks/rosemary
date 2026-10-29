@@ -68,8 +68,69 @@ pub fn install() {
         originals.push((key, previous as u64));
     }
     let _ = ORIGINALS.set(originals);
+    install_va_list_formatters();
     install_predicate();
     install_object_lists();
+}
+
+/// Add `-[NSString initWithFormat:arguments:]` and its `locale:` spelling,
+/// which take a `va_list` and so need no trampoline to capture one.
+fn install_va_list_formatters() {
+    // SAFETY: NUL-terminated literals; every pointer is checked before use.
+    unsafe {
+        let class = host::objc_lookUpClass(c"NSString".as_ptr());
+        if class.is_null() {
+            return;
+        }
+        host::class_addMethod(
+            class,
+            host::sel_registerName(c"initWithFormat:arguments:".as_ptr()),
+            init_with_format_arguments as Imp,
+            c"@32@0:8@16^v24".as_ptr(),
+        );
+        host::class_addMethod(
+            class,
+            host::sel_registerName(c"initWithFormat:locale:arguments:".as_ptr()),
+            init_with_format_locale_arguments as Imp,
+            c"@40@0:8@16@24^v32".as_ptr(),
+        );
+    }
+}
+
+/// `-initWithFormat:arguments:`: the format rendered against `arguments`, then
+/// handed to `-initWithFormat:` so the receiver is initialised in one place.
+unsafe extern "C" fn init_with_format_arguments(
+    receiver: u64,
+    _sel: Sel,
+    format: u64,
+    arguments: u64,
+) -> u64 {
+    // SAFETY: a NUL-terminated literal.
+    let init = unsafe { host::sel_registerName(c"initWithFormat:".as_ptr()) };
+    let Some(original) = original(init) else {
+        objc::fail!("-initWithFormat:arguments: was sent before -initWithFormat: was recorded");
+    };
+    let rendered =
+        super::nslog::native::render_escaped("initWithFormat:arguments:", format, arguments)
+            .unwrap_or(format);
+    // SAFETY: the `IMP` `-initWithFormat:` had, which is `id (id, SEL, NSString *)`.
+    unsafe {
+        let f: unsafe extern "C" fn(u64, Sel, u64) -> u64 = core::mem::transmute(original);
+        f(receiver, init, rendered)
+    }
+}
+
+// FIXME (ACCURACY): the locale is not consulted, as `CFStringCreateWithFormat`
+// here does not consult one either.
+unsafe extern "C" fn init_with_format_locale_arguments(
+    receiver: u64,
+    sel: Sel,
+    format: u64,
+    _locale: u64,
+    arguments: u64,
+) -> u64 {
+    // SAFETY: the same receiver, format and `va_list`.
+    unsafe { init_with_format_arguments(receiver, sel, format, arguments) }
 }
 
 /// `+predicateWithFormat:`'s selector, which [`service`] answers itself.

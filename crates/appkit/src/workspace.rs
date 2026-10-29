@@ -70,6 +70,23 @@ unsafe extern "C" fn application_url_for_url(_receiver: Id, _sel: Sel, _url: Id)
     std::ptr::null_mut()
 }
 
+/// `-URLForApplicationWithBundleIdentifier:`; see
+/// [`crate::launchservices::application_url`].
+unsafe extern "C" fn application_url_for_identifier(
+    _receiver: Id,
+    _sel: Sel,
+    identifier: Id,
+) -> Id {
+    // SAFETY: an `NSString` or nil.
+    let identifier = unsafe { foundation::string::bytes(identifier) };
+    std::str::from_utf8(&identifier)
+        .ok()
+        .and_then(crate::launchservices::application_url)
+        .map_or(std::ptr::null_mut(), |url| {
+            objc::arc::autorelease(url as Id)
+        })
+}
+
 /// `-[NSWorkspace openURL:]`: to this application when it is the scheme's
 /// handler, as LaunchServices sends a running handler the URL, and to the
 /// host's registered handler otherwise.
@@ -193,7 +210,8 @@ fn object_for(application: &server::protocol::Application) -> Id {
     object
 }
 
-/// `-[NSWorkspace iconForFileType:]` and `-iconForFile:`: a blank 32x32 image.
+/// `-[NSWorkspace iconForFileType:]`, `-iconForFile:` and
+/// `-iconForContentType:`: a blank 32x32 image.
 ///
 /// Apple never answers nil - a type it knows nothing about gets the generic
 /// document icon - and a program puts the result straight into a cell or menu
@@ -533,6 +551,8 @@ pub(crate) fn install() {
     });
     methods!(class, {
         "URLForApplicationToOpenURL:" => application_url_for_url, c"@24@0:8@16";
+        "URLForApplicationWithBundleIdentifier:" => application_url_for_identifier,
+            c"@24@0:8@16";
         "openURL:" => open_url, c"c24@0:8@16";
         "isVoiceOverEnabled" => voice_over_enabled, c"c16@0:8";
         "openFile:" => open_file, c"c24@0:8@16";
@@ -544,6 +564,7 @@ pub(crate) fn install() {
             c"@48@0:8@16Q24@32^@40";
         "iconForFileType:" => icon_for_file_type, c"@24@0:8@16";
         "iconForFile:" => icon_for_file_type, c"@24@0:8@16";
+        "iconForContentType:" => icon_for_file_type, c"@24@0:8@16";
         "isFilePackageAtPath:" => is_file_package, c"c24@0:8@16";
     });
 

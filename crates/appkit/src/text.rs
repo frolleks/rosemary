@@ -1386,7 +1386,7 @@ impl TextStyle {
 
 /// Device pixels per point under `port`'s current transform, so text drawn
 /// through it is rasterised at the resolution it lands at.
-fn port_density(port: *const std::ffi::c_void) -> f64 {
+pub(crate) fn port_density(port: *const std::ffi::c_void) -> f64 {
     // SAFETY: the live context the current `NSGraphicsContext` holds.
     let m = unsafe { crate::cgcontext::CGContextGetCTM(port) };
     let scale = (m.a * m.d - m.b * m.c).abs().sqrt();
@@ -1397,15 +1397,15 @@ fn port_density(port: *const std::ffi::c_void) -> f64 {
     }
 }
 
-/// Text rasterised into `rect`, top row first, painted into `port` the way
-/// AppKit draws a string into a context a program made over its own
+/// Text or a control rasterised into `rect`, top row first, painted into
+/// `port` the way AppKit draws a string into a context a program made over its own
 /// `CGContext`: through that context's transform, clip and blend mode, and
 /// upright whether or not the context is flipped.
 ///
 /// FIXME (ACCURACY): the text goes through the context as an image at
 /// `port_density`, not as glyph outlines, so a rotated or skewed transform
 /// resamples it.
-fn draw_into_port(
+pub(crate) fn draw_into_port(
     port: *const std::ffi::c_void,
     flipped: bool,
     rect: NSRect,

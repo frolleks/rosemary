@@ -657,12 +657,8 @@ const _: () = {
 fn host_basic_info() -> HostBasicInfo {
     let arch = crate::sysctl::guest_arch();
     let logical = crate::sysctl::ncpu() as i32;
-    // SAFETY: `sysconf` reads a count and touches no memory of ours.
-    let configured = (unsafe { libc::sysconf(libc::_SC_NPROCESSORS_CONF) } as i32).max(logical);
-    // A host that cannot tell cores from SMT threads answers what a machine
-    // without SMT would.
-    let physical =
-        starnix::system::physical_cores().map_or(logical, |cores| (cores as i32).min(logical));
+    let configured = crate::sysctl::configured_cpus() as i32;
+    let physical = crate::sysctl::physical_cpus() as i32;
     let max_mem = crate::sysctl::memsize();
     HostBasicInfo {
         max_cpus: configured,

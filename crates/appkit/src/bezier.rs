@@ -510,6 +510,32 @@ impl PathData {
         self.close();
     }
 
+    /// Radii are clamped to half the rect's sides, as Apple's are; a zero
+    /// radius leaves the plain rect.
+    fn append_rounded_rect(&mut self, rect: NSRect, x_radius: f64, y_radius: f64) {
+        let (x0, x1) = (rect.origin.x, rect.origin.x + rect.size.width);
+        let (y0, y1) = (rect.origin.y, rect.origin.y + rect.size.height);
+        let (x0, x1, y0, y1) = (x0.min(x1), x0.max(x1), y0.min(y1), y0.max(y1));
+        let rx = x_radius.clamp(0.0, (x1 - x0) / 2.0);
+        let ry = y_radius.clamp(0.0, (y1 - y0) / 2.0);
+        if rx == 0.0 || ry == 0.0 {
+            return self.append_rect(rect);
+        }
+        // Control-point distance of a cubic quarter-circle, per unit radius.
+        const KAPPA: f64 = 4.0 / 3.0 * (std::f64::consts::SQRT_2 - 1.0);
+        let (kx, ky) = (rx * KAPPA, ry * KAPPA);
+        self.move_to([x0 + rx, y0]);
+        self.line_to([x1 - rx, y0]);
+        self.curve_to([x1, y0 + ry], [x1 - rx + kx, y0], [x1, y0 + ry - ky]);
+        self.line_to([x1, y1 - ry]);
+        self.curve_to([x1 - rx, y1], [x1, y1 - ry + ky], [x1 - rx + kx, y1]);
+        self.line_to([x0 + rx, y1]);
+        self.curve_to([x0, y1 - ry], [x0 + rx - kx, y1], [x0, y1 - ry + ky]);
+        self.line_to([x0, y0 + ry]);
+        self.curve_to([x0 + rx, y0], [x0, y0 + ry - ky], [x0 + rx - kx, y0]);
+        self.close();
+    }
+
     fn append_oval(&mut self, rect: NSRect) {
         let (cx, cy) = (
             rect.origin.x + rect.size.width / 2.0,
@@ -632,6 +658,37 @@ unsafe extern "C" fn bezier_path_with_oval(_class: Id, _sel: Sel, rect: NSRect) 
     new_path(contents)
 }
 
+unsafe extern "C" fn bezier_path_with_rounded_rect(
+    _class: Id,
+    _sel: Sel,
+    rect: NSRect,
+    x_radius: f64,
+    y_radius: f64,
+) -> Id {
+    let mut contents = PathData::default();
+    contents.append_rounded_rect(rect, x_radius, y_radius);
+    new_path(contents)
+}
+
+/// Fill a rounded rect in the current fill colour.
+pub(crate) fn fill_rounded_rect(rect: NSRect, radius: f64) {
+    let mut contents = PathData::default();
+    contents.append_rounded_rect(rect, radius, radius);
+    let (fill, _) = crate::color::current();
+    paint(contents.fill_polygons(), false, fill);
+}
+
+/// Stroke a rounded rect `width` wide in the current stroke colour.
+pub(crate) fn stroke_rounded_rect(rect: NSRect, radius: f64, width: f64) {
+    let mut contents = PathData {
+        line_width: width,
+        ..PathData::default()
+    };
+    contents.append_rounded_rect(rect, radius, radius);
+    let (_, stroke) = crate::color::current();
+    paint(contents.stroke_polygons(), false, stroke);
+}
+
 unsafe extern "C" fn fill_rect(_class: Id, _sel: Sel, rect: NSRect) {
     let (fill, _) = crate::color::current();
     paint(vec![rect_points(rect)], false, fill);
@@ -695,6 +752,16 @@ unsafe extern "C" fn close_path(receiver: Id, _sel: Sel) {
 
 unsafe extern "C" fn append_rect(receiver: Id, _sel: Sel, rect: NSRect) {
     data(receiver).append_rect(rect);
+}
+
+unsafe extern "C" fn append_rounded_rect(
+    receiver: Id,
+    _sel: Sel,
+    rect: NSRect,
+    x_radius: f64,
+    y_radius: f64,
+) {
+    data(receiver).append_rounded_rect(rect, x_radius, y_radius);
 }
 
 unsafe extern "C" fn append_oval(receiver: Id, _sel: Sel, rect: NSRect) {
@@ -784,6 +851,7 @@ pub(crate) fn install() {
         "bezierPath" => bezier_path, c"@16@0:8";
         "bezierPathWithRect:" => bezier_path_with_rect, c"@48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "bezierPathWithOvalInRect:" => bezier_path_with_oval, c"@48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "bezierPathWithRoundedRect:xRadius:yRadius:" => bezier_path_with_rounded_rect, c"@64@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16d48d56";
         "fillRect:" => fill_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "strokeRect:" => stroke_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "strokeLineFromPoint:toPoint:" => stroke_line, c"v48@0:8{CGPoint=dd}16{CGPoint=dd}32";
@@ -798,6 +866,7 @@ pub(crate) fn install() {
         "relativeLineToPoint:" => relative_line_to_point, c"v32@0:8{CGPoint=dd}16";
         "closePath" => close_path, c"v16@0:8";
         "appendBezierPathWithRect:" => append_rect, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
+        "appendBezierPathWithRoundedRect:xRadius:yRadius:" => append_rounded_rect, c"v64@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16d48d56";
         "appendBezierPathWithOvalInRect:" => append_oval, c"v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16";
         "appendBezierPath:" => append_path, c"v24@0:8@16";
         "removeAllPoints" => remove_all_points, c"v16@0:8";
@@ -854,6 +923,42 @@ mod tests {
         let centre = |mask: &Mask| mask.coverage[3 * mask.width + 3];
         assert_eq!(centre(&rasterize(&shapes, true, 8, 8).unwrap()), 0.0);
         assert_eq!(centre(&rasterize(&shapes, false, 8, 8).unwrap()), 1.0);
+    }
+
+    #[test]
+    fn rounded_rect_clamps_radii_and_keeps_its_bounds() {
+        let rect = NSRect {
+            origin: NSPoint { x: 2.0, y: 3.0 },
+            size: NSSize {
+                width: 10.0,
+                height: 4.0,
+            },
+        };
+        let mut path = PathData::default();
+        path.append_rounded_rect(rect, 100.0, 100.0);
+        let bounds = path.bounds();
+        assert_eq!((bounds.origin.x, bounds.origin.y), (2.0, 3.0));
+        assert!((bounds.size.width - 10.0).abs() < 1e-9);
+        assert!((bounds.size.height - 4.0).abs() < 1e-9);
+        let points = &path.subpaths[0].points;
+        assert!(path.subpaths[0].closed);
+        assert!(!points.contains(&[2.0, 3.0]), "the corner is cut");
+        assert!(points.contains(&[7.0, 3.0]), "x radius clamps to 5");
+        assert!(points.contains(&[2.0, 5.0]), "y radius clamps to 2");
+    }
+
+    #[test]
+    fn rounded_rect_with_zero_radius_is_the_plain_rect() {
+        let rect = NSRect {
+            origin: NSPoint { x: 1.0, y: 1.0 },
+            size: NSSize {
+                width: 4.0,
+                height: 4.0,
+            },
+        };
+        let mut path = PathData::default();
+        path.append_rounded_rect(rect, 0.0, 3.0);
+        assert_eq!(path.subpaths[0].points, rect_points(rect));
     }
 
     #[test]

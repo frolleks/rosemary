@@ -155,6 +155,48 @@ pub unsafe extern "C" fn CGImageSourceCreateWithData(
     source as CFTypeRef
 }
 
+/// `CFArrayRef CGImageSourceCopyTypeIdentifiers(void)`: the formats
+/// [`CGImageSourceCreateImageAtIndex`] can decode.
+pub unsafe extern "C" fn CGImageSourceCopyTypeIdentifiers() -> CFTypeRef {
+    let identifiers: Vec<CFTypeRef> = crate::raster::TYPE_IDENTIFIERS
+        .iter()
+        .map(|identifier| corefoundation::string::from_bytes(identifier.as_bytes(), false))
+        .collect();
+    let array = corefoundation::collections::new_array(
+        &identifiers,
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    );
+    for identifier in identifiers {
+        // SAFETY: each string was made above and is now held by the array.
+        unsafe { corefoundation::api::CFRelease(identifier) };
+    }
+    array
+}
+
+/// `CFArrayRef CGImageDestinationCopyTypeIdentifiers(void)`: empty, because
+/// there is no encoder here - see [`CGImageDestinationCreateWithData`].
+pub unsafe extern "C" fn CGImageDestinationCopyTypeIdentifiers() -> CFTypeRef {
+    corefoundation::collections::new_array(
+        &[],
+        corefoundation::callbacks::Policy::from_type_callbacks(),
+        false,
+    )
+}
+
+/// `CGImageDestinationRef CGImageDestinationCreateWithData(CFMutableDataRef,
+/// CFStringRef type, size_t count, CFDictionaryRef options)`, and its
+/// data-consumer spelling: null, the documented failure, for every type, as
+/// [`CGImageDestinationCopyTypeIdentifiers`] lists none.
+pub unsafe extern "C" fn CGImageDestinationCreateWithData(
+    _data: CFTypeRef,
+    _type: CFTypeRef,
+    _count: usize,
+    _options: CFTypeRef,
+) -> CFTypeRef {
+    std::ptr::null()
+}
+
 /// Decodes the sole image in a source. The formats supported here are the same
 /// ones NSImage accepts through the shared raster decoder.
 pub unsafe extern "C" fn CGImageSourceCreateImageAtIndex(

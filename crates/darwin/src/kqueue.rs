@@ -32,6 +32,7 @@ const EVFILT_WRITE: i16 = -2;
 const EVFILT_SIGNAL: i16 = -6;
 const EVFILT_MACHPORT: i16 = -8;
 const EVFILT_USER: i16 = -10;
+const EVFILT_SOCK: i16 = -13;
 
 const EV_ADD: u16 = 0x0001;
 const EV_DELETE: u16 = 0x0002;
@@ -47,6 +48,19 @@ const EV_EOF: u16 = 0x8000;
 /// `NOTE_TRIGGER`, the one `fflags` bit `EVFILT_USER` acts on.
 const NOTE_TRIGGER: u32 = 0x0100_0000;
 
+/// The `EVFILT_SOCK` conditions, from `<sys/event.h>`. Only a host whose
+/// backend observes them reads the ones `kevent` itself does not.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const NOTE_READCLOSED: u32 = 0x0000_0002;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const NOTE_WRITECLOSED: u32 = 0x0000_0004;
+const NOTE_CONNECTED: u32 = 0x0000_0800;
+const NOTE_DISCONNECTED: u32 = 0x0000_1000;
+
+/// `SOCKEV_*`, the connection state an `EVFILT_SOCK` event carries in `data`.
+const SOCKEV_CONNECTED: isize = 0x1;
+const SOCKEV_DISCONNECTED: isize = 0x2;
+
 /// `MACH_RCV_MSG` in an `EVFILT_MACHPORT` registration's `fflags`: receive the
 /// message into the event. Only `kevent64`/`kevent_qos` have room for it.
 const MACH_RCV_MSG: u32 = 0x0000_0002;
@@ -61,7 +75,8 @@ struct Registration {
     udata: usize,
     enabled: bool,
     /// `EVFILT_SIGNAL`: how many deliveries of the signal were already
-    /// reported, or happened before the registration.
+    /// reported, or happened before the registration. `EVFILT_SOCK`: the
+    /// conditions already reported, which Darwin reports once each.
     seen: u64,
 }
 
@@ -176,6 +191,13 @@ trait ReadinessBackend: Sized {
         capacity: usize,
         timeout: c_int,
     ) -> Result<Vec<Ready>, c_int>;
+    /// The edge interest bit that wakes an `EVFILT_SOCK` registration, or 0
+    /// where the host cannot observe the conditions it reports.
+    const SOCKET_STATE: i16 = 0;
+    /// The `NOTE_*` conditions that hold on socket `fd` now.
+    fn socket_conditions(_: c_int) -> u32 {
+        0
+    }
 }
 
 /// The portable reconstruction of a readiness set. It remains the complete
@@ -316,6 +338,26 @@ impl EpollBackend {
     fn events(interest: i16) -> u32 {
         ((interest & libc::POLLIN != 0) as u32 * libc::EPOLLIN as u32)
             | ((interest & libc::POLLOUT != 0) as u32 * libc::EPOLLOUT as u32)
+            | ((interest & libc::POLLRDHUP != 0) as u32 * libc::EPOLLRDHUP as u32)
+    }
+
+    /// Whether `fd` has ever had a peer. `SO_PEERNAME` still names it after
+    /// the connection ends, where `getpeername` does not, and names nothing
+    /// on a socket that was never connected - which this host reports hung up.
+    fn had_peer(fd: c_int) -> bool {
+        // Zero bytes: the option refuses a buffer longer than the address.
+        let mut len: libc::socklen_t = 0;
+        let mut unused = 0u8;
+        // SAFETY: a zero-length buffer and its length.
+        unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERNAME,
+                (&raw mut unused).cast(),
+                &mut len,
+            ) == 0
+        }
     }
 
     /// Move `fd`'s entry in `epoll` from `before` to `after`.
@@ -401,6 +443,40 @@ impl ReadinessBackend for EpollBackend {
     }
 
     const EDGE: bool = true;
+    const SOCKET_STATE: i16 = libc::POLLRDHUP;
+
+    // FIXME (ACCURACY): a reset is `NOTE_READCLOSED | NOTE_DISCONNECTED`
+    // without `NOTE_CONNRESET`, since telling it apart means reading - and
+    // clearing - the socket's pending error; and only a hangup wakes a queue,
+    // so `NOTE_CONNECTED` is reported alongside another condition, never alone.
+    // Darwin's other conditions are its own network stack's and never occur.
+    fn socket_conditions(fd: c_int) -> u32 {
+        let mut probe = libc::pollfd {
+            fd,
+            events: libc::POLLRDHUP,
+            revents: 0,
+        };
+        // SAFETY: one `pollfd` this function owns, and no wait.
+        if unsafe { libc::poll(&raw mut probe, 1, 0) } < 0 {
+            return 0;
+        }
+        let mut conditions = 0;
+        if probe.revents & libc::POLLRDHUP != 0 {
+            conditions |= NOTE_READCLOSED;
+        }
+        if probe.revents & libc::POLLHUP != 0 && Self::had_peer(fd) {
+            conditions |= NOTE_WRITECLOSED | NOTE_DISCONNECTED;
+        } else {
+            // SAFETY: zero is a valid `sockaddr_storage`.
+            let mut addr: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            let mut len = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            // SAFETY: a `sockaddr_storage` this function owns, with its size.
+            if unsafe { libc::getpeername(fd, (&raw mut addr).cast(), &mut len) } == 0 {
+                conditions |= NOTE_CONNECTED;
+            }
+        }
+        conditions
+    }
 
     fn update(&self, fd: c_int, before: Interest, after: Interest) -> Result<(), c_int> {
         if before.edge != after.edge {
@@ -467,7 +543,7 @@ impl ReadinessBackend for EpollBackend {
             revents: 0,
         });
         for fd in &poll_only {
-            let interest = interest_for(registrations, *fd).level;
+            let interest = interest_for::<Self>(registrations, *fd).level;
             if interest != 0 {
                 watched.push(libc::pollfd {
                     fd: *fd,
@@ -567,6 +643,7 @@ fn epoll_revents(events: u32) -> i16 {
         | ((events & libc::EPOLLOUT as u32 != 0) as i16 * libc::POLLOUT)
         | ((events & libc::EPOLLERR as u32 != 0) as i16 * libc::POLLERR)
         | ((events & libc::EPOLLHUP as u32 != 0) as i16 * libc::POLLHUP)
+        | ((events & libc::EPOLLRDHUP as u32 != 0) as i16 * libc::POLLRDHUP)
 }
 
 /// The host's own kqueue. Guest signals are emulated, so `EVFILT_SIGNAL` and
@@ -1016,8 +1093,9 @@ fn drain_fd(queue: c_int) {
 fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(), c_int> {
     if !matches!(
         change.filter,
-        EVFILT_READ | EVFILT_WRITE | EVFILT_USER | EVFILT_SIGNAL | EVFILT_MACHPORT
-    ) {
+        EVFILT_READ | EVFILT_WRITE | EVFILT_USER | EVFILT_SIGNAL | EVFILT_MACHPORT | EVFILT_SOCK
+    ) || (change.filter == EVFILT_SOCK && B::SOCKET_STATE == 0)
+    {
         return Err(crate::errno::from_host(libc::EINVAL));
     }
     let key = (change.ident, change.filter);
@@ -1085,6 +1163,16 @@ fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(
             if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
                 return Err(crate::errno::from_host(crate::errno::get()));
             }
+            if change.filter == EVFILT_SOCK {
+                // SAFETY: zero is a valid `stat`, which `fstat` overwrites.
+                let mut status: libc::stat = unsafe { std::mem::zeroed() };
+                let is_socket = unsafe { libc::fstat(fd, &raw mut status) } == 0
+                    && status.st_mode & libc::S_IFMT == libc::S_IFSOCK;
+                if !is_socket {
+                    return Err(crate::errno::from_host(libc::EINVAL));
+                }
+                seen = registrations.get(&key).map_or(0, |existing| existing.seen);
+            }
         }
         registrations.insert(
             key,
@@ -1134,7 +1222,16 @@ fn apply<B: ReadinessBackend>(state: &mut Queue<B>, change: &Kevent) -> Result<(
     Ok(())
 }
 
-fn interest_for(registrations: &HashMap<(usize, i16), Registration>, fd: c_int) -> Interest {
+/// Whether a registration is answered from the backend's edges. Darwin reports
+/// each `EVFILT_SOCK` condition once, with or without `EV_CLEAR`.
+fn edge_triggered(registration: &Registration) -> bool {
+    registration.flags & EV_CLEAR != 0 || registration.filter == EVFILT_SOCK
+}
+
+fn interest_for<B: ReadinessBackend>(
+    registrations: &HashMap<(usize, i16), Registration>,
+    fd: c_int,
+) -> Interest {
     registrations
         .values()
         .filter(|registration| registration.enabled && registration.ident == fd as usize)
@@ -1142,9 +1239,10 @@ fn interest_for(registrations: &HashMap<(usize, i16), Registration>, fd: c_int) 
             let bit = match registration.filter {
                 EVFILT_READ => libc::POLLIN,
                 EVFILT_WRITE => libc::POLLOUT,
+                EVFILT_SOCK => B::SOCKET_STATE,
                 _ => 0,
             };
-            match registration.flags & EV_CLEAR != 0 {
+            match edge_triggered(registration) {
                 true => interest.edge |= bit,
                 false => interest.level |= bit,
             }
@@ -1207,8 +1305,8 @@ fn sync_interest<B: ReadinessBackend>(
         .backend
         .update(
             fd,
-            interest_for(&state.registrations, fd),
-            interest_for(registrations, fd),
+            interest_for::<B>(&state.registrations, fd),
+            interest_for::<B>(registrations, fd),
         )
         .map_err(crate::errno::from_host)
 }
@@ -1312,26 +1410,29 @@ pub unsafe extern "C" fn kevent(
     };
     {
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut unreported = None;
         for change in changes {
             let failure = apply(&mut state, change).err();
-            // `EV_RECEIPT` asks for the *outcome of every change* rather than
-            // for readiness, and it asks for it whether or not the change
-            // failed - which is how a caller applies a batch and finds out
-            // which one of them the kernel rejected.
-            if change.flags & EV_RECEIPT != 0 {
-                if out.len() < capacity {
-                    out.push(Kevent {
-                        flags: EV_ERROR,
-                        data: failure.unwrap_or(0) as isize,
-                        ..*change
-                    });
-                }
+            // A failed change is an `EV_ERROR` event while there is room for
+            // one, and the batch goes on; only a failure with nowhere to go
+            // fails the call. `EV_RECEIPT` asks for that event on success too,
+            // which is how a caller finds out which change was rejected.
+            if failure.is_none() && change.flags & EV_RECEIPT == 0 {
                 continue;
             }
-            if let Some(errno) = failure {
-                crate::errno::set(crate::errno::to_host(errno));
-                return -1;
+            if out.len() < capacity {
+                out.push(Kevent {
+                    flags: change.flags | EV_ERROR,
+                    data: failure.unwrap_or(0) as isize,
+                    ..*change
+                });
+            } else if failure.is_some() {
+                unreported = failure;
             }
+        }
+        if let Some(errno) = unreported {
+            crate::errno::set(crate::errno::to_host(errno));
+            return -1;
         }
     }
     if capacity == 0 {
@@ -1535,36 +1636,51 @@ pub unsafe extern "C" fn kevent(
         let firing: Vec<((usize, i16), Registration)> = state
             .registrations
             .iter()
-            .filter(|(_, r)| {
-                r.enabled && r.ident == entry.fd as usize && (r.flags & EV_CLEAR != 0) == edge
-            })
+            .filter(|(_, r)| r.enabled && r.ident == entry.fd as usize && edge_triggered(r) == edge)
             .map(|(key, r)| (*key, *r))
             .collect();
         for (key, registration) in firing {
             if out.len() == capacity {
                 break;
             }
-            let wanted = match registration.filter {
-                EVFILT_READ => libc::POLLIN,
-                EVFILT_WRITE => libc::POLLOUT,
-                _ => continue,
-            };
-            // The three conditions `poll` reports whether or not they were
-            // asked for. A hangup or an error is readiness as far as kqueue is
-            // concerned - the read that follows is what reports it.
-            if entry.revents & (wanted | libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) == 0 {
-                continue;
-            }
             let mut event = registration.fired();
-            if entry.revents & libc::POLLNVAL != 0 {
-                event.flags |= EV_ERROR;
-                event.data = crate::errno::from_host(libc::EBADF) as isize;
-            } else {
-                if entry.revents & libc::POLLHUP != 0 {
-                    event.flags |= EV_EOF;
+            if registration.filter == EVFILT_SOCK {
+                let now = SelectedBackend::socket_conditions(entry.fd);
+                let reported = now & registration.fflags;
+                if reported as u64 & !registration.seen == 0 {
+                    continue;
                 }
-                if registration.filter == EVFILT_READ {
-                    event.data = readable_bytes(entry.fd);
+                if let Some(registration) = state.registrations.get_mut(&key) {
+                    registration.seen |= reported as u64;
+                }
+                event.fflags = reported;
+                event.data = match now {
+                    now if now & NOTE_DISCONNECTED != 0 => SOCKEV_DISCONNECTED,
+                    now if now & NOTE_CONNECTED != 0 => SOCKEV_CONNECTED,
+                    _ => 0,
+                };
+            } else {
+                let wanted = match registration.filter {
+                    EVFILT_READ => libc::POLLIN,
+                    EVFILT_WRITE => libc::POLLOUT,
+                    _ => continue,
+                };
+                // The three conditions `poll` reports whether or not they were
+                // asked for. A hangup or an error is readiness as far as kqueue
+                // is concerned - the read that follows is what reports it.
+                if entry.revents & (wanted | libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) == 0 {
+                    continue;
+                }
+                if entry.revents & libc::POLLNVAL != 0 {
+                    event.flags |= EV_ERROR;
+                    event.data = crate::errno::from_host(libc::EBADF) as isize;
+                } else {
+                    if entry.revents & libc::POLLHUP != 0 {
+                        event.flags |= EV_EOF;
+                    }
+                    if registration.filter == EVFILT_READ {
+                        event.data = readable_bytes(entry.fd);
+                    }
                 }
             }
             out.push(event);
@@ -1572,16 +1688,16 @@ pub unsafe extern "C" fn kevent(
             // `EV_DISPATCH` disables it until it is enabled again. Both are how
             // a caller avoids being handed the same readiness on every turn.
             if registration.flags & EV_ONESHOT != 0 {
-                let before = interest_for(&state.registrations, entry.fd);
+                let before = interest_for::<SelectedBackend>(&state.registrations, entry.fd);
                 state.registrations.remove(&key);
-                let after = interest_for(&state.registrations, entry.fd);
+                let after = interest_for::<SelectedBackend>(&state.registrations, entry.fd);
                 let _ = state.backend.update(entry.fd, before, after);
             } else if registration.flags & EV_DISPATCH != 0 {
-                let before = interest_for(&state.registrations, entry.fd);
+                let before = interest_for::<SelectedBackend>(&state.registrations, entry.fd);
                 if let Some(registration) = state.registrations.get_mut(&key) {
                     registration.enabled = false;
                 }
-                let after = interest_for(&state.registrations, entry.fd);
+                let after = interest_for::<SelectedBackend>(&state.registrations, entry.fd);
                 let _ = state.backend.update(entry.fd, before, after);
             }
         }
@@ -2038,24 +2154,39 @@ mod tests {
         assert_eq!(n, 1);
         assert_eq!(got[0].flags & EV_ERROR, EV_ERROR);
         assert_eq!(got[0].data as i32, crate::errno::from_host(libc::EINVAL));
-        // And without `EV_RECEIPT` the whole call fails.
+        // Without `EV_RECEIPT` the failure is still an event while there is
+        // room for one, and fails the whole call only when there is not.
         let add = Kevent {
             flags: EV_ADD,
             ..add
         };
-        assert_eq!(
-            unsafe {
+        got = [Kevent::default(); 1];
+        // SAFETY: one change, then room for one event and for none.
+        unsafe {
+            assert_eq!(
                 kevent(
                     queue,
                     &raw const add,
                     1,
                     got.as_mut_ptr(),
                     1,
-                    &raw const NO_WAIT,
-                )
-            },
-            -1
-        );
+                    &raw const NO_WAIT
+                ),
+                1
+            );
+            assert_eq!(got[0].flags & EV_ERROR, EV_ERROR);
+            assert_eq!(
+                kevent(
+                    queue,
+                    &raw const add,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    &raw const NO_WAIT
+                ),
+                -1
+            );
+        }
         // SAFETY: this test's own descriptor.
         unsafe { crate::net::descriptor::close(queue) };
     }
@@ -2227,6 +2358,80 @@ mod tests {
         assert_eq!(crate::errno::get(), libc::EINVAL);
         // SAFETY: this test's own descriptor.
         unsafe { crate::net::descriptor::close(queue) };
+    }
+
+    /// Netty's registration: the peer's half of a connection closing, which
+    /// is reported once per condition even without `EV_CLEAR`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_event_reports_each_closing_condition_once() {
+        use std::os::fd::AsRawFd;
+        const NOTE_CONNRESET: u32 = 0x1;
+        let (local, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let queue = kqueue();
+        let add = Kevent {
+            ident: local.as_raw_fd() as usize,
+            filter: EVFILT_SOCK,
+            flags: EV_ADD,
+            fflags: NOTE_CONNRESET | NOTE_READCLOSED | NOTE_DISCONNECTED,
+            ..Kevent::default()
+        };
+        assert_eq!(collect(queue, Some(&add)).0, 0, "nothing has closed");
+
+        peer.shutdown(std::net::Shutdown::Write).unwrap();
+        let (n, got) = collect(queue, None);
+        assert_eq!(
+            (n, got.filter, got.fflags),
+            (1, EVFILT_SOCK, NOTE_READCLOSED)
+        );
+        assert_eq!(got.data, SOCKEV_CONNECTED);
+        assert_eq!(collect(queue, None).0, 0, "and only once");
+
+        drop(peer);
+        let (n, got) = collect(queue, None);
+        assert_eq!(n, 1);
+        assert_eq!(got.fflags, NOTE_READCLOSED | NOTE_DISCONNECTED);
+        assert_eq!(got.data, SOCKEV_DISCONNECTED);
+        // SAFETY: this test's own descriptor.
+        unsafe { crate::net::descriptor::close(queue) };
+    }
+
+    /// Netty registers a client socket before it connects; this host reports
+    /// such a socket hung up, and Darwin reports nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_that_never_connected_is_not_disconnected() {
+        // SAFETY: a TCP socket of this test's own making.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0);
+        let queue = kqueue();
+        let add = Kevent {
+            ident: fd as usize,
+            filter: EVFILT_SOCK,
+            flags: EV_ADD,
+            fflags: NOTE_READCLOSED | NOTE_WRITECLOSED | NOTE_DISCONNECTED,
+            ..Kevent::default()
+        };
+        assert_eq!(collect(queue, Some(&add)).0, 0);
+        // SAFETY: this test's own descriptors.
+        unsafe {
+            libc::close(fd);
+            crate::net::descriptor::close(queue);
+        }
+    }
+
+    #[test]
+    fn a_socket_event_on_a_pipe_is_refused() {
+        let (read_end, write_end) = pipe();
+        let queue = kqueue();
+        assert_eq!(watch(queue, read_end as usize, EVFILT_SOCK, EV_ADD), -1);
+        assert_eq!(crate::errno::get(), libc::EINVAL);
+        // SAFETY: this test's own descriptors.
+        unsafe {
+            libc::close(read_end);
+            libc::close(write_end);
+            crate::net::descriptor::close(queue);
+        }
     }
 
     /// Crashpad's handshake watches its pipe this way and blocks until

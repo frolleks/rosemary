@@ -4705,13 +4705,19 @@ pub mod video {
 
         pub const TEXT: c_int = 1;
         pub const CROSSHAIR: c_int = 3;
+        pub const NWSE_RESIZE: c_int = 5;
+        pub const NESW_RESIZE: c_int = 6;
         pub const EW_RESIZE: c_int = 7;
         pub const NS_RESIZE: c_int = 8;
         pub const NOT_ALLOWED: c_int = 10;
         pub const POINTER: c_int = 11;
+        pub const NW_RESIZE: c_int = 12;
         pub const N_RESIZE: c_int = 13;
+        pub const NE_RESIZE: c_int = 14;
         pub const E_RESIZE: c_int = 15;
+        pub const SE_RESIZE: c_int = 16;
         pub const S_RESIZE: c_int = 17;
+        pub const SW_RESIZE: c_int = 18;
         pub const W_RESIZE: c_int = 19;
     }
 

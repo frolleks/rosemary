@@ -42,6 +42,25 @@ const ATTRIBUTE_GLOBALS: &[(&str, &str)] = &[
     ("_kCTFontSymbolicTrait", "CTFontSymbolicTrait"),
     ("_kCTFontTraitsAttribute", "CTFontTraitsAttribute"),
     ("_kCTFontURLAttribute", "CTFontURLAttribute"),
+    ("_kCTFontVariationAttribute", "NSCTFontVariationAttribute"),
+    (
+        "_kCTFontVariationAxisIdentifierKey",
+        VARIATION_AXIS_IDENTIFIER,
+    ),
+    (
+        "_kCTFontVariationAxisMinimumValueKey",
+        VARIATION_AXIS_MINIMUM,
+    ),
+    (
+        "_kCTFontVariationAxisMaximumValueKey",
+        VARIATION_AXIS_MAXIMUM,
+    ),
+    (
+        "_kCTFontVariationAxisDefaultValueKey",
+        VARIATION_AXIS_DEFAULT,
+    ),
+    ("_kCTFontVariationAxisNameKey", VARIATION_AXIS_NAME),
+    ("_kCTFontVariationAxisHiddenKey", VARIATION_AXIS_HIDDEN),
     ("_kCTFontUniqueNameKey", "CTFontUniqueNameKey"),
     ("_kCTFontWeightTrait", "CTFontWeightTrait"),
     ("_kCTForegroundColorAttributeName", "CTForegroundColor"),
@@ -75,6 +94,13 @@ const INDEX_KEY: &str = "RosemaryFontFileIndex";
 const DEFAULT_SIZE: f64 = 12.0;
 
 /// `kCTFontItalicTrait`, `kCTFontBoldTrait` and `kCTFontMonoSpaceTrait`.
+const VARIATION_AXIS_IDENTIFIER: &str = "NSCTVariationAxisIdentifier";
+const VARIATION_AXIS_MINIMUM: &str = "NSCTVariationAxisMinimumValue";
+const VARIATION_AXIS_MAXIMUM: &str = "NSCTVariationAxisMaximumValue";
+const VARIATION_AXIS_DEFAULT: &str = "NSCTVariationAxisDefaultValue";
+const VARIATION_AXIS_NAME: &str = "NSCTVariationAxisName";
+const VARIATION_AXIS_HIDDEN: &str = "NSCTVariationAxisHidden";
+
 const ITALIC_TRAIT: u32 = 1 << 0;
 const BOLD_TRAIT: u32 = 1 << 1;
 const MONOSPACE_TRAIT: u32 = 1 << 10;
@@ -919,6 +945,63 @@ pub unsafe extern "C" fn CTFontCopyTable(font: CFTypeRef, table: u32, _options: 
     }
 }
 
+/// One dictionary per axis of the face's `fvar` table, or null for a face that
+/// is not a variable font.
+pub unsafe extern "C" fn CTFontCopyVariationAxes(font: CFTypeRef) -> CFTypeRef {
+    let Some(face) = loaded(font) else {
+        return std::ptr::null();
+    };
+    let face = face.face();
+    let axes: Vec<CFTypeRef> = face
+        .variation_axes()
+        .into_iter()
+        .map(|axis| {
+            let name = face
+                .names()
+                .into_iter()
+                .filter(|name| name.name_id == axis.name_id && name.is_unicode())
+                .find_map(|name| name.to_string())
+                .unwrap_or_default();
+            let values = [
+                (
+                    VARIATION_AXIS_IDENTIFIER,
+                    collections::new_number(Number::Integer(i64::from(axis.tag.0))),
+                ),
+                (
+                    VARIATION_AXIS_MINIMUM,
+                    collections::new_number(Number::Float(f64::from(axis.min_value))),
+                ),
+                (
+                    VARIATION_AXIS_MAXIMUM,
+                    collections::new_number(Number::Float(f64::from(axis.max_value))),
+                ),
+                (
+                    VARIATION_AXIS_DEFAULT,
+                    collections::new_number(Number::Float(f64::from(axis.def_value))),
+                ),
+                (VARIATION_AXIS_NAME, string(&name)),
+                // Retained so the one release below covers every value.
+                (VARIATION_AXIS_HIDDEN, unsafe {
+                    corefoundation::api::CFRetain(collections::boolean(axis.hidden))
+                }),
+            ];
+            let pairs: Vec<_> = values
+                .iter()
+                .map(|&(name, value)| (key(name), value))
+                .collect();
+            let axis = new_dictionary(&pairs);
+            values.into_iter().for_each(|(_, value)| release(value));
+            axis
+        })
+        .collect();
+    if axes.is_empty() {
+        return std::ptr::null();
+    }
+    let array = collections::new_array(&axes, type_policy(), false);
+    axes.into_iter().for_each(release);
+    array
+}
+
 /// Fallback families after the default one, for characters it lacks.
 pub unsafe extern "C" fn CTFontCopyDefaultCascadeListForLanguages(
     _font: CFTypeRef,
@@ -1060,6 +1143,7 @@ exports::exports! {
         "CTFontDescriptorCreateMatchingFontDescriptor" => CTFontDescriptorCreateMatchingFontDescriptor,
         "CTFontCreateWithFontDescriptor" => CTFontCreateWithFontDescriptor,
         "CTFontCopyTable" => CTFontCopyTable,
+        "CTFontCopyVariationAxes" => CTFontCopyVariationAxes,
         "CTFontCopyDefaultCascadeListForLanguages" => CTFontCopyDefaultCascadeListForLanguages,
         "CTFontManagerCopyAvailableFontFamilyNames" => CTFontManagerCopyAvailableFontFamilyNames,
         "CTFontManagerCreateFontDescriptorsFromURL" => CTFontManagerCreateFontDescriptorsFromURL,
