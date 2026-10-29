@@ -838,6 +838,7 @@ fn triangle_library() -> metal_translate::TranslatedLibrary {
                     field: None,
                     binding: ir::StageBinding::Builtin(ir::Builtin::Position),
                     name: None,
+                    invariant: false,
                 }],
             },
             ir::EntryPoint {
@@ -849,6 +850,7 @@ fn triangle_library() -> metal_translate::TranslatedLibrary {
                     field: None,
                     binding: ir::StageBinding::RenderTarget { index: 0 },
                     name: None,
+                    invariant: false,
                 }],
             },
         ],
@@ -973,6 +975,8 @@ fn a_multisampled_depth_attachment_resolves_into_its_destination() {
             stencil_format: 0,
             sample_count: SAMPLES,
             alpha_to_coverage: false,
+            alpha_to_one: false,
+            rasterization: true,
             color_objects: std::ptr::null_mut(),
         },
     );
@@ -1146,6 +1150,8 @@ fn a_translated_triangle_draws_on_the_gpu() {
             stencil_format: 0,
             sample_count: 1,
             alpha_to_coverage: false,
+            alpha_to_one: false,
+            rasterization: true,
             color_objects: std::ptr::null_mut(),
         },
     );
@@ -1688,6 +1694,8 @@ fn recording_cost() {
                 stencil_format: 0,
                 sample_count: 1,
                 alpha_to_coverage: false,
+                alpha_to_one: false,
+                rasterization: true,
                 color_objects: std::ptr::null_mut(),
             },
         );
@@ -1811,6 +1819,8 @@ fn covering_draw(device: Id) -> Option<CoveringDraw> {
             stencil_format: 0,
             sample_count: 1,
             alpha_to_coverage: false,
+            alpha_to_one: false,
+            rasterization: true,
             color_objects: std::ptr::null_mut(),
         },
     );
@@ -2046,4 +2056,243 @@ fn parallel_sub_encoders_add_into_one_result() {
         send_void(command, "waitUntilCompleted");
     }
     assert_eq!(result_at(results, 0), 2 * COVERING_SIZE * COVERING_SIZE);
+}
+
+/// The implementation `selector` has on `receiver`, as a function of type `F`.
+///
+/// # Safety
+///
+/// `F` must be the registered signature.
+unsafe fn method<F: Copy>(receiver: Id, selector: &str) -> (F, Sel) {
+    let sel = objc::sel::get(selector);
+    // SAFETY: an object the runtime allocated.
+    let method = unsafe { objc::object::class_of(receiver) }
+        .and_then(|class| class.method(sel))
+        .expect("the selector is registered");
+    let implementation = method.implementation();
+    // SAFETY: the caller guarantees the signature.
+    (unsafe { std::mem::transmute_copy(&implementation) }, sel)
+}
+
+/// Commit a command buffer which writes 42 into `output` through `kernel`,
+/// after `before` has run on it.
+///
+/// # Safety
+///
+/// Objects of this crate's, `kernel` a compute pipeline writing `output[0]`.
+unsafe fn commit_clear(queue: Id, kernel: Id, output: Id, before: impl FnOnce(Id)) -> Id {
+    unsafe {
+        let command = send(queue, "commandBuffer");
+        before(command);
+        let encoder = send(command, "computeCommandEncoder");
+        send_with_object(encoder, "setComputePipelineState:", kernel);
+        set_buffer_at(encoder, output, 0, 0);
+        dispatch(encoder, 1);
+        send_void(encoder, "endEncoding");
+        send_void(command, "commit");
+        command
+    }
+}
+
+#[test]
+fn an_encoded_event_wait_holds_work_until_the_host_signals() {
+    isolate_metal_fixture!();
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        let event = send(device, "newSharedEvent");
+        assert!(!event.is_null());
+        let library = source_library(device, TEST_KERNEL);
+        let function = new_function_with_name(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str("clear"),
+        );
+        let mut error = std::ptr::null_mut();
+        let kernel = new_compute_pipeline(device, std::ptr::null(), function, &mut error);
+        let output = new_buffer(device, std::ptr::null(), 16, 0);
+        let queue = new_command_queue(device, std::ptr::null());
+        let (encode, _) = method::<unsafe extern "C" fn(Id, Sel, Id, u64)>(
+            send(queue, "commandBuffer"),
+            "encodeWaitForEvent:value:",
+        );
+        let command = commit_clear(queue, kernel, output, |command| {
+            encode(
+                command,
+                objc::sel::get("encodeWaitForEvent:value:"),
+                event,
+                1,
+            );
+        });
+        let contents = object::body::<resource::Buffer>(output).inner.contents as *const u32;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            *contents, 0,
+            "the dispatch ran before the event was signalled"
+        );
+
+        let (set_value, sel) =
+            method::<unsafe extern "C" fn(Id, Sel, u64)>(event, "setSignaledValue:");
+        set_value(event, sel, 1);
+        send_void(command, "waitUntilCompleted");
+        assert_eq!(*contents, 42);
+        assert_eq!(send_number_result(event, "signaledValue"), 1);
+    }
+}
+
+#[test]
+fn an_encoded_event_signal_follows_the_work_before_it() {
+    isolate_metal_fixture!();
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        let event = send(device, "newSharedEvent");
+        let library = source_library(device, TEST_KERNEL);
+        let function = new_function_with_name(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str("clear"),
+        );
+        let mut error = std::ptr::null_mut();
+        let kernel = new_compute_pipeline(device, std::ptr::null(), function, &mut error);
+        let output = new_buffer(device, std::ptr::null(), 16, 0);
+        let queue = new_command_queue(device, std::ptr::null());
+        let command = send(queue, "commandBuffer");
+        let encoder = send(command, "computeCommandEncoder");
+        send_with_object(encoder, "setComputePipelineState:", kernel);
+        set_buffer_at(encoder, output, 0, 0);
+        dispatch(encoder, 1);
+        send_void(encoder, "endEncoding");
+        let (signal, sel) =
+            method::<unsafe extern "C" fn(Id, Sel, Id, u64)>(command, "encodeSignalEvent:value:");
+        signal(command, sel, event, 5);
+        send_void(command, "commit");
+        let (wait, sel) = method::<unsafe extern "C" fn(Id, Sel, u64, u64) -> bool>(
+            event,
+            "waitUntilSignaledValue:timeoutMS:",
+        );
+        assert!(wait(event, sel, 5, 5_000));
+        let contents = object::body::<resource::Buffer>(output).inner.contents as *const u32;
+        assert_eq!(*contents, 42);
+        send_void(command, "waitUntilCompleted");
+    }
+}
+
+#[test]
+fn placement_heap_buffers_at_one_offset_share_memory() {
+    isolate_metal_fixture!();
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    const PLACEMENT: u64 = 1;
+    const PRIVATE: u64 = 2;
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        let descriptor = send(
+            send(
+                objc::class::ptr(objc::class::lookup(c"MTLHeapDescriptor").expect("registered"))
+                    as Id,
+                "alloc",
+            ),
+            "init",
+        );
+        let (set, _) = method::<unsafe extern "C" fn(Id, Sel, u64)>(descriptor, "setSize:");
+        set(descriptor, objc::sel::get("setSize:"), 1 << 20);
+        set(descriptor, objc::sel::get("setType:"), PLACEMENT);
+        set(descriptor, objc::sel::get("setStorageMode:"), PRIVATE);
+        let heap = new_heap(device, std::ptr::null(), descriptor);
+        assert!(!heap.is_null());
+        let (place, sel) = method::<unsafe extern "C" fn(Id, Sel, u64, u64, u64) -> Id>(
+            heap,
+            "newBufferWithLength:options:offset:",
+        );
+        let written = place(heap, sel, 16, PRIVATE << 4, 0);
+        let aliased = place(heap, sel, 16, PRIVATE << 4, 0);
+        assert!(!written.is_null() && !aliased.is_null());
+        assert!(place(heap, sel, 16, PRIVATE << 4, 1 << 20).is_null());
+
+        let library = source_library(device, TEST_KERNEL);
+        let function = new_function_with_name(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str("clear"),
+        );
+        let mut error = std::ptr::null_mut();
+        let kernel = new_compute_pipeline(device, std::ptr::null(), function, &mut error);
+        let shared = new_buffer(device, std::ptr::null(), 16, 0);
+        let queue = new_command_queue(device, std::ptr::null());
+        let command = commit_clear(queue, kernel, written, |_| {});
+        send_void(command, "waitUntilCompleted");
+        let command = send(queue, "commandBuffer");
+        let blit = send(command, "blitCommandEncoder");
+        copy_buffer(blit, aliased, shared, 4);
+        send_void(blit, "endEncoding");
+        send_void(command, "commit");
+        send_void(command, "waitUntilCompleted");
+        let contents = object::body::<resource::Buffer>(shared).inner.contents as *const u32;
+        assert_eq!(*contents, 42);
+    }
+}
+
+#[test]
+fn a_texture_buffer_reads_the_buffer_it_was_made_from() {
+    isolate_metal_fixture!();
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    const R32_UINT: u64 = 53;
+    const SHADER_READ: u64 = 1;
+    let source = "kernel void copy(texture_buffer<uint> source [[texture(0)]],\n\
+                                   device uint* output [[buffer(0)]]) {\n\
+                      output[0] = source.read(uint(2)).x + source.get_width();\n\
+                  }";
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        let library = source_library(device, source);
+        let function = new_function_with_name(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str("copy"),
+        );
+        let mut error = std::ptr::null_mut();
+        let kernel = new_compute_pipeline(device, std::ptr::null(), function, &mut error);
+        assert!(!kernel.is_null());
+        let texels: [u32; 4] = [10, 20, 30, 40];
+        let backing =
+            new_buffer_with_bytes(device, std::ptr::null(), texels.as_ptr().cast(), 16, 0);
+        let class =
+            objc::class::ptr(objc::class::lookup(c"MTLTextureDescriptor").expect("registered"))
+                as Id;
+        let (describe, sel) = method::<unsafe extern "C" fn(Id, Sel, u64, u64, u64, u64) -> Id>(
+            class,
+            "textureBufferDescriptorWithPixelFormat:width:resourceOptions:usage:",
+        );
+        let descriptor = describe(class, sel, R32_UINT, 4, 0, SHADER_READ);
+        let (make, sel) = method::<unsafe extern "C" fn(Id, Sel, Id, u64, u64) -> Id>(
+            backing,
+            "newTextureWithDescriptor:offset:bytesPerRow:",
+        );
+        let texture = make(backing, sel, descriptor, 0, 16);
+        assert!(!texture.is_null());
+
+        let output = new_buffer(device, std::ptr::null(), 16, 0);
+        let queue = new_command_queue(device, std::ptr::null());
+        let command = send(queue, "commandBuffer");
+        let encoder = send(command, "computeCommandEncoder");
+        send_with_object(encoder, "setComputePipelineState:", kernel);
+        set_buffer_at(encoder, output, 0, 0);
+        let (bind, sel) =
+            method::<unsafe extern "C" fn(Id, Sel, Id, u64)>(encoder, "setTexture:atIndex:");
+        bind(encoder, sel, texture, 0);
+        dispatch(encoder, 1);
+        send_void(encoder, "endEncoding");
+        send_void(command, "commit");
+        send_void(command, "waitUntilCompleted");
+        let contents = object::body::<resource::Buffer>(output).inner.contents as *const u32;
+        assert_eq!(*contents, 30 + 4);
+    }
 }

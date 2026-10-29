@@ -364,7 +364,22 @@ impl Encoder {
                         // SAFETY: only a texture of this crate's is ever bound.
                         let texture = unsafe { object::body::<Texture>(bound) };
                         use vk::Handle;
-                        (texture.image.view.as_raw(), 0, 0)
+                        let is_texel_buffer = texture.texel_view != vk::BufferView::null();
+                        if is_texel_buffer != binding.texel_buffer {
+                            let what = match binding.texel_buffer {
+                                true => "is a texture_buffer bound to a texture with an image",
+                                false => "is a texture bound to a texture buffer",
+                            };
+                            unbound(binding, what, null_descriptors);
+                            if !null_descriptors {
+                                continue;
+                            }
+                            (0, 0, 0)
+                        } else if is_texel_buffer {
+                            (texture.texel_view.as_raw(), 0, 0)
+                        } else {
+                            (texture.image.view.as_raw(), 0, 0)
+                        }
                     }
                 }
                 ResourceKind::Sampler if binding.inline_sampler.is_some() => {
@@ -474,10 +489,15 @@ impl Encoder {
         if fresh.iter().any(|fresh| *fresh) {
             let mut buffer_infos = Vec::new();
             let mut image_infos = Vec::new();
+            let mut texel_views = Vec::new();
             for index in (0..SETS).filter(|index| fresh[*index]) {
                 for entry in &self.set_cache[index].entries {
                     use vk::Handle;
                     match entry.kind {
+                        vk::DescriptorType::UNIFORM_TEXEL_BUFFER
+                        | vk::DescriptorType::STORAGE_TEXEL_BUFFER => {
+                            texel_views.push(vk::BufferView::from_raw(entry.handle))
+                        }
                         vk::DescriptorType::STORAGE_BUFFER
                         | vk::DescriptorType::STORAGE_BUFFER_DYNAMIC => buffer_infos.push(
                             vk::DescriptorBufferInfo::default()
@@ -497,7 +517,7 @@ impl Encoder {
                     }
                 }
             }
-            let (mut next_buffer, mut next_image) = (0, 0);
+            let (mut next_buffer, mut next_image, mut next_texel) = (0, 0, 0);
             let mut writes = Vec::with_capacity(buffer_infos.len() + image_infos.len());
             for index in (0..SETS).filter(|index| fresh[*index]) {
                 for entry in &self.set_cache[index].entries {
@@ -506,6 +526,13 @@ impl Encoder {
                         .dst_binding(entry.binding)
                         .descriptor_type(entry.kind);
                     writes.push(match entry.kind {
+                        vk::DescriptorType::UNIFORM_TEXEL_BUFFER
+                        | vk::DescriptorType::STORAGE_TEXEL_BUFFER => {
+                            next_texel += 1;
+                            write.texel_buffer_view(std::slice::from_ref(
+                                &texel_views[next_texel - 1],
+                            ))
+                        }
                         vk::DescriptorType::STORAGE_BUFFER
                         | vk::DescriptorType::STORAGE_BUFFER_DYNAMIC => {
                             next_buffer += 1;
@@ -566,9 +593,14 @@ impl Encoder {
 
         let mut buffer_infos = Vec::new();
         let mut image_infos = Vec::new();
+        let mut texel_views = Vec::new();
         for entry in changed.clone() {
             use vk::Handle;
             match entry.kind {
+                vk::DescriptorType::UNIFORM_TEXEL_BUFFER
+                | vk::DescriptorType::STORAGE_TEXEL_BUFFER => {
+                    texel_views.push(vk::BufferView::from_raw(entry.handle))
+                }
                 vk::DescriptorType::STORAGE_BUFFER => buffer_infos.push(
                     vk::DescriptorBufferInfo::default()
                         .buffer(vk::Buffer::from_raw(entry.handle))
@@ -585,13 +617,18 @@ impl Encoder {
                 ),
             }
         }
-        let (mut next_buffer, mut next_image) = (0, 0);
+        let (mut next_buffer, mut next_image, mut next_texel) = (0, 0, 0);
         let mut writes = Vec::with_capacity(buffer_infos.len() + image_infos.len());
         for entry in changed {
             let write = vk::WriteDescriptorSet::default()
                 .dst_binding(entry.binding)
                 .descriptor_type(entry.kind);
             writes.push(match entry.kind {
+                vk::DescriptorType::UNIFORM_TEXEL_BUFFER
+                | vk::DescriptorType::STORAGE_TEXEL_BUFFER => {
+                    next_texel += 1;
+                    write.texel_buffer_view(std::slice::from_ref(&texel_views[next_texel - 1]))
+                }
                 vk::DescriptorType::STORAGE_BUFFER => {
                     next_buffer += 1;
                     write.buffer_info(std::slice::from_ref(&buffer_infos[next_buffer - 1]))

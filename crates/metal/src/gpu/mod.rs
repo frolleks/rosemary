@@ -1,16 +1,18 @@
+mod clock;
 mod deferred;
 mod format;
 mod guard;
 mod host;
 mod memory;
+mod placement;
 mod pools;
 mod submit;
 mod trace;
 
 use std::collections::HashMap;
-use std::sync::{Condvar, Mutex, OnceLock, atomic::AtomicBool};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, atomic::AtomicBool};
 
-use ash::{Device, Instance, vk};
+use ash::{Device, Entry, Instance, vk};
 use static_init::dynamic;
 
 use crate::heap::{Allocation, Heap};
@@ -22,6 +24,8 @@ pub use format::{
 };
 pub(crate) use guard::{Guard, GuardedVec};
 pub use host::HostPages;
+pub use placement::Placement;
+pub use submit::Batch;
 use trace::dump_spirv;
 pub use trace::{milestone, trace, trace_once};
 
@@ -43,6 +47,7 @@ struct DeviceCapabilities {
     /// the Vulkan 1.2 feature bit rather than the extension.
     sampler_mirror_clamp_to_edge: bool,
     host_query_reset: bool,
+    timeline_semaphores: bool,
 }
 
 /// What `VK_KHR_depth_stencil_resolve` - core in Vulkan 1.2 - can do on this
@@ -120,12 +125,18 @@ pub struct Gpu {
     timestamp_pools: Mutex<Vec<vk::QueryPool>>,
     timestamp_period: f32,
     timestamp_valid_bits: u32,
+    /// Samples the device clock against the host's, where the device can.
+    calibration: Option<clock::Calibration>,
     /// Occlusion query pools whose submission has retired.
     occlusion_pools: Mutex<Vec<vk::QueryPool>>,
     /// Whether an occlusion query can count samples rather than only say
     /// whether any passed.
     pub(crate) occlusion_precise: bool,
+    /// Whether a pipeline can force coverage-written alpha to one.
+    pub(crate) alpha_to_one: bool,
     host_query_reset: bool,
+    /// Whether the device has timeline semaphores, which `MTLEvent`s are.
+    pub(crate) timeline_semaphores: bool,
     /// Command pools, descriptor pools and upload chunks whose submission has
     /// retired, kept for the next command buffer. A game commits several
     /// command buffers a frame, and creating and destroying each one's pool,
@@ -292,6 +303,7 @@ fn create_device(
         shader_int8: target.shader_int8.into(),
         sampler_mirror_clamp_to_edge: capabilities.sampler_mirror_clamp_to_edge.into(),
         host_query_reset: capabilities.host_query_reset.into(),
+        timeline_semaphore: capabilities.timeline_semaphores.into(),
         ..Default::default()
     };
     let mut v13 = vk::PhysicalDeviceVulkan13Features {
@@ -453,6 +465,7 @@ pub struct DepthResolve {
 
 impl Gpu {
     pub fn create(
+        entry: &Entry,
         instance: &Instance,
         physical: vk::PhysicalDevice,
         target: &metal_translate::TargetProfile,
@@ -551,6 +564,8 @@ impl Gpu {
         // sub-encoder begins its queries inside a pass, where no reset can be
         // recorded.
         let host_query_reset = v12.is_some_and(|v12| v12.host_query_reset == vk::TRUE);
+        // `MTLEvent`s are timeline semaphores, which Vulkan 1.2 requires.
+        let timeline_semaphores = v12.is_some_and(|v12| v12.timeline_semaphore == vk::TRUE);
         let (mirror_clamp_feature, mirror_clamp_extension) = mirror_clamp_support(
             mirror_clamp_feature,
             has(ash::khr::sampler_mirror_clamp_to_edge::NAME),
@@ -665,6 +680,10 @@ impl Gpu {
         if host_import {
             enabled.push(ash::ext::external_memory_host::NAME.as_ptr());
         }
+        let calibration = clock::Calibration::extension(entry, instance, physical, has);
+        if let Some(name) = calibration {
+            enabled.push(name.as_ptr());
+        }
         let render_node = has(ash::ext::physical_device_drm::NAME)
             .then(|| {
                 let mut drm = vk::PhysicalDeviceDrmPropertiesEXT::default();
@@ -696,6 +715,7 @@ impl Gpu {
                 swapchain_maintenance1,
                 sampler_mirror_clamp_to_edge: mirror_clamp_feature,
                 host_query_reset,
+                timeline_semaphores,
             },
         )?;
         // SAFETY: the family was requested above with one queue.
@@ -715,6 +735,7 @@ impl Gpu {
             foreign,
             render_node,
         });
+        let calibration = calibration.map(|name| clock::Calibration::new(instance, &device, name));
         let host_import = host_import
             .then(|| host::HostImport::new(instance, physical, &device))
             .flatten();
@@ -766,7 +787,9 @@ impl Gpu {
             timestamp_valid_bits: families[queue_family as usize].timestamp_valid_bits,
             occlusion_pools: Mutex::new(Vec::new()),
             occlusion_precise: features.occlusion_query_precise == vk::TRUE,
+            alpha_to_one: features.alpha_to_one == vk::TRUE,
             host_query_reset,
+            timeline_semaphores,
             contexts: Mutex::new(Vec::new()),
             secondaries: Mutex::new(Vec::new()),
             context_budget: ContextBudget::new(),
@@ -786,6 +809,7 @@ impl Gpu {
             dmabuf,
             host_import,
             host_imported: std::sync::atomic::AtomicU64::new(0),
+            calibration,
         })
     }
 }
@@ -803,6 +827,8 @@ pub struct GpuBuffer {
     pub length: u64,
     /// Cut from the private heap: device memory the host cannot map.
     pub private: bool,
+    /// The placement heap memory it is bound into, instead of `allocation`.
+    pub placement: Option<Arc<Placement>>,
 }
 
 // SAFETY: `contents` is a permanent mapping of device memory, valid on every
@@ -812,6 +838,8 @@ unsafe impl Send for GpuBuffer {}
 pub struct GpuImage {
     pub image: vk::Image,
     pub memory: Option<vk::DeviceMemory>,
+    /// The placement heap memory it is bound into, instead of `memory`.
+    pub placement: Option<Arc<Placement>>,
     pub view: vk::ImageView,
     pub format: vk::Format,
     pub aspect: vk::ImageAspectFlags,
@@ -842,6 +870,7 @@ impl GpuBuffer {
             contents: std::ptr::null_mut(),
             length: 0,
             private: false,
+            placement: None,
         }
     }
 }
@@ -954,6 +983,7 @@ impl GpuImage {
         Self {
             image: vk::Image::null(),
             memory: None,
+            placement: None,
             view: vk::ImageView::null(),
             format: vk::Format::UNDEFINED,
             aspect: vk::ImageAspectFlags::COLOR,

@@ -48,6 +48,7 @@ pub(crate) struct RenderPassDescriptor {
     pub visibility_result_buffer: Id,
     /// `MTLVisibilityResultType`.
     pub visibility_result_type: u64,
+    pub render_target_array_length: u64,
 }
 
 /// `ROSEMARY_TRACE_PASSES=1`: each distinct render pass shape, once.
@@ -831,13 +832,20 @@ pub(super) unsafe extern "C" fn set_pass_visibility_result_buffer(
 /// `-setRenderTargetArrayLength:`. A pass here attaches the one slice each
 /// attachment names, which is a layered pass of one layer.
 pub(super) unsafe extern "C" fn set_render_target_array_length(
-    _receiver: Id,
+    receiver: Id,
     _sel: Sel,
     length: u64,
 ) {
     if length > 1 {
         gpu::trace_once("a layered render pass is unsupported; only one slice is rendered");
     }
+    // SAFETY: a render pass descriptor of this crate's.
+    unsafe { object::body::<RenderPassDescriptor>(receiver) }.render_target_array_length = length;
+}
+
+pub(super) unsafe extern "C" fn render_target_array_length(receiver: Id, _sel: Sel) -> u64 {
+    // SAFETY: a render pass descriptor of this crate's.
+    unsafe { object::body::<RenderPassDescriptor>(receiver) }.render_target_array_length
 }
 
 /// `+[MTLRenderPassDescriptor renderPassDescriptor]`.

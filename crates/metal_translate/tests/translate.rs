@@ -2455,3 +2455,103 @@ fn omits_a_zero_sampling_offset() {
         assert_eq!(*mask, ImageOperands::LOD);
     }
 }
+
+#[test]
+fn source_msl_transforms_by_column_major_matrices() {
+    let source = "#include <metal_stdlib>\n\
+        #include <simd/simd.h>\n\
+        using namespace metal;\n\
+        struct Transforms { float4x4 projection; float3x3 normal; };\n\
+        struct Out { float4 position [[position, invariant]]; float3 normal [[user(locn0)]]; };\n\
+        vertex Out main0(constant Transforms& t [[buffer(0)]], uint id [[vertex_id]]) {\n\
+            Out out = {};\n\
+            float4x4 scale = float4x4(2.0);\n\
+            out.position = (t.projection * scale) * float4(float(id), 0.0, 0.0, 1.0);\n\
+            out.normal = float3(1.0, 0.0, 0.0) * transpose(t.normal);\n\
+            out.position.y = -out.position.y;\n\
+            return out;\n\
+        }";
+    let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
+    assert_eq!(library.entries.len(), 1);
+    assert!(library.rejected.is_empty());
+}
+
+#[test]
+fn source_msl_inlines_helpers_overloads_and_templates() {
+    let source = "#include <metal_stdlib>\n\
+        using namespace metal;\n\
+        template<typename Tx, typename Ty>\n\
+        inline Tx spvSMod(Tx x, Ty y) { Tx remainder = x - y * (x / y); return remainder; }\n\
+        static inline __attribute__((always_inline))\n\
+        float scaled(float value, float by) { return value * by; }\n\
+        static inline __attribute__((always_inline))\n\
+        float scaled(float value) { return scaled(value, 2.0); }\n\
+        static inline __attribute__((always_inline))\n\
+        void bump(thread int& counter) { counter += 1; }\n\
+        kernel void main0(device float* output [[buffer(0)]], uint id [[thread_position_in_grid]]) {\n\
+            int counter = spvSMod(int(id), 3);\n\
+            bump(counter);\n\
+            output[id] = scaled(float(counter));\n\
+        }";
+    let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
+    assert_eq!(library.entries.len(), 1);
+}
+
+#[test]
+fn source_msl_lays_out_array_templates_and_packed_vectors() {
+    let source = "#include <metal_stdlib>\n\
+        using namespace metal;\n\
+        template<typename T, size_t Num>\n\
+        struct spvUnsafeArray\n\
+        {\n\
+            T elements[Num ? Num : 1];\n\
+            thread T& operator [] (size_t pos) thread { return elements[pos]; }\n\
+            constexpr const thread T& operator [] (size_t pos) const thread { return elements[pos]; }\n\
+        };\n\
+        struct Globals { packed_float3 offset; float time; };\n\
+        kernel void main0(constant Globals& g [[buffer(0)]], device float4* output [[buffer(1)]]) {\n\
+            spvUnsafeArray<float, 4> weights = {};\n\
+            weights[1] = g.time;\n\
+            spvUnsafeArray<float, 4> copy = weights;\n\
+            output[0] = float4(g.offset, copy[1]);\n\
+        }";
+    let module = parse_msl(source).unwrap();
+    assert_eq!(module.entries.len(), 1);
+    let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
+    assert!(library.rejected.is_empty());
+}
+
+#[test]
+fn source_msl_keeps_entry_points_that_translate() {
+    let source = "#include <metal_stdlib>\n\
+        using namespace metal;\n\
+        kernel void good(device uint* output [[buffer(0)]]) { output[0] = 1; }\n\
+        kernel void bad(device uint* output [[buffer(0)]]) {\n\
+            switch (output[0]) { default: break; }\n\
+        }";
+    let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
+    assert_eq!(library.entries.len(), 1);
+    assert_eq!(library.entries[0].name, "good");
+    assert_eq!(library.rejected.len(), 1);
+    assert_eq!(library.rejected[0].name, "bad");
+    // The library as a whole is still refused where every entry is.
+    assert!(parse_msl(source).is_err());
+}
+
+#[test]
+fn source_msl_reads_texture_buffers_as_texel_buffers() {
+    let source = "#include <metal_stdlib>\n\
+        using namespace metal;\n\
+        kernel void main0(texture_buffer<int> faces [[texture(0)]], device int* output [[buffer(0)]],\n\
+                          uint id [[thread_position_in_grid]]) {\n\
+            output[id] = faces.read(id).x + int(faces.get_width());\n\
+        }";
+    let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
+    let texture = library.entries[0]
+        .resources
+        .iter()
+        .find(|resource| resource.kind == metal_translate::ir::ResourceKind::Texture)
+        .expect("the texture buffer is a resource");
+    assert!(texture.texel_buffer);
+    assert!(texture.sampled);
+}

@@ -1,6 +1,25 @@
 use super::*;
 use std::sync::atomic::Ordering;
 
+/// One `VkSubmitInfo`: a command buffer, the timeline values it waits for
+/// before it starts, and those it signals once it is done. A Metal command
+/// buffer with events encoded inside it is several of these.
+pub struct Batch {
+    pub waits: Vec<(vk::Semaphore, u64)>,
+    pub command_buffer: vk::CommandBuffer,
+    pub signals: Vec<(vk::Semaphore, u64)>,
+}
+
+impl Batch {
+    pub fn plain(command_buffer: vk::CommandBuffer) -> Self {
+        Self {
+            waits: Vec::new(),
+            command_buffer,
+            signals: Vec::new(),
+        }
+    }
+}
+
 impl Gpu {
     /// Test controlled device-wide queue contention while AppKit presents
     /// another window. No guest or production path calls this.
@@ -20,19 +39,59 @@ impl Gpu {
         command_buffer: vk::CommandBuffer,
         fence: vk::Fence,
     ) -> Result<(), String> {
+        self.submit_batches(&[Batch::plain(command_buffer)], fence)
+    }
+
+    /// Submit batches in order, `fence` signalling once all are done.
+    pub fn submit_batches(&self, batches: &[Batch], fence: vk::Fence) -> Result<(), String> {
         if self.lost.load(Ordering::Acquire) {
             return Err("Vulkan logical device is lost".into());
         }
-        let buffers = [command_buffer];
-        let submit = vk::SubmitInfo::default().command_buffers(&buffers);
+        let split = |pairs: &[(vk::Semaphore, u64)]| -> (Vec<vk::Semaphore>, Vec<u64>) {
+            pairs.iter().copied().unzip()
+        };
+        let waits: Vec<_> = batches.iter().map(|batch| split(&batch.waits)).collect();
+        let signals: Vec<_> = batches.iter().map(|batch| split(&batch.signals)).collect();
+        let stages: Vec<_> = batches
+            .iter()
+            .map(|batch| vec![vk::PipelineStageFlags::ALL_COMMANDS; batch.waits.len()])
+            .collect();
+        let buffers: Vec<_> = batches.iter().map(|batch| [batch.command_buffer]).collect();
+        let mut timelines: Vec<_> = waits
+            .iter()
+            .zip(&signals)
+            .map(|((_, wait_values), (_, signal_values))| {
+                vk::TimelineSemaphoreSubmitInfo::default()
+                    .wait_semaphore_values(wait_values)
+                    .signal_semaphore_values(signal_values)
+            })
+            .collect();
+        let submits: Vec<_> = timelines
+            .iter_mut()
+            .enumerate()
+            .map(|(index, timeline)| {
+                let submit = vk::SubmitInfo::default()
+                    .command_buffers(&buffers[index])
+                    .wait_semaphores(&waits[index].0)
+                    .wait_dst_stage_mask(&stages[index])
+                    .signal_semaphores(&signals[index].0);
+                // Only an event's semaphores are timelines; a plain batch
+                // must not name the structure on a device without them.
+                match batches[index].waits.is_empty() && batches[index].signals.is_empty() {
+                    true => submit,
+                    false => submit.push_next(timeline),
+                }
+            })
+            .collect();
         {
             let queue = self.queue.lock().expect("Vulkan queue");
             self.flush_deferred(*queue);
             // SAFETY: the queue is held exclusively for the submission.
             unsafe { self.device.reset_fences(&[fence]) }
                 .map_err(|error| format!("vkResetFences failed with {error:?}"))?;
-            // SAFETY: as above; the command buffer has finished recording.
-            if let Err(error) = unsafe { self.device.queue_submit(*queue, &[submit], fence) } {
+            // SAFETY: as above; the command buffers have finished recording
+            // and every borrowed array lives across the call.
+            if let Err(error) = unsafe { self.device.queue_submit(*queue, &submits, fence) } {
                 if error == vk::Result::ERROR_DEVICE_LOST {
                     crate::swapchain::record_device_loss(self);
                 }
@@ -50,7 +109,7 @@ impl Gpu {
     /// commits remain ordered by `submission_boundary`.
     pub fn submit_ordered(
         &self,
-        command_buffer: vk::CommandBuffer,
+        batches: &[Batch],
         fence: vk::Fence,
         submitted: impl FnOnce(u64),
     ) -> Result<(), String> {
@@ -58,7 +117,7 @@ impl Gpu {
             .submission_boundary
             .lock()
             .expect("Vulkan submission boundary");
-        self.submit(command_buffer, fence)?;
+        self.submit_batches(batches, fence)?;
         submitted(self.submissions.next_serial());
         Ok(())
     }

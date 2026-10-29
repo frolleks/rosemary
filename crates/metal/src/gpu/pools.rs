@@ -245,6 +245,12 @@ impl Gpu {
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLER)
                 .descriptor_count(CAPACITY * 2),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
+                .descriptor_count(CAPACITY),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_TEXEL_BUFFER)
+                .descriptor_count(CAPACITY),
         ];
         let info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(CAPACITY)

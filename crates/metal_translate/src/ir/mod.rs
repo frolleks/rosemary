@@ -117,6 +117,9 @@ pub enum TextureDimension {
     D2,
     D3,
     Cube,
+    /// `texture_buffer`: texels in a buffer's memory, addressed by one
+    /// integer and never sampled or mipmapped.
+    Buffer,
 }
 
 /// A Metal texture type. Metal spells the element type, dimensionality and
@@ -359,6 +362,8 @@ pub struct StageOutput {
     pub field: Option<u32>,
     pub binding: StageBinding,
     pub name: Option<String>,
+    /// `[[invariant]]`: computed identically by every pipeline using it.
+    pub invariant: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

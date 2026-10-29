@@ -244,12 +244,16 @@ impl Emitter {
                     }
                 })?;
                 let image = self.operand(texture, values)?;
-                // `OpImageQuerySize` covers a storage image and a multisampled
-                // one; every other sampled image needs the level named, and
+                // `OpImageQuerySize` covers a storage image, a multisampled
+                // one and a buffer; every other sampled image needs the level
+                // named, and
                 // Metal's `get_width()` on a texture it only reads names none.
                 let level = match lod {
                     Some(lod) => Some(self.operand(lod, values)?),
-                    None if image_type.sampled_image() && !image_type.multisampled => {
+                    None if image_type.sampled_image()
+                        && !image_type.multisampled
+                        && image_type.dimension != TextureDimension::Buffer =>
+                    {
                         Some(self.constant(&Type::u32(), 0)?)
                     }
                     None => None,

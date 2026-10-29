@@ -13,6 +13,9 @@ pub(super) fn parse(tokens: &[Token]) -> Result<Program> {
         program: Program::default(),
         file_samplers: Vec::new(),
         local_samplers: Vec::new(),
+        aliases: std::collections::HashMap::new(),
+        array_templates: std::collections::HashSet::new(),
+        type_params: Vec::new(),
     };
     parser.program()?;
     Ok(parser.program)
@@ -27,6 +30,13 @@ struct Parser<'a> {
     file_samplers: Vec<(String, usize)>,
     /// Those declared in the function being parsed.
     local_samplers: Vec<(String, usize, usize)>,
+    /// `typedef` names of types other than structures.
+    aliases: std::collections::HashMap<String, Ty>,
+    /// Class templates which are an array of `N` `T`s and nothing more, as
+    /// SPIRV-Cross's `spvUnsafeArray` is: an array with value semantics.
+    array_templates: std::collections::HashSet<String>,
+    /// The type parameters of the function template being parsed.
+    type_params: Vec<String>,
 }
 
 type Result<T> = std::result::Result<T, TranslateError>;
@@ -118,18 +128,227 @@ impl Parser<'_> {
                 }
                 continue;
             }
-            if self.is_word("struct") && matches!(self.peek_at(2), Some(Kind::Punct("{"))) {
-                self.structure()?;
-                continue;
+            let start = self.at;
+            let parsed =
+                if self.is_word("struct") && matches!(self.peek_at(2), Some(Kind::Punct("{"))) {
+                    self.structure()
+                } else if self.eat_word("typedef") {
+                    self.typedef()
+                } else if self.eat_word("template") {
+                    self.template()
+                } else {
+                    self.top_level()
+                };
+            if let Err(error) = parsed {
+                // The declaration is skipped whole; what uses it fails when
+                // it is lowered, and the rest of the library stands.
+                self.at = start;
+                let (name, entry) = self.declared_name();
+                self.skip_declaration();
+                self.program.failed.push(FailedItem { name, entry, error });
             }
-            self.top_level()?;
         }
         Ok(())
+    }
+
+    /// The name the declaration at the cursor declares - the identifier
+    /// before its first `(`, `=`, `[`, `;` or `{` - and whether it is an entry
+    /// point.
+    fn declared_name(&self) -> (Option<String>, bool) {
+        let mut entry = false;
+        let mut at = self.at;
+        let mut last = None;
+        while let Some(token) = self.tokens.get(at) {
+            match &token.kind {
+                Kind::Ident(word) if matches!(word.as_str(), "vertex" | "fragment" | "kernel") => {
+                    entry = true;
+                }
+                Kind::Ident(word) if word == "__attribute__" => {
+                    // `__attribute__((...))`: past both parentheses.
+                    at += 3;
+                    continue;
+                }
+                Kind::Ident(word) => last = Some(word.clone()),
+                Kind::Punct("(" | "=" | "[" | ";" | "{") => return (last, entry),
+                // A template's parameters name nothing it declares.
+                Kind::Punct(">") => last = None,
+                _ => {}
+            }
+            at += 1;
+        }
+        (None, entry)
+    }
+
+    /// Move past the declaration at the cursor: to its `;`, or past the
+    /// body its first `{` opens and the `;` which may follow it.
+    fn skip_declaration(&mut self) {
+        let mut depth = 0usize;
+        while let Some(token) = self.tokens.get(self.at) {
+            self.at += 1;
+            match &token.kind {
+                Kind::Punct("{") => depth += 1,
+                Kind::Punct("}") if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.eat(";");
+                        return;
+                    }
+                }
+                Kind::Punct(";") if depth == 0 => return,
+                _ => {}
+            }
+        }
     }
 
     fn structure(&mut self) -> Result<()> {
         self.at += 1;
         let name = self.ident()?;
+        let fields = self.struct_body()?;
+        self.expect(";")?;
+        self.program.structs.push(StructDef { name, fields });
+        Ok(())
+    }
+
+    /// `template <typename T, size_t N> struct Name { T member[...]; ... };`
+    /// whose other members are only subscript operators returning
+    /// `member[index]`: an array of `N` `T`s, at least one. Any other
+    /// template is refused.
+    /// `template <...>` and what it declares: a function template whose
+    /// parameters are all types, or an array wrapper.
+    fn template(&mut self) -> Result<()> {
+        let line = self.line();
+        self.expect("<")?;
+        let mut types = Vec::new();
+        let mut values = Vec::new();
+        loop {
+            if self.eat_word("typename") || self.eat_word("class") {
+                types.push(self.ident()?);
+            } else if self.eat_word("size_t") || self.eat_word("uint") || self.eat_word("int") {
+                values.push(self.ident()?);
+            } else {
+                return Err(self.error("unsupported template parameter"));
+            }
+            if !self.eat(",") {
+                break;
+            }
+        }
+        self.expect(">")?;
+        if self.eat_word("struct") {
+            return match (types.as_slice(), values.as_slice()) {
+                ([element], [_]) => self.array_template(element.clone()),
+                _ => Err(syntax_error(
+                    line,
+                    "a class template other than an array wrapper is not supported",
+                )),
+            };
+        }
+        if !values.is_empty() {
+            return Err(syntax_error(
+                line,
+                "a function template with a non-type parameter is not supported",
+            ));
+        }
+        self.type_params = types;
+        let parsed = self.top_level();
+        self.type_params.clear();
+        parsed
+    }
+
+    fn array_template(&mut self, element: String) -> Result<()> {
+        let line = self.line();
+        let unsupported = || {
+            syntax_error(
+                line,
+                "a class template other than an array wrapper is not supported",
+            )
+        };
+        let name = self.ident()?;
+        self.expect("{")?;
+        if !self.eat_word(&element) {
+            return Err(unsupported());
+        }
+        let member = self.ident()?;
+        self.expect("[")?;
+        self.skip_balanced("[", "]");
+        self.expect(";")?;
+        while !self.eat("}") {
+            // A member function: qualifiers, `operator []`, its parameter
+            // and qualifiers, then `{ return member[parameter]; }`.
+            let mut subscript = false;
+            while !self.is_punct("{") {
+                if self.is_word("operator") && matches!(self.peek_at(1), Some(Kind::Punct("["))) {
+                    subscript = true;
+                }
+                if self.peek().is_none() {
+                    return Err(self.error("unterminated template"));
+                }
+                self.at += 1;
+            }
+            if !subscript {
+                return Err(unsupported());
+            }
+            self.expect("{")?;
+            if !self.eat_word("return") || !self.eat_word(&member) {
+                return Err(unsupported());
+            }
+            self.expect("[")?;
+            self.ident()?;
+            self.expect("]")?;
+            self.expect(";")?;
+            self.expect("}")?;
+        }
+        self.expect(";")?;
+        self.array_templates.insert(name);
+        Ok(())
+    }
+
+    /// Move past the tokens up to and including the `close` which balances
+    /// an `open` already consumed.
+    fn skip_balanced(&mut self, open: &str, close: &str) {
+        let mut depth = 1usize;
+        while let Some(token) = self.tokens.get(self.at) {
+            self.at += 1;
+            match &token.kind {
+                Kind::Punct(p) if *p == open => depth += 1,
+                Kind::Punct(p) if *p == close => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `typedef struct [tag] { ... } Name;` or `typedef T Name;`.
+    fn typedef(&mut self) -> Result<()> {
+        if self.eat_word("struct") {
+            let tag = match self.peek() {
+                Some(Kind::Ident(_)) => Some(self.ident()?),
+                _ => None,
+            };
+            let fields = self.struct_body()?;
+            let name = self.ident()?;
+            self.expect(";")?;
+            if let Some(tag) = tag.filter(|tag| *tag != name) {
+                let index = self.program.structs.len();
+                self.aliases.insert(name, Ty::Struct(index));
+                self.program.structs.push(StructDef { name: tag, fields });
+            } else {
+                self.program.structs.push(StructDef { name, fields });
+            }
+            return Ok(());
+        }
+        let ty = self.ty()?;
+        let name = self.ident()?;
+        self.expect(";")?;
+        self.aliases.insert(name, ty);
+        Ok(())
+    }
+
+    /// A structure's `{ fields }`.
+    fn struct_body(&mut self) -> Result<Vec<Field>> {
         self.expect("{")?;
         let mut fields = Vec::new();
         while !self.eat("}") {
@@ -152,9 +371,7 @@ impl Parser<'_> {
             }
             self.expect(";")?;
         }
-        self.expect(";")?;
-        self.program.structs.push(StructDef { name, fields });
-        Ok(())
+        Ok(fields)
     }
 
     /// A global variable or a function definition.
@@ -179,6 +396,8 @@ impl Parser<'_> {
             None
         };
         let space = self.skip_qualifiers();
+        self.inlining_attributes()?;
+        let space = self.skip_qualifiers().or(space);
         let ty = self.ty()?;
         let name = self.ident()?;
         if ty == Ty::Sampler && self.is_punct("(") {
@@ -299,6 +518,31 @@ impl Parser<'_> {
         self.assignment()
     }
 
+    /// `__attribute__((always_inline))`, an inlining hint, which changes
+    /// nothing the function computes; any other GNU attribute is refused.
+    fn inlining_attributes(&mut self) -> Result<()> {
+        while self.eat_word("__attribute__") {
+            self.expect("(")?;
+            self.expect("(")?;
+            loop {
+                let line = self.line();
+                let name = self.ident()?;
+                if name != "always_inline" {
+                    return Err(syntax_error(
+                        line,
+                        format!("unsupported __attribute__(({name}))"),
+                    ));
+                }
+                if !self.eat(",") {
+                    break;
+                }
+            }
+            self.expect(")")?;
+            self.expect(")")?;
+        }
+        Ok(())
+    }
+
     /// Skip declaration qualifiers, answering the address space among them.
     fn skip_qualifiers(&mut self) -> Option<Space> {
         let mut space = None;
@@ -415,9 +659,20 @@ impl Parser<'_> {
             Some(Kind::Ident(word)) => {
                 scalar_named(word).is_some()
                     || vector_named(word).is_some()
+                    || word
+                        .strip_prefix("packed_")
+                        .and_then(vector_named)
+                        .is_some()
+                    || matrix_named(word).is_some()
                     || texture_dimension(word).is_some()
-                    || matches!(word.as_str(), "sampler" | "void" | "unsigned" | "vec")
+                    || matches!(
+                        word.as_str(),
+                        "sampler" | "void" | "unsigned" | "vec" | "matrix"
+                    )
                     || self.struct_named(word).is_some()
+                    || self.aliases.contains_key(word)
+                    || self.array_templates.contains(word)
+                    || self.type_params.contains(word)
             }
             _ => false,
         }
@@ -458,6 +713,36 @@ impl Parser<'_> {
         if let Some((scalar, lanes)) = vector_named(&word) {
             return Ok(Ty::Vector(scalar, lanes));
         }
+        if let Some(matrix) = matrix_named(&word) {
+            return Ok(matrix);
+        }
+        if word == "matrix" {
+            // `matrix<T, C, R>`.
+            self.expect("<")?;
+            let element = self.ty()?;
+            let mut dimensions = [0u8; 2];
+            for dimension in &mut dimensions {
+                self.expect(",")?;
+                *dimension = match self.peek() {
+                    Some(Kind::Int { value, .. }) if (2..=4).contains(value) => *value as u8,
+                    _ => return Err(self.error("a matrix<T, C, R> dimension must be 2, 3 or 4")),
+                };
+                self.at += 1;
+            }
+            self.expect(">")?;
+            let Ty::Scalar(scalar @ Scalar::Float { .. }) = element else {
+                return Err(syntax_error(
+                    line,
+                    "a matrix<T, C, R> element must be float or half",
+                ));
+            };
+            let [columns, rows] = dimensions;
+            return Ok(Ty::Matrix {
+                scalar,
+                columns,
+                rows,
+            });
+        }
         if word == "sampler" {
             return Ok(Ty::Sampler);
         }
@@ -482,17 +767,28 @@ impl Parser<'_> {
         if let Some(index) = self.struct_named(&word) {
             return Ok(Ty::Struct(index));
         }
-        if word.starts_with("packed_") {
-            return Err(syntax_error(
-                line,
-                format!("packed type {word} is not supported"),
-            ));
+        if let Some(ty) = self.aliases.get(&word) {
+            return Ok(ty.clone());
         }
-        if word.contains('x') && word.starts_with(|c: char| c == 'f' || c == 'h') {
-            return Err(syntax_error(
-                line,
-                format!("matrix type {word} is not supported"),
-            ));
+        if self.type_params.contains(&word) {
+            return Ok(Ty::Param(word));
+        }
+        if self.array_templates.contains(&word) {
+            self.expect("<")?;
+            let element = self.ty()?;
+            self.expect(",")?;
+            let count = match self.peek() {
+                Some(Kind::Int { value, .. }) => {
+                    u32::try_from(*value).map_err(|_| self.error("an array length out of range"))?
+                }
+                _ => return Err(self.error("an array template's length must be a literal")),
+            };
+            self.at += 1;
+            self.expect(">")?;
+            return Ok(Ty::Array(Box::new(element), count.max(1)));
+        }
+        if let Some((scalar, lanes)) = word.strip_prefix("packed_").and_then(vector_named) {
+            return Ok(Ty::Packed(scalar, lanes));
         }
         Err(syntax_error(line, format!("unknown type {word}")))
     }
@@ -507,7 +803,11 @@ impl Parser<'_> {
     ) -> Result<Ty> {
         self.expect("<")?;
         let element = self.ty()?;
-        let mut access = Access::Sample;
+        // A texture buffer is only ever read or written, and reads by default.
+        let mut access = match dimension {
+            TextureDimension::Buffer => Access::Read,
+            _ => Access::Sample,
+        };
         if self.eat(",") {
             self.eat_word("access");
             self.expect("::")?;
@@ -689,6 +989,18 @@ impl Parser<'_> {
         let line = self.line();
         let start = self.at;
         let space = self.skip_qualifiers();
+        // `auto x = e`: a local of the initializer's type.
+        if self.is_word("auto") && matches!(self.peek_at(1), Some(Kind::Ident(_))) {
+            self.at += 1;
+            if space.is_some_and(|space| space != Space::Thread) {
+                return Err(syntax_error(line, "a local in a non-thread address space"));
+            }
+            let name = self.ident()?;
+            self.expect("=")?;
+            let init = self.assignment()?;
+            out.push(Stmt::Auto { name, init, line });
+            return Ok(());
+        }
         if self.at_type() {
             let mark = self.at;
             let ty = self.ty()?;
@@ -1059,6 +1371,16 @@ impl Parser<'_> {
                 }
                 if self.at_type() && matches!(self.peek_at(1), Some(Kind::Punct("(" | "<"))) {
                     let ty = self.ty()?;
+                    // `Array({ a, b })`: an array built from an initializer list.
+                    if matches!(ty, Ty::Array(..))
+                        && self.is_punct("(")
+                        && matches!(self.peek_at(1), Some(Kind::Punct("{")))
+                    {
+                        self.expect("(")?;
+                        let items = self.initializer()?;
+                        self.expect(")")?;
+                        return Ok(items);
+                    }
                     let args = self.arguments()?;
                     return Ok(Expr {
                         kind: ExprKind::Construct(ty, args),
@@ -1181,6 +1503,25 @@ fn vector_named(word: &str) -> Option<(Scalar, u8)> {
     Some((scalar_named(&word[..word.len() - 1])?, lanes))
 }
 
+/// `floatCxR` and `halfCxR`: C columns of R rows, each two to four.
+fn matrix_named(word: &str) -> Option<Ty> {
+    let (base, shape) = word.split_at(word.len().checked_sub(3)?);
+    let scalar = match base {
+        "float" => Scalar::FLOAT,
+        "half" => Scalar::Float { bits: 16 },
+        _ => return None,
+    };
+    let dimension = |byte: u8| (b'2'..=b'4').contains(&byte).then(|| byte - b'0');
+    let [columns, b'x', rows] = shape.as_bytes() else {
+        return None;
+    };
+    Some(Ty::Matrix {
+        scalar,
+        columns: dimension(*columns)?,
+        rows: dimension(*rows)?,
+    })
+}
+
 /// The shape a texture type name spells: dimension, array, multisampled,
 /// depth.
 fn texture_dimension(word: &str) -> Option<(TextureDimension, bool, bool, bool)> {
@@ -1204,6 +1545,7 @@ fn texture_dimension(word: &str) -> Option<(TextureDimension, bool, bool, bool)>
         "2d" => TextureDimension::D2,
         "3d" => TextureDimension::D3,
         "cube" => TextureDimension::Cube,
+        "_buffer" if !depth && !array && !multisampled => TextureDimension::Buffer,
         _ => return None,
     };
     Some((dimension, array, multisampled, depth))

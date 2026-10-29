@@ -117,7 +117,9 @@ pub(crate) struct Submission {
     pub(super) timestamps: vk::QueryPool,
     pub(super) occlusion_pools: Vec<vk::QueryPool>,
     pub(super) pool: vk::CommandPool,
+    /// The context's command buffer, and those an encoded event split off.
     pub(super) command_buffer: vk::CommandBuffer,
+    pub(super) split_buffers: Vec<vk::CommandBuffer>,
     pub(crate) fence: vk::Fence,
     pub(super) descriptor_pools: Vec<vk::DescriptorPool>,
     pub(super) retained: Vec<OwnedObjcRef>,
@@ -222,6 +224,15 @@ impl Submission {
             self.gpu.release_secondary(secondary);
         }
         self.retained.clear();
+        if !self.split_buffers.is_empty() {
+            // SAFETY: the submission finished, or never reached the queue,
+            // and these were allocated from this pool.
+            unsafe {
+                self.gpu
+                    .device
+                    .free_command_buffers(self.pool, &self.split_buffers)
+            };
+        }
         // The submission finished, or never reached the queue.
         self.gpu.release_context(CommandContext {
             pool: self.pool,

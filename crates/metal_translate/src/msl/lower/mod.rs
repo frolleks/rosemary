@@ -7,53 +7,79 @@
 //! Vulkan function variable may not.
 
 mod expr;
+mod inline;
 mod library;
+mod matrix;
 
 use std::collections::HashMap;
 
 use super::ast::*;
 use super::syntax_error;
-use crate::TranslateError;
 use crate::ir::{
     self, Access, AddressSpace, Block, BlockId, Builtin, EntryPoint, Function, GlobalVariable,
     Instruction, InstructionKind, Interpolation, Module, Operand, Parameter, Resource,
     ResourceKind, Sampling, Stage, StageBinding, StageInput, StageOutput, StructField, StructType,
     Terminator, Type, ValueId,
 };
+use crate::{RejectedEntry, TranslateError};
 
 type Result<T> = std::result::Result<T, TranslateError>;
 
-pub(super) fn lower(program: &Program) -> Result<Module> {
+/// Lower every entry point that can be, with the reason each other one
+/// cannot. A library none of whose entry points lowers is an error.
+pub(super) fn lower(program: &Program) -> Result<(Module, Vec<RejectedEntry>)> {
     let mut module = Module {
         functions: Vec::new(),
         entries: Vec::new(),
         globals: Vec::new(),
         static_initializers: Vec::new(),
     };
+    let mut rejected = Vec::new();
+    let mut first_error = None;
+    let mut reject = |name: &str, error: TranslateError| {
+        rejected.push(RejectedEntry {
+            name: name.to_string(),
+            reason: error.to_string(),
+        });
+        first_error.get_or_insert(error);
+    };
+    for failed in program.failed.iter().filter(|failed| failed.entry) {
+        let name = failed.name.as_deref().unwrap_or("an entry point");
+        reject(name, failed.error.clone());
+    }
     let context = Context::new(program, &mut module)?;
     for function in &program.functions {
+        // A helper is inlined where it is called.
         let Some(stage) = function.stage else {
-            // Nothing calls a function: the IR has no call, and an inlined
-            // helper is the only way one could be honoured.
-            return Err(syntax_error(
-                function.line,
-                format!(
-                    "function {} is not an entry point; helper functions are not supported",
-                    function.name
-                ),
-            ));
+            continue;
         };
-        let (lowered, entry) = Lowerer::entry(
+        let globals = module.globals.len();
+        let lowered = Lowerer::entry(
             &context,
             function,
             stage,
             module.functions.len(),
             &mut module.globals,
-        )?;
-        module.functions.push(lowered);
-        module.entries.push(entry);
+        )
+        .and_then(|(lowered, entry)| lowered.verify().map(|()| (lowered, entry)));
+        match lowered {
+            Ok((lowered, entry)) => {
+                module.functions.push(lowered);
+                module.entries.push(entry);
+            }
+            Err(error) => {
+                module.globals.truncate(globals);
+                reject(&function.name, error);
+            }
+        }
     }
-    Ok(module)
+    // A library none of whose entry points lowers - or which has none, its
+    // declarations having failed to parse - is a failed library.
+    let first_error = first_error.or_else(|| program.failed.first().map(|f| f.error.clone()));
+    match first_error {
+        Some(error) if module.entries.is_empty() => Err(error),
+        _ => Ok((module, rejected)),
+    }
 }
 
 /// What every function of the library shares: structure layouts and the
@@ -105,6 +131,19 @@ impl<'p> Context<'p> {
                 element: Box::new(self.ir(element)),
                 count: *count,
             },
+            // Only a template's own body names one, and every use there is
+            // resolved first; an unresolved one has no IR form.
+            Ty::Param(_) => Type::Void,
+            // Packed lanes are an array of them in memory.
+            Ty::Packed(scalar, lanes) => Type::Array {
+                element: Box::new(scalar_ir(*scalar)),
+                count: u32::from(*lanes),
+            },
+            // A matrix is its columns, laid out as an array of them is.
+            Ty::Matrix { columns, .. } => Type::Array {
+                element: Box::new(self.ir(&ty.column().expect("a matrix"))),
+                count: u32::from(*columns),
+            },
             Ty::Struct(index) => Type::Struct(self.layouts[*index].clone()),
             Ty::Texture(texture) => Type::Texture(texture.clone()),
             Ty::Sampler => Type::Sampler,
@@ -127,6 +166,14 @@ impl<'p> Context<'p> {
             Ty::Array(element, count) => {
                 let (size, align) = self.size_align(element, line)?;
                 (size.next_multiple_of(align) * count, align)
+            }
+            Ty::Matrix { columns, .. } => {
+                let (size, align) = self.size_align(&ty.column().expect("a matrix"), line)?;
+                (size * u32::from(*columns), align)
+            }
+            Ty::Packed(scalar, lanes) => {
+                let lane = (u32::from(scalar.bits()) / 8).max(1);
+                (lane * u32::from(*lanes), lane)
             }
             Ty::Struct(index) => {
                 let layout = self
@@ -418,9 +465,11 @@ pub(super) enum LValue {
 }
 
 impl LValue {
+    /// The type of the value the place holds: a packed vector is read and
+    /// written as an ordinary one.
     pub fn ty(&self) -> Ty {
         match self {
-            LValue::Memory(place) => place.ty.clone(),
+            LValue::Memory(place) => place.ty.unpacked(),
             LValue::Lanes(_, _, ty) | LValue::Dynamic(_, _, ty) => ty.clone(),
             LValue::Fields(index, _) => Ty::Struct(*index),
         }
@@ -459,6 +508,8 @@ pub(super) struct Lowerer<'c, 'p> {
     /// globals numbered from `globals_base`.
     globals: Vec<GlobalVariable>,
     globals_base: u32,
+    /// The functions being inlined, innermost last.
+    frames: Vec<inline::Frame>,
 }
 
 /// How a `return` builds the entry point's result.
@@ -497,6 +548,7 @@ impl<'c, 'p> Lowerer<'c, 'p> {
             result: Type::Void,
             globals: Vec::new(),
             globals_base: 0,
+            frames: Vec::new(),
         }
     }
 
@@ -667,6 +719,7 @@ impl<'c, 'p> Lowerer<'c, 'p> {
     fn statement(&mut self, statement: &Stmt) -> Result<()> {
         match statement {
             Stmt::Threadgroup { ty, name, line } => {
+                let ty = &self.resolve(ty, *line)?;
                 if self.stage != Stage::Kernel {
                     return Err(syntax_error(
                         *line,
@@ -710,6 +763,7 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                 init,
                 line,
             } => {
+                let ty = &self.resolve(ty, *line)?;
                 if matches!(ty, Ty::Texture(_) | Ty::Sampler) {
                     // `constexpr sampler s(...)` is a sampler the shader
                     // describes itself, which needs an immutable sampler.
@@ -721,10 +775,23 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                 let lvalue = self.local_lvalue(ty);
                 if let Some(init) = init {
                     match (&init.kind, ty) {
-                        (ExprKind::InitList(items), Ty::Array(element, _)) => {
-                            for (index, item) in items.iter().enumerate() {
-                                let value = self.rvalue(item)?;
-                                let value = self.convert(value, element, item.line)?;
+                        (ExprKind::InitList(items), Ty::Array(element, count)) => {
+                            if items.len() > *count as usize {
+                                return Err(syntax_error(*line, "too many initializers"));
+                            }
+                            // Elements the list leaves out are zero, as C++
+                            // value-initializes them.
+                            for index in 0..*count as usize {
+                                let value = match items.get(index) {
+                                    Some(item) => {
+                                        let value = self.rvalue(item)?;
+                                        self.convert(value, element, item.line)?
+                                    }
+                                    None => Value {
+                                        op: self.zero(element, *line)?,
+                                        ty: (**element).clone(),
+                                    },
+                                };
                                 let LValue::Memory(place) = &lvalue else {
                                     unreachable!("an array local is one variable");
                                 };
@@ -734,7 +801,7 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                                 }
                                 element_place.indices.push(Operand::u32(index as u32));
                                 element_place.ty = (**element).clone();
-                                self.store(&LValue::Memory(element_place), value, item.line)?;
+                                self.store(&LValue::Memory(element_place), value, *line)?;
                             }
                         }
                         // `S s = { a, b };` is `(S){ a, b }`: the fields in
@@ -757,6 +824,21 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                         }
                     }
                 }
+                self.bind(name, Binding::LValue(lvalue));
+            }
+            Stmt::Auto { name, init, line } => {
+                let value = self.rvalue(init)?;
+                if matches!(value.ty, Ty::Void | Ty::Texture(_) | Ty::Sampler) {
+                    return Err(syntax_error(
+                        *line,
+                        format!(
+                            "auto {name} is initialized with {}",
+                            expr::describe(&value.ty)
+                        ),
+                    ));
+                }
+                let lvalue = self.local_lvalue(&value.ty);
+                self.store(&lvalue, value, *line)?;
                 self.bind(name, Binding::LValue(lvalue));
             }
             Stmt::Expr(expr) => {
@@ -886,6 +968,9 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                 self.after_jump();
             }
             Stmt::Return(value, line) => {
+                if self.inline_return(value.as_ref(), *line)?.is_some() {
+                    return Ok(());
+                }
                 let result = self.return_value(value.as_ref(), *line)?;
                 self.terminate(Terminator::Return(result));
                 self.after_jump();
@@ -993,15 +1078,18 @@ impl<'c, 'p> Lowerer<'c, 'p> {
         Ok(fields
             .iter()
             .enumerate()
-            .map(|(position, field)| Value {
-                op: self.emit(
+            .map(|(position, field)| {
+                let op = self.emit(
                     self.context.ir(&field.ty),
                     InstructionKind::CompositeExtract {
                         composite: value.op.clone(),
                         index: position as u32,
                     },
-                ),
-                ty: field.ty.clone(),
+                );
+                self.unpack(Value {
+                    op,
+                    ty: field.ty.clone(),
+                })
             })
             .collect())
     }
@@ -1367,6 +1455,10 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                         field: Some(position as u32),
                         binding,
                         name: Some(name),
+                        invariant: field
+                            .attributes
+                            .iter()
+                            .any(|attribute| attribute.name == "invariant"),
                     });
                     let ty = interface_ty(&field.ty, field.line)?;
                     layout.push(StructField {
@@ -1397,6 +1489,7 @@ impl<'c, 'p> Lowerer<'c, 'p> {
                     field: None,
                     binding,
                     name: None,
+                    invariant: false,
                 });
                 let interface = interface_ty(ty, line)?;
                 self.result = self.context.ir(&interface);

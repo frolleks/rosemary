@@ -96,6 +96,8 @@ pub(super) unsafe extern "C" fn descriptor_init(receiver: Id, _sel: Sel) -> Id {
         stencil_format: 0,
         sample_count: 1,
         alpha_to_coverage: false,
+        alpha_to_one: false,
+        rasterization: true,
         color_objects: std::ptr::null_mut(),
     };
     receiver
@@ -169,6 +171,8 @@ pub(super) unsafe extern "C" fn descriptor_number(receiver: Id, sel: Sel) -> u64
         b"stencilAttachmentPixelFormat" => descriptor.stencil_format,
         b"sampleCount" | b"rasterSampleCount" => descriptor.sample_count,
         b"isAlphaToCoverageEnabled" => u64::from(descriptor.alpha_to_coverage),
+        b"isAlphaToOneEnabled" => u64::from(descriptor.alpha_to_one),
+        b"isRasterizationEnabled" => u64::from(descriptor.rasterization),
         _ => 0,
     }
 }
@@ -182,6 +186,8 @@ pub(super) unsafe extern "C" fn set_descriptor_number(receiver: Id, sel: Sel, va
         b"setStencilAttachmentPixelFormat:" => descriptor.stencil_format = value,
         b"setSampleCount:" | b"setRasterSampleCount:" => descriptor.sample_count = value,
         b"setAlphaToCoverageEnabled:" => descriptor.alpha_to_coverage = value & 0xff != 0,
+        b"setAlphaToOneEnabled:" => descriptor.alpha_to_one = value & 0xff != 0,
+        b"setRasterizationEnabled:" => descriptor.rasterization = value & 0xff != 0,
         _ => (),
     }
 }

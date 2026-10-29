@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use ash::vk;
 use objc::object::Id;
 use objc::sel::Sel;
@@ -85,6 +87,15 @@ pub(crate) struct Drawable {
     pub gpu: &'static Gpu,
     pub texture: Id,
     pub layer: Id,
+    /// This use's `-addPresentedHandler:` blocks, copied, and when it was
+    /// presented; a recycled drawable starts each use without either.
+    presentation: Mutex<Presentation>,
+}
+
+#[derive(Default)]
+struct Presentation {
+    handlers: Vec<usize>,
+    presented_time: f64,
 }
 
 /// Three drawable images let the guest record ahead without ever writing an
@@ -344,6 +355,7 @@ fn make_drawable(
             gpu,
             texture,
             layer: objc::arc::retain(layer),
+            presentation: Mutex::new(Presentation::default()),
         },
     );
     if drawable.is_null() {
@@ -423,17 +435,68 @@ pub(crate) fn drawable_is_submitted_for_test(drawable: Id) -> bool {
 /// Return a vended or submitted slot to its layer's ring.
 pub(crate) fn complete(drawable: Id) {
     let mut cache = CACHE.0.lock().expect("drawable cache");
+    let mut presented = None;
     if let Some(slot) = cache
         .iter_mut()
         .flat_map(|entry| entry.slots.iter_mut())
         .find(|slot| slot.drawable == drawable as usize)
     {
+        presented = Some(slot.state == SlotState::Submitted);
         slot.complete();
         CACHE.1.notify_all();
     }
     let mut retired = retire_stale(&mut cache);
     drop(cache);
+    if let Some(presented) = presented {
+        run_presented_handlers(drawable, presented);
+    }
     release_slots(&mut retired);
+}
+
+/// Hand this use's presented handlers the drawable. One never presented
+/// reports a `presentedTime` of zero, as Metal's does.
+fn run_presented_handlers(drawable: Id, presented: bool) {
+    // SAFETY: a drawable of this crate's; the cache still holds it.
+    let presentation = &unsafe { object::body::<Drawable>(drawable) }.presentation;
+    let handlers = {
+        let mut presentation = presentation.lock().expect("drawable presentation");
+        presentation.presented_time = match presented {
+            true => darwin::mach::media_time(),
+            false => 0.0,
+        };
+        std::mem::take(&mut presentation.handlers)
+    };
+    for block in handlers {
+        // SAFETY: a block `-addPresentedHandler:` copied, whose reference
+        // this gives away, and a drawable the cache keeps alive.
+        unsafe { crate::completion::deliver(block as Id, drawable) };
+    }
+}
+
+/// `-addPresentedHandler:`.
+unsafe extern "C" fn add_presented_handler(receiver: Id, _sel: Sel, block: Id) {
+    // SAFETY: the guest passed a block.
+    let block = unsafe { objc::shorthand::objc_retainBlock(block) };
+    if block.is_null() {
+        return;
+    }
+    // SAFETY: a drawable of this crate's.
+    unsafe { object::body::<Drawable>(receiver) }
+        .presentation
+        .lock()
+        .expect("drawable presentation")
+        .handlers
+        .push(block as usize);
+}
+
+/// `-presentedTime`: the host time it reached the screen, or zero.
+unsafe extern "C" fn presented_time(receiver: Id, _sel: Sel) -> f64 {
+    // SAFETY: a drawable of this crate's.
+    unsafe { object::body::<Drawable>(receiver) }
+        .presentation
+        .lock()
+        .expect("drawable presentation")
+        .presented_time
 }
 
 unsafe extern "C" fn drawable_texture(receiver: Id, _sel: Sel) -> Id {
@@ -469,6 +532,16 @@ unsafe extern "C" fn drawable_dealloc(receiver: Id, _sel: Sel) {
         std::ptr::null_mut(),
     ));
     objc::arc::release(std::mem::replace(&mut drawable.layer, std::ptr::null_mut()));
+    let handlers = std::mem::take(
+        &mut drawable
+            .presentation
+            .get_mut()
+            .expect("drawable presentation")
+            .handlers,
+    );
+    for block in handlers {
+        objc::block::release(block as Id);
+    }
     // SAFETY: the body was established by `object::make` and is not read again.
     unsafe { std::ptr::drop_in_place(drawable as *mut Drawable) };
     objc::arc::finalize(receiver);
@@ -1523,6 +1596,8 @@ pub(crate) fn install() {
         "layer" => drawable_layer, c"@16@0:8";
         "present" => drawable_present, c"v16@0:8";
         "drawableID" => drawable_id, c"Q16@0:8";
+        "addPresentedHandler:" => add_presented_handler, c"v24@0:8@?16";
+        "presentedTime" => presented_time, c"d16@0:8";
     });
     let Some(layer) = objc::class::lookup(c"CAMetalLayer") else {
         return;

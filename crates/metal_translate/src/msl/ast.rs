@@ -43,6 +43,17 @@ pub(super) enum Ty {
     Void,
     Scalar(Scalar),
     Vector(Scalar, u8),
+    /// `packed_floatN`: a vector laid out as its lanes alone, aligned to one
+    /// lane. A value of one is an ordinary vector; only memory is packed.
+    Packed(Scalar, u8),
+    /// A function template's type parameter, bound per call.
+    Param(String),
+    /// `floatCxR`: `columns` column vectors of `rows` lanes each.
+    Matrix {
+        scalar: Scalar,
+        columns: u8,
+        rows: u8,
+    },
     Array(Box<Ty>, u32),
     /// An index into [`Program::structs`].
     Struct(usize),
@@ -64,6 +75,22 @@ impl Ty {
         match self {
             Ty::Scalar(_) => Some(1),
             Ty::Vector(_, lanes) => Some(*lanes),
+            _ => None,
+        }
+    }
+
+    /// The type a value of this type has: a packed vector's is the vector.
+    pub fn unpacked(&self) -> Ty {
+        match self {
+            Ty::Packed(scalar, lanes) => Ty::Vector(*scalar, *lanes),
+            ty => ty.clone(),
+        }
+    }
+
+    /// A matrix's column type.
+    pub fn column(&self) -> Option<Ty> {
+        match self {
+            Ty::Matrix { scalar, rows, .. } => Some(Ty::Vector(*scalar, *rows)),
             _ => None,
         }
     }
@@ -136,6 +163,12 @@ pub(super) enum Stmt {
         ty: Ty,
         name: String,
         init: Option<Expr>,
+        line: usize,
+    },
+    /// `auto name = init`: a local of the initializer's type.
+    Auto {
+        name: String,
+        init: Expr,
         line: usize,
     },
     /// A `threadgroup` variable, shared by the threadgroup and therefore
@@ -244,6 +277,18 @@ pub(super) struct Program {
     /// Every `constexpr sampler`, which an entry point that can see one takes
     /// as a hidden `[[__inline_sampler(n)]]` parameter indexing this list.
     pub inline_samplers: Vec<crate::ir::InlineSampler>,
+    /// Declarations which could not be parsed. Only what uses one fails.
+    pub failed: Vec<FailedItem>,
+}
+
+/// A file-scope declaration the parser skipped, and why.
+#[derive(Clone, Debug)]
+pub(super) struct FailedItem {
+    /// The name it declares: a function, a variable or a type.
+    pub name: Option<String>,
+    /// Whether that function is an entry point.
+    pub entry: bool,
+    pub error: crate::TranslateError,
 }
 
 /// The attribute that marks a hidden parameter as an inline sampler.
