@@ -72,7 +72,6 @@ pub const CLAIMED: &[&str] = &[
     "fsync",
     "ftruncate",
     "isatty",
-    "lseek",
     "pipe",
     "pread",
     "pwrite",

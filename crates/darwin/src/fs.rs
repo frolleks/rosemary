@@ -432,6 +432,18 @@ pub unsafe extern "C" fn lchflags(path: *const c_char, _flags: u32) -> c_int {
     })
 }
 
+/// `int fchflags(int, uint32_t)`, refused as [`lchflags`] is once the
+/// descriptor is known to be open.
+pub extern "C" fn fchflags(fd: c_int, _flags: u32) -> c_int {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: a `stat` to fill, for the descriptor check alone.
+    if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+        return -1;
+    }
+    crate::errno::set(libc::ENOTSUP);
+    -1
+}
+
 /// `int undelete(const char *)`
 ///
 /// Recovery is not supported, but validate the path as an existing object so
@@ -466,6 +478,33 @@ pub unsafe extern "C" fn truncate(path: *const c_char, length: libc::off_t) -> c
         let rc = unsafe { libc::truncate(path, length) };
         (rc, rc == 0)
     })
+}
+
+/// Darwin's `lseek` whence values. The first three are POSIX's everywhere, but
+/// Linux and FreeBSD number `SEEK_DATA` and `SEEK_HOLE` the other way round.
+mod whence {
+    pub const SEEK_SET: i32 = 0;
+    pub const SEEK_CUR: i32 = 1;
+    pub const SEEK_END: i32 = 2;
+    pub const SEEK_HOLE: i32 = 3;
+    pub const SEEK_DATA: i32 = 4;
+}
+
+/// `off_t lseek(int fd, off_t offset, int whence)`
+pub extern "C" fn lseek(fd: c_int, offset: libc::off_t, whence: c_int) -> libc::off_t {
+    let host = match whence {
+        whence::SEEK_SET => libc::SEEK_SET,
+        whence::SEEK_CUR => libc::SEEK_CUR,
+        whence::SEEK_END => libc::SEEK_END,
+        whence::SEEK_HOLE => libc::SEEK_HOLE,
+        whence::SEEK_DATA => libc::SEEK_DATA,
+        _ => {
+            crate::errno::set(libc::EINVAL);
+            return -1;
+        }
+    };
+    // SAFETY: `lseek` reads no memory of the caller's.
+    unsafe { libc::lseek(fd, offset, host) }
 }
 
 /// `int link(const char *, const char *)`
@@ -554,7 +593,7 @@ pub unsafe extern "C" fn clonefileat(
         let destination = Path::new(std::ffi::OsStr::from_bytes(
             unsafe { CStr::from_ptr(destination) }.to_bytes(),
         ));
-        match crate::copyfile::clonefile(from_path, destination, flags & CLONE_NOFOLLOW != 0) {
+        match crate::clonecopy::clonefile(from_path, destination, flags & CLONE_NOFOLLOW != 0) {
             Ok(()) => (0, true),
             Err(error) => {
                 crate::errno::set(error.raw_os_error().unwrap_or(libc::EIO));
@@ -886,6 +925,38 @@ pub unsafe extern "C" fn fsctl(
     if found != 0 {
         return -1;
     }
+    // SAFETY: the caller's.
+    unsafe { volume_request(request, data) }
+}
+
+/// `int ffsctl(int fd, unsigned long request, void *data, unsigned int options)`
+///
+/// [`fsctl`] on the volume holding an open descriptor.
+///
+/// # Safety
+///
+/// `data` is what `request` says.
+pub unsafe extern "C" fn ffsctl(
+    fd: c_int,
+    request: u64,
+    data: *mut c_void,
+    _options: u32,
+) -> c_int {
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: a `stat` to fill, for the descriptor check alone.
+    if unsafe { libc::fstat(fd, st.as_mut_ptr()) } != 0 {
+        return -1;
+    }
+    // SAFETY: the caller's.
+    unsafe { volume_request(request, data) }
+}
+
+/// Answer an `fsctl` request on a volume that exists.
+///
+/// # Safety
+///
+/// `data` is what `request` says.
+unsafe fn volume_request(request: u64, data: *mut c_void) -> c_int {
     match request {
         FSIOC_SYNC_VOLUME => {
             // The argument is `FSCTL_SYNC_WAIT` and `FSCTL_SYNC_FULLSYNC`
@@ -911,6 +982,7 @@ exports::exports! {
     functions {
         "chdir" => chdir,
         "fsctl" => fsctl,
+        "ffsctl" => ffsctl,
         "getcwd" => getcwd,
         "unlink" => unlink,
         "unlinkat" => unlinkat,
@@ -924,8 +996,10 @@ exports::exports! {
         "fchown" => fchown,
         "fchownat" => fchownat,
         "lchflags" => lchflags,
+        "fchflags" => fchflags,
         "undelete" => undelete,
         "truncate" => truncate,
+        "lseek" => lseek,
         "link" => link,
         "clonefileat" => clonefileat,
         "clonefile" => clonefile,
@@ -943,6 +1017,21 @@ mod tests {
     use super::*;
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
+
+    /// A file with no holes has its data at the start and its only hole, the
+    /// implicit one, at the end - whichever way the host numbers the two.
+    #[test]
+    fn lseek_finds_holes_and_data_by_darwins_numbering() {
+        let at = std::env::temp_dir().join(format!("rosemary-lseek-{}", std::process::id()));
+        std::fs::write(&at, vec![1u8; 4096]).unwrap();
+        let file = std::fs::File::open(&at).unwrap();
+        let _ = std::fs::remove_file(&at);
+        let fd = file.as_raw_fd();
+        assert_eq!(lseek(fd, 0, whence::SEEK_HOLE), 4096);
+        assert_eq!(lseek(fd, 0, whence::SEEK_DATA), 0);
+        assert_eq!(lseek(fd, 0, 5), -1);
+        assert_eq!(crate::errno::get(), libc::EINVAL);
+    }
 
     #[test]
     fn fsctl_syncs_a_volume_and_refuses_what_the_file_system_would() {
@@ -963,6 +1052,29 @@ mod tests {
             -1
         );
         assert_eq!(crate::errno::get(), libc::ENOENT);
+    }
+
+    #[test]
+    fn fchflags_refuses_an_open_file_and_a_closed_descriptor() {
+        let file = std::fs::File::open("/").unwrap();
+        assert_eq!(fchflags(file.as_raw_fd(), 0), -1);
+        assert_eq!(crate::errno::get(), libc::ENOTSUP);
+        assert_eq!(fchflags(-1, 0), -1);
+        assert_eq!(crate::errno::get(), libc::EBADF);
+    }
+
+    #[test]
+    fn ffsctl_refuses_a_file_system_request_and_a_closed_descriptor() {
+        let file = std::fs::File::open("/").unwrap();
+        let mut flags = 0u32;
+        let data = (&raw mut flags).cast();
+        assert_eq!(
+            unsafe { ffsctl(file.as_raw_fd(), 0xc008_6801, data, 0) },
+            -1
+        );
+        assert_eq!(crate::errno::get(), libc::ENOTTY);
+        assert_eq!(unsafe { ffsctl(-1, FSIOC_SYNC_VOLUME, data, 0) }, -1);
+        assert_eq!(crate::errno::get(), libc::EBADF);
     }
 
     /// A directory under the host's temporary directory, removed on drop so

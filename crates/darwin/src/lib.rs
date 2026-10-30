@@ -34,12 +34,12 @@ pub mod backtrace;
 pub mod bsd;
 pub mod callback;
 pub mod clock;
+mod clonecopy;
 pub mod commoncrypto;
 #[cfg(not(target_os = "macos"))]
 pub mod commpage;
 #[cfg(not(target_os = "macos"))]
 pub mod compat;
-pub mod copyfile;
 pub mod cpu;
 pub mod credentials;
 pub mod data;
@@ -55,6 +55,7 @@ pub mod exit;
 pub mod fcntl;
 #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
 pub mod fenv;
+pub mod filesec;
 pub mod fmtcheck;
 pub mod fortify;
 pub mod fs;
@@ -72,6 +73,7 @@ pub mod kqueue;
 #[cfg(not(target_os = "macos"))]
 pub mod langinfo;
 pub mod libc_backend;
+pub mod libgen;
 pub mod libproc;
 pub mod locale;
 pub mod mach;
@@ -359,7 +361,7 @@ static SHARED_MODULES: &[exports::Module] = &[
     signal::entry::MODULE,
     mach::MODULE,
     fs::MODULE,
-    copyfile::MODULE,
+    libgen::MODULE,
     xattr::MODULE,
     passwd::MODULE,
     audit::MODULE,
@@ -406,6 +408,7 @@ static NONPORTABLE_MODULES: &[exports::Module] = &[
     #[cfg(target_arch = "x86_64")]
     fenv::MODULE,
     acl::MODULE,
+    filesec::MODULE,
     fmtcheck::MODULE,
     langinfo::MODULE,
     #[cfg(target_os = "linux")]
@@ -463,7 +466,6 @@ pub const LIBRARY_NAMES: &[&str] = &[
     "/usr/lib/libpoll.dylib",
     "/usr/lib/libproc.dylib",
     "/usr/lib/libdbm.dylib",
-    "/usr/lib/libcopyfile.dylib",
     "/usr/lib/librpcsvc.dylib",
     "/usr/lib/libgcc_s.1.dylib",
     // OpenPAM, which `crate::pam` is on hosts without a Darwin one.
@@ -484,6 +486,18 @@ pub const LIBRARY_NAMES: &[&str] = &[
     "/System/Library/Frameworks/System.framework/System",
 ];
 
+/// Where a MiniDarwin base keeps `libcopyfile`.
+const COPYFILE: &str = "/usr/lib/libcopyfile.dylib";
+
+/// The real images [`LIBRARY_NAMES`] re-exports: libSystem's `libcopyfile` is
+/// the base's, Apple's own built against this crate. A native libc has its own.
+pub fn reexports() -> &'static [&'static str] {
+    match libc_backend::using_builtin() {
+        true => &[COPYFILE],
+        false => &[],
+    }
+}
+
 pub fn provider() -> machish::resolve::SyntheticDylib {
     // Before the guest's initializers can register an exit handler of their own.
     stdio::register_cleanup();
@@ -494,6 +508,9 @@ pub fn provider() -> machish::resolve::SyntheticDylib {
     lib.flat(true);
     for name in LIBRARY_NAMES {
         lib.alias(name);
+    }
+    for image in reexports() {
+        lib.reexport(image);
     }
     let out = &mut exports::NonNull(&mut lib);
     for module in modules() {
@@ -542,10 +559,11 @@ mod tests {
                 }
             }
         }
-        for name in ["_copyfile", "_kevent"] {
-            assert_eq!(is_implemented(name), builtin, "{name}");
-            assert_eq!(published(&lib, name).is_some(), builtin, "{name}");
-        }
+        assert_eq!(is_implemented("_kevent"), builtin);
+        assert_eq!(published(&lib, "_kevent").is_some(), builtin);
+        // The real libcopyfile, in place of one of this crate's.
+        let reexported = lib.reexports("/usr/lib/libSystem.B.dylib");
+        assert_eq!(reexported == [COPYFILE], builtin, "{reexported:?}");
         assert!(is_implemented("_sysctl"));
         for name in [
             "_clock_gettime",

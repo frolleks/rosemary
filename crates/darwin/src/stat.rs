@@ -171,7 +171,7 @@ pub(crate) fn unsuffixed_is_legacy() -> bool {
 /// # Safety
 ///
 /// `out` is null or a writable `struct stat` of that layout.
-unsafe fn unsuffixed(
+pub(crate) unsafe fn unsuffixed(
     out: *mut c_void,
     legacy: bool,
     fill: impl FnOnce(*mut Stat) -> c_int,
@@ -605,6 +605,40 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: u32) -> c
         created(existed, fd >= 0, libc::AT_FDCWD, path);
         (fd, fd >= 0)
     })
+}
+
+/// `O_DP_GETRAWENCRYPTED` and `O_DP_GETRAWUNENCRYPTED`, which ask for a
+/// protected file's bytes as stored.
+const O_DP_GETRAW: c_int = 0x0001 | 0x0002;
+/// Darwin's `O_ACCMODE` and `ACCESSPERMS`.
+const DARWIN_O_ACCMODE: c_int = 0x0003;
+const ACCESSPERMS: u32 = 0o777;
+
+/// `int open_dprotected_np(const char *, int flags, int class, int dpflags,
+/// ...)`, the mode taken as a fixed argument as [`open`] takes it.
+///
+/// No host volume has content protection - `statfs` never reports
+/// `MNT_CPROTECT` - so this is `open`, as xnu's is on such a volume: the class
+/// is an attribute the file system ignores, and a protected file's raw bytes
+/// are its bytes.
+///
+/// # Safety
+///
+/// `path` is a NUL-terminated string.
+pub unsafe extern "C" fn open_dprotected_np(
+    path: *const c_char,
+    flags: c_int,
+    _class: c_int,
+    dpflags: c_int,
+    mode: u32,
+) -> c_int {
+    // Raw bytes are only ever read.
+    if dpflags & O_DP_GETRAW != 0 && flags & DARWIN_O_ACCMODE != 0 {
+        crate::errno::set(libc::EINVAL);
+        return -1;
+    }
+    // SAFETY: the caller's obligations, unchanged.
+    unsafe { open(path, flags, mode & ACCESSPERMS) }
 }
 
 /// `int openat(int, const char *, int, ...)`, with Darwin's flag word.
@@ -1195,6 +1229,7 @@ exports::exports! {
         "realpath" => realpath,
         "readlink" => readlink,
         "open" => open,
+        "open_dprotected_np" => open_dprotected_np,
         "openat" => openat,
     }
 }
