@@ -248,6 +248,14 @@ impl<S: MachSpec + 'static> Loader<S> {
                         .iter()
                         .map(|n| (n.clone(), DependencyKind::Load)),
                 );
+                // A stand-in is not fetched, but what it re-exports is real and
+                // has to be. Weak, because a base without one leaves its imports
+                // to be named unbound rather than failing the link.
+                let reexported: Vec<String> = deps
+                    .iter()
+                    .flat_map(|(name, _)| providers.iter().flat_map(|p| p.reexports(name)))
+                    .collect();
+                deps.extend(reexported.into_iter().map(|n| (n, DependencyKind::Weak)));
                 (deps, img.path.clone(), img.rpaths.clone())
             };
             next += 1;
