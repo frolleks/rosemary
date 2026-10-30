@@ -273,7 +273,11 @@ fn register_dlopen_names() {
 }
 
 fn register_system_libraries() {
-    crate::dyld::register_synthetic(darwin::LIBRARY_NAMES, crate::dyld::system_symbol);
+    crate::dyld::register_synthetic_reexporting(
+        darwin::LIBRARY_NAMES,
+        crate::dyld::system_symbol,
+        darwin::reexports(),
+    );
     crate::dyld::register_synthetic(
         &["/usr/lib/libobjc.A.dylib", "/usr/lib/libobjc.dylib"],
         objc_symbol,

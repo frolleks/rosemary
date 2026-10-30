@@ -531,6 +531,8 @@ mod synthetic {
     pub struct Library {
         pub names: Vec<String>,
         pub symbol: fn(&str) -> Option<u64>,
+        /// Real images it re-exports, which a `dlsym` on it searches next.
+        pub reexports: &'static [&'static str],
         /// The address a guest is handed, which is this entry's own.
         pub handle: u64,
     }
@@ -543,6 +545,15 @@ mod synthetic {
     /// every image base and from [`super::global_handle`] by construction: it is
     /// this process's heap, and a guest image is mapped elsewhere.
     pub fn register(names: &[&str], symbol: fn(&str) -> Option<u64>) {
+        register_reexporting(names, symbol, &[]);
+    }
+
+    /// [`register`] a library that also re-exports the real images `reexports`.
+    pub fn register_reexporting(
+        names: &[&str],
+        symbol: fn(&str) -> Option<u64>,
+        reexports: &'static [&'static str],
+    ) {
         let mut libraries = LIBRARIES.lock().unwrap_or_else(|e| e.into_inner());
         if libraries
             .iter()
@@ -553,6 +564,7 @@ mod synthetic {
         let leaked: &'static Library = Box::leak(Box::new(Library {
             names: names.iter().map(|n| n.to_string()).collect(),
             symbol,
+            reexports,
             handle: 0,
         }));
         // The handle is the entry's address, filled in now that it has one.
@@ -599,6 +611,7 @@ mod synthetic {
 }
 
 pub use synthetic::register as register_synthetic;
+pub use synthetic::register_reexporting as register_synthetic_reexporting;
 
 /// Return the guest image at a dyld image-list index.
 fn indexed_image(index: u32) -> Option<(u64, u64, String)> {
@@ -1501,7 +1514,14 @@ fn lookup(handle: u64, name: &str) -> Option<u64> {
     // one of this runtime's own functions - and a guest that calls it through a
     // register reaches it by no import site unless one is made here.
     if let Some(library) = synthetic::by_handle(handle) {
-        let addr = (library.symbol)(name)?;
+        let Some(addr) = (library.symbol)(name) else {
+            // A re-exported image is a guest one, loaded with whatever
+            // depended on this library.
+            return library
+                .reexports
+                .iter()
+                .find_map(|path| reexported(path, name));
+        };
         return Some(remember_native_symbol(
             addr,
             name,
@@ -1798,6 +1818,22 @@ fn set_link_edit_error(kind: i32, errno: i32, file: &str, message: String) {
         file: CString::new(file).unwrap_or_default(),
         message: CString::new(message).unwrap_or_default(),
     });
+}
+
+/// `name` in the guest image a synthetic library re-exports, whether it came
+/// in with the program or with a later `dlopen`.
+fn reexported(install_name: &str, name: &str) -> Option<u64> {
+    use machish::resolve::SymbolProvider;
+    let mangled = format!("_{name}");
+    let sym = machish::fixups::SymbolRef {
+        name: &mangled,
+        library: machish::fixups::LibraryRef::InstallName(install_name),
+        weak_import: false,
+    };
+    ProgramImages
+        .resolve(&sym)
+        .or_else(|| LoadedImages::default().resolve(&sym))
+        .map(|found| found.addr)
 }
 
 /// The handle an already-loaded image at `path` has, without loading it.

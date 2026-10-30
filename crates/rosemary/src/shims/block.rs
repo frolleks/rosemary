@@ -132,6 +132,9 @@ fn call_block(symbol: &str, host: u64, args: &[u64]) {
             [a, b, c] => {
                 core::mem::transmute::<u64, extern "C" fn(u64, u64, u64)>(host)(*a, *b, *c)
             }
+            [a, b, c, d] => {
+                core::mem::transmute::<u64, extern "C" fn(u64, u64, u64, u64)>(host)(*a, *b, *c, *d)
+            }
             _ => unreachable!("unsupported block dispatch arity for {symbol}"),
         }
     }
@@ -203,6 +206,23 @@ fn dispatch_once(
     }
     substitute_block(symbol, block, mem, callbacks)?;
     call_block(symbol, host_or_refuse(symbol)?, &[predicate, block]);
+    Ok(())
+}
+
+/// `void qsort_b(void *base, size_t nel, size_t width, int (^compar)(const
+/// void *, const void *))`: the block is called before the sort returns.
+fn qsort_b(
+    symbol: &str,
+    ctx: &mut RegisterContext,
+    mem: &mut dyn GuestMemory,
+    callbacks: &dyn Callbacks,
+) -> Result<()> {
+    let (base, nel, width, block) = (ctx.rdi, ctx.rsi, ctx.rdx, ctx.rcx);
+    if block == 0 {
+        return Err(bad_pointer(symbol, 0));
+    }
+    substitute_block(symbol, block, mem, callbacks)?;
+    call_block(symbol, host_or_refuse(symbol)?, &[base, nel, width, block]);
     Ok(())
 }
 
@@ -400,6 +420,7 @@ pub fn shim_for(name: &str) -> Option<Shim> {
         "nw_path_enumerate_interfaces" => {
             Some(bind!(callback "nw_path_enumerate_interfaces" => object_and_block))
         }
+        "qsort_b" => Some(bind!(callback "qsort_b" => qsort_b)),
         // Both spellings.
         "_Block_copy" => Some(bind!(callback "_Block_copy" => block_copy)),
         "Block_copy" => Some(bind!(callback "Block_copy" => block_copy)),
