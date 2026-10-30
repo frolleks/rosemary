@@ -442,7 +442,7 @@ fn source_msl_rejects_unimplemented_operations() {
     let error = parse_msl(
         "\n\
          kernel void f(device uint* output [[buffer(0)]]) {\n\
-             switch (output[0]) { default: break; }\n\
+             goto end;\n\
          }",
     )
     .unwrap_err();
@@ -2527,7 +2527,7 @@ fn source_msl_keeps_entry_points_that_translate() {
         using namespace metal;\n\
         kernel void good(device uint* output [[buffer(0)]]) { output[0] = 1; }\n\
         kernel void bad(device uint* output [[buffer(0)]]) {\n\
-            switch (output[0]) { default: break; }\n\
+            goto end;\n\
         }";
     let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
     assert_eq!(library.entries.len(), 1);
@@ -2569,6 +2569,20 @@ fn source_msl_knows_the_standard_indirect_argument_structures() {
     let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
     assert!(library.rejected.is_empty());
     assert_eq!(library.entries.len(), 1);
+}
+
+#[test]
+fn source_msl_rejects_a_pointer_cast_between_typed_buffers() {
+    let source = "#include <metal_stdlib>\n\
+        using namespace metal;\n\
+        kernel void main0(device float* values [[buffer(0)]]) {\n\
+            ((device uint*)values)[0] = 1;\n\
+        }";
+    let error = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap_err();
+    assert!(
+        error.to_string().contains("only a buffer of bytes allows"),
+        "{error}"
+    );
 }
 
 #[test]

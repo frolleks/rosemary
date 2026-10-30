@@ -80,25 +80,20 @@ impl Lowerer<'_, '_> {
                 self.member_place(object, member, line)?
             }
             ExprKind::Index(object, index) => {
-                if let ExprKind::Ident(name) = &object.kind
-                    && let Some(Binding::Pointer(place)) = self.lookup(name)
-                {
-                    let index = self.index_operand(index)?;
-                    return Ok(Some(LValue::Memory(Place {
-                        indices: vec![index],
-                        ..place
-                    })));
+                if let Some(pointer) = self.pointer(object)? {
+                    return Ok(Some(self.index_pointer(pointer, index, line)?));
                 }
                 let Some(object) = self.lvalue(object)? else {
                     return Ok(None);
                 };
                 self.index_place(object, index, line)?
             }
+            ExprKind::Unary("*", operand) => self.deref(operand, line)?,
             _ => return Ok(None),
         }))
     }
 
-    fn index_operand(&mut self, index: &Expr) -> Result<Operand> {
+    pub(super) fn index_operand(&mut self, index: &Expr) -> Result<Operand> {
         let line = index.line;
         let value = self.rvalue(index)?;
         if !matches!(value.ty, Ty::Scalar(Scalar::Int { .. } | Scalar::Bool)) {
@@ -116,6 +111,9 @@ impl Lowerer<'_, '_> {
             LValue::Fields(index, fields) => {
                 let position = self.field_position(index, member, line)?;
                 Ok(fields[position].clone())
+            }
+            LValue::Bytes(bytes) if matches!(bytes.ty, Ty::Struct(_)) => {
+                self.bytes_member(&bytes, member, line)
             }
             LValue::Memory(place) if matches!(place.ty, Ty::Struct(_)) => {
                 let Ty::Struct(index) = place.ty else {
@@ -157,6 +155,12 @@ impl Lowerer<'_, '_> {
             Ty::Matrix { .. } => ty.column(),
             _ => None,
         };
+        if element.is_some()
+            && let LValue::Bytes(bytes) = &object
+        {
+            let index = self.index_operand(index)?;
+            return self.bytes_element(bytes, index, line);
+        }
         if let Some(element) = element {
             let LValue::Memory(place) = object else {
                 return Err(syntax_error(line, "an array which is not in memory"));
@@ -299,6 +303,7 @@ impl Lowerer<'_, '_> {
                 }
                 Ok(Value { op, ty })
             }
+            LValue::Bytes(bytes) => self.load_bytes(bytes, line),
         }
     }
 
@@ -381,11 +386,33 @@ impl Lowerer<'_, '_> {
                 }
                 Ok(())
             }
+            LValue::Bytes(bytes) => self.store_bytes(bytes, value, line),
         }
     }
 
-    /// A packed vector read from memory, as the vector it is.
+    /// A packed vector or a `bool` read from memory, as the value it is.
     pub(super) fn unpack(&mut self, value: Value) -> Value {
+        if value.ty == Ty::ByteBool {
+            let byte = self.emit(
+                Type::u32(),
+                InstructionKind::Convert {
+                    op: ConvertOp::ZeroExtend,
+                    value: value.op,
+                },
+            );
+            let op = self.emit(
+                Type::Bool,
+                InstructionKind::IntegerCompare {
+                    predicate: IntegerPredicate::NotEqual,
+                    lhs: byte,
+                    rhs: Operand::u32(0),
+                },
+            );
+            return Value {
+                op,
+                ty: Ty::Scalar(Scalar::Bool),
+            };
+        }
         let Ty::Packed(scalar, lanes) = value.ty else {
             return value;
         };
@@ -408,8 +435,26 @@ impl Lowerer<'_, '_> {
     }
 
     /// A value as memory of type `ty` holds it: a vector stored to a packed
-    /// one becomes its array of lanes.
-    fn pack(&mut self, value: Value, ty: &Ty) -> Operand {
+    /// one becomes its array of lanes, and a `bool` a byte. The byte is chosen
+    /// at 32 bits, so that only a conversion touches the narrow type.
+    pub(super) fn pack(&mut self, value: Value, ty: &Ty) -> Operand {
+        if *ty == Ty::ByteBool {
+            let word = self.emit(
+                Type::u32(),
+                InstructionKind::Select {
+                    condition: value.op,
+                    on_true: Operand::u32(1),
+                    on_false: Operand::u32(0),
+                },
+            );
+            return self.emit(
+                scalar_ir(Scalar::UCHAR),
+                InstructionKind::Convert {
+                    op: ConvertOp::IntegerTruncate,
+                    value: word,
+                },
+            );
+        }
         let Ty::Packed(scalar, lanes) = *ty else {
             return value.op;
         };
@@ -586,6 +631,7 @@ impl Lowerer<'_, '_> {
                 line,
                 "an atomic pointer used other than by an atomic function",
             )),
+            ExprKind::PointerCast(..) => Err(syntax_error(line, "a pointer used as a value")),
         }
     }
 
@@ -810,10 +856,11 @@ impl Lowerer<'_, '_> {
             return self.increment(op, operand, true, line);
         }
         if op == "&" {
-            return Err(syntax_error(
-                line,
-                "a pointer used other than by an atomic function",
-            ));
+            return Err(syntax_error(line, "a pointer used as a value"));
+        }
+        if op == "*" {
+            let lvalue = self.deref(operand, line)?;
+            return self.load(&lvalue, line);
         }
         let value = self.rvalue(operand)?;
         if matches!(value.ty, Ty::Matrix { .. }) {
@@ -1415,6 +1462,7 @@ impl Lowerer<'_, '_> {
             Ty::Scalar(scalar) => Ok(number_operand(*scalar, Number::Int(0))),
             Ty::Vector(scalar, lanes) => Ok(self.constant_of(*scalar, *lanes, Number::Int(0))),
             Ty::Matrix { .. } => Ok(self.construct_matrix(ty, &[], line)?.op),
+            Ty::ByteBool => Ok(number_operand(Scalar::UCHAR, Number::Int(0))),
             Ty::Packed(scalar, lanes) => {
                 let element = self.zero(&Ty::Scalar(*scalar), line)?;
                 Ok(Operand::Composite {
@@ -1535,9 +1583,10 @@ pub(super) fn has_effect(expr: &Expr) -> bool {
         ExprKind::Binary(_, a, b) => has_effect(a) || has_effect(b),
         ExprKind::Ternary(a, b, c) => has_effect(a) || has_effect(b) || has_effect(c),
         ExprKind::Construct(_, args) | ExprKind::InitList(args) => args.iter().any(has_effect),
-        ExprKind::Cast(_, inner) | ExprKind::AtomicCast(_, inner) | ExprKind::Member(inner, _) => {
-            has_effect(inner)
-        }
+        ExprKind::Cast(_, inner)
+        | ExprKind::AtomicCast(_, inner)
+        | ExprKind::PointerCast(_, _, inner)
+        | ExprKind::Member(inner, _) => has_effect(inner),
         ExprKind::Index(a, b) => has_effect(a) || has_effect(b),
         ExprKind::CompoundLiteral(_, items) => items.iter().any(|(_, item)| has_effect(item)),
         ExprKind::Ident(_) | ExprKind::Int { .. } | ExprKind::Float { .. } | ExprKind::Bool(_) => {
@@ -1563,6 +1612,7 @@ pub(super) fn describe(ty: &Ty) -> String {
             rows,
         } => format!("{}{columns}x{rows}", scalar(s)),
         Ty::Packed(s, lanes) => format!("packed_{}{lanes}", scalar(s)),
+        Ty::ByteBool => "bool".into(),
         Ty::Param(name) => name.clone(),
         Ty::Array(element, count) => format!("{}[{count}]", describe(element)),
         Ty::Struct(_) => "a structure".into(),

@@ -200,22 +200,40 @@ impl<'p> Lowerer<'_, 'p> {
                 }
                 Ok(Binding::LValue(lvalue))
             }
-            (Indirection::Pointer, _) => match &arg.kind {
-                ExprKind::Ident(name) => match self.lookup(name) {
-                    Some(binding @ Binding::Pointer(_)) => Ok(binding),
-                    _ => Err(syntax_error(
+            (Indirection::Pointer, declared) => {
+                let pointer = self.pointer(arg)?.ok_or_else(|| {
+                    syntax_error(
                         line,
                         format!("{} is passed something not a buffer pointer", param.name),
-                    )),
-                },
-                _ => Err(syntax_error(
-                    line,
-                    format!(
-                        "{} is passed a pointer expression, which is not supported",
-                        param.name
-                    ),
-                )),
-            },
+                    )
+                })?;
+                if let Some(space) = param.space
+                    && address_space(space) != pointer.space()
+                {
+                    return Err(syntax_error(
+                        line,
+                        format!(
+                            "{} is passed a pointer into another address space",
+                            param.name
+                        ),
+                    ));
+                }
+                let element = pointer.element().unpacked();
+                deduce(declared, &element, types, line)?;
+                let ty = substitute(declared, types, line)?;
+                if ty.in_memory() != *pointer.element() {
+                    return Err(syntax_error(
+                        line,
+                        format!(
+                            "{} takes a pointer to {}, not {}",
+                            param.name,
+                            describe(&ty),
+                            describe(&element)
+                        ),
+                    ));
+                }
+                Ok(Binding::Pointer(pointer))
+            }
         }
     }
 

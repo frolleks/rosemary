@@ -321,8 +321,19 @@ impl Parser<'_> {
         }
     }
 
-    /// `typedef struct [tag] { ... } Name;` or `typedef T Name;`.
+    /// `typedef struct [tag] { ... } Name;`, `typedef enum [tag] [: T] { ... }
+    /// Name;` or `typedef T Name;`.
     fn typedef(&mut self) -> Result<()> {
+        if self.eat_word("enum") {
+            if matches!(self.peek(), Some(Kind::Ident(_))) {
+                self.ident()?;
+            }
+            let scalar = self.enumeration()?;
+            let name = self.ident()?;
+            self.expect(";")?;
+            self.aliases.insert(name, Ty::Scalar(scalar));
+            return Ok(());
+        }
         if self.eat_word("struct") {
             let tag = match self.peek() {
                 Some(Kind::Ident(_)) => Some(self.ident()?),
@@ -347,6 +358,51 @@ impl Parser<'_> {
         Ok(())
     }
 
+    /// An enumeration's `[: T] { A = 1, B, ... }`, its enumerators recorded,
+    /// answering its underlying type.
+    fn enumeration(&mut self) -> Result<Scalar> {
+        let line = self.line();
+        // Without a fixed type, every value here fits the `int` C++ picks.
+        let scalar = if self.eat(":") {
+            match self.ty()? {
+                Ty::Scalar(scalar @ Scalar::Int { .. }) => scalar,
+                _ => {
+                    return Err(syntax_error(
+                        line,
+                        "an enumeration's type must be an integer",
+                    ));
+                }
+            }
+        } else {
+            Scalar::INT
+        };
+        self.expect("{")?;
+        let mut next = 0u64;
+        while !self.eat("}") {
+            let name = self.ident()?;
+            if self.eat("=") {
+                let negative = self.eat("-");
+                let value = match self.peek() {
+                    Some(Kind::Int { value, .. }) => *value,
+                    _ => return Err(self.error("an enumerator's value must be an integer literal")),
+                };
+                self.at += 1;
+                next = if negative {
+                    value.wrapping_neg()
+                } else {
+                    value
+                };
+            }
+            self.program.enumerators.insert(name, (next, scalar));
+            next = next.wrapping_add(1);
+            if !self.eat(",") {
+                self.expect("}")?;
+                break;
+            }
+        }
+        Ok(scalar)
+    }
+
     /// A structure's `{ fields }`.
     fn struct_body(&mut self) -> Result<Vec<Field>> {
         self.expect("{")?;
@@ -357,7 +413,7 @@ impl Parser<'_> {
             let base = self.ty()?;
             loop {
                 let name = self.ident()?;
-                let ty = self.array_suffix(base.clone())?;
+                let ty = self.array_suffix(base.clone())?.in_memory();
                 let attributes = self.attributes()?;
                 fields.push(Field {
                     name,
@@ -673,6 +729,7 @@ impl Parser<'_> {
                     || self.aliases.contains_key(word)
                     || self.array_templates.contains(word)
                     || self.type_params.contains(word)
+                    || standard_struct_fields(word, 0).is_some()
             }
             _ => false,
         }
@@ -982,11 +1039,54 @@ impl Parser<'_> {
             out.push(Stmt::Return(value, line));
             return Ok(());
         }
-        if self.is_word("switch") || self.is_word("goto") {
+        if self.eat_word("switch") {
+            self.expect("(")?;
+            let selector = self.expression()?;
+            self.expect(")")?;
+            let cases = self.cases()?;
+            out.push(Stmt::Switch {
+                selector,
+                cases,
+                line,
+            });
+            return Ok(());
+        }
+        if self.is_word("goto") {
             return Err(self.error("unsupported statement"));
         }
         self.simple_statement(out)?;
         self.expect(";")
+    }
+
+    /// A `switch` body: `{`, then statements, each case begun by its label.
+    fn cases(&mut self) -> Result<Vec<Case>> {
+        self.expect("{")?;
+        let mut cases: Vec<Case> = Vec::new();
+        while !self.eat("}") {
+            if self.eat_word("case") {
+                let label = self.ternary()?;
+                self.expect(":")?;
+                cases.push(Case {
+                    label: Some(label),
+                    body: Vec::new(),
+                });
+            } else if self.eat_word("default") {
+                self.expect(":")?;
+                cases.push(Case {
+                    label: None,
+                    body: Vec::new(),
+                });
+            } else {
+                if self.peek().is_none() {
+                    return Err(self.error("unterminated switch"));
+                }
+                let Some(case) = cases.last_mut() else {
+                    return Err(self.error("a statement before a switch's first label"));
+                };
+                self.statement(&mut case.body)?;
+            }
+        }
+        Ok(cases)
     }
 
     /// A declaration or an expression, without its `;`.
@@ -994,6 +1094,10 @@ impl Parser<'_> {
         let line = self.line();
         let start = self.at;
         let space = self.skip_qualifiers();
+        if self.is_word("auto") && matches!(self.peek_at(1), Some(Kind::Punct("&"))) {
+            self.at += 2;
+            return self.reference(space, None, out);
+        }
         // `auto x = e`: a local of the initializer's type.
         if self.is_word("auto") && matches!(self.peek_at(1), Some(Kind::Ident(_))) {
             self.at += 1;
@@ -1017,6 +1121,10 @@ impl Parser<'_> {
                 let sampler = self.inline_sampler()?;
                 self.local_samplers.push((name, sampler, line));
                 return Ok(());
+            }
+            self.skip_qualifiers();
+            if self.eat("&") {
+                return self.reference(space, Some(ty), out);
             }
             if matches!(self.peek(), Some(Kind::Ident(_))) {
                 if space == Some(Space::Threadgroup) {
@@ -1067,6 +1175,27 @@ impl Parser<'_> {
         }
         self.at = start;
         out.push(Stmt::Expr(self.expression()?));
+        Ok(())
+    }
+
+    /// The rest of `SPACE T& name = init`, after the `&`.
+    fn reference(
+        &mut self,
+        space: Option<Space>,
+        ty: Option<Ty>,
+        out: &mut Vec<Stmt>,
+    ) -> Result<()> {
+        let line = self.line();
+        let name = self.ident()?;
+        self.expect("=")?;
+        let init = self.assignment()?;
+        out.push(Stmt::Reference {
+            space,
+            ty,
+            name,
+            init,
+            line,
+        });
         Ok(())
     }
 
@@ -1240,7 +1369,7 @@ impl Parser<'_> {
 
     fn unary(&mut self) -> Result<Expr> {
         let line = self.line();
-        for op in ["-", "+", "!", "~", "++", "--", "&"] {
+        for op in ["-", "+", "!", "~", "++", "--", "&", "*"] {
             if self.eat(op) {
                 let operand = self.unary()?;
                 return Ok(Expr {
@@ -1253,8 +1382,18 @@ impl Parser<'_> {
             // A cast or a compound literal: `(` type `)`.
             let start = self.at;
             self.at += 1;
+            let space = self.skip_qualifiers();
             if self.at_type() {
                 let ty = self.ty()?;
+                self.skip_qualifiers();
+                if self.eat("*") {
+                    self.expect(")")?;
+                    let operand = self.unary()?;
+                    return Ok(Expr {
+                        kind: ExprKind::PointerCast(space, ty, Box::new(operand)),
+                        line,
+                    });
+                }
                 if self.eat(")") {
                     if self.is_punct("{") {
                         return self.compound_literal(ty, line);
@@ -1374,6 +1513,7 @@ impl Parser<'_> {
                         line,
                     });
                 }
+
                 if self.at_type() && matches!(self.peek_at(1), Some(Kind::Punct("(" | "<"))) {
                     let ty = self.ty()?;
                     // `Array({ a, b })`: an array built from an initializer list.
@@ -1418,6 +1558,21 @@ impl Parser<'_> {
                             kind: ExprKind::AtomicCast(scalar, Box::new(pointer)),
                             line,
                         });
+                    }
+                    let space = self.skip_qualifiers();
+                    if self.at_type() {
+                        let ty = self.ty()?;
+                        self.skip_qualifiers();
+                        if self.eat("*") {
+                            self.expect(">")?;
+                            self.expect("(")?;
+                            let pointer = self.expression()?;
+                            self.expect(")")?;
+                            return Ok(Expr {
+                                kind: ExprKind::PointerCast(space, ty, Box::new(pointer)),
+                                line,
+                            });
+                        }
                     }
                     self.at = mark;
                 }

@@ -2396,3 +2396,144 @@ fn serial_dispatches_and_concurrent_barriers_order_writes() {
         }
     }
 }
+
+/// Run `name` from `source` once per element of a one-dimensional grid of
+/// `threads`, with `buffers` bound from index 0.
+fn run_source_kernel(device: Id, source: &str, name: &str, buffers: &[Id], threads: u64) {
+    let library = source_library(device, source);
+    assert!(!library.is_null(), "the kernel must translate");
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        let function = new_function_with_name(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str(name),
+        );
+        assert!(!function.is_null(), "{name} must translate");
+        let mut error = std::ptr::null_mut();
+        let pipeline = new_compute_pipeline(device, std::ptr::null(), function, &mut error);
+        assert!(!pipeline.is_null());
+        let queue = new_command_queue(device, std::ptr::null());
+        let command = send(queue, "commandBuffer");
+        let encoder = send(command, "computeCommandEncoder");
+        send_with_object(encoder, "setComputePipelineState:", pipeline);
+        for (index, buffer) in buffers.iter().enumerate() {
+            set_buffer_at(encoder, *buffer, 0, index as u64);
+        }
+        dispatch(encoder, threads);
+        send_void(encoder, "endEncoding");
+        send_void(command, "commit");
+        send_void(command, "waitUntilCompleted");
+    }
+}
+
+fn buffer_with_bytes(device: Id, bytes: &[u8]) -> Id {
+    // SAFETY: the same call the guest makes, with bytes it copies.
+    unsafe {
+        new_buffer_with_bytes(
+            device,
+            std::ptr::null(),
+            bytes.as_ptr().cast(),
+            bytes.len(),
+            0,
+        )
+    }
+}
+
+fn buffer_bytes(buffer: Id, length: usize) -> Vec<u8> {
+    // SAFETY: a shared buffer of at least `length` bytes the device is done with.
+    unsafe {
+        let contents = object::body::<resource::Buffer>(buffer).inner.contents;
+        std::slice::from_raw_parts(contents as *const u8, length).to_vec()
+    }
+}
+
+/// A `char` or `void` buffer viewed through a cast reads and writes whole
+/// values at any byte offset, leaving the bytes around them alone, and a
+/// `bool` member is the byte Metal lays out.
+#[test]
+fn a_byte_buffer_is_read_and_written_as_any_type_at_any_offset() {
+    isolate_metal_fixture!();
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    const SOURCE: &str = "#include <metal_stdlib>\n\
+        using namespace metal;\n\
+        struct Flags { bool negate; bool twice; };\n\
+        template<typename T>\n\
+        static void split(device T* out, uint value) { out[0] = (T)value; out[1] = (T)(value >> 16); }\n\
+        kernel void view(const device char* records [[buffer(0)]],\n\
+                         device MTLDrawIndexedPrimitivesIndirectArguments* args [[buffer(1)]],\n\
+                         device void* halves [[buffer(2)]],\n\
+                         constant Flags& flags [[buffer(3)]],\n\
+                         uint idx [[thread_position_in_grid]]) {\n\
+            const device auto& record = *reinterpret_cast<const device MTLDrawIndexedPrimitivesIndirectArguments*>(records + idx * 22 + 1);\n\
+            args[idx] = record;\n\
+            device auto& arg = args[idx];\n\
+            if (flags.twice) { arg.instanceCount *= 2; }\n\
+            if (flags.negate) { arg.baseVertex = -arg.baseVertex; }\n\
+            split(&((device ushort*)halves)[idx * 3 + 1], record.indexCount);\n\
+        }";
+    let records: [[i32; 5]; 2] = [[0x0003_0007, 5, 9, -4, 11], [0x0001_0002, 6, 10, 7, 12]];
+    let mut packed = vec![0xEEu8; 2 * 22 + 1];
+    for (index, record) in records.iter().enumerate() {
+        let at = index * 22 + 1;
+        for (field, value) in record.iter().enumerate() {
+            packed[at + field * 4..at + field * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    let buffers = [
+        buffer_with_bytes(device, &packed),
+        buffer_with_bytes(device, &[0; 40]),
+        buffer_with_bytes(device, &[0xFF; 12]),
+        buffer_with_bytes(device, &[0, 1]),
+    ];
+    run_source_kernel(device, SOURCE, "view", &buffers, 2);
+
+    let args: Vec<i32> = buffer_bytes(buffers[1], 40)
+        .chunks(4)
+        .map(|word| i32::from_le_bytes(word.try_into().unwrap()))
+        .collect();
+    assert_eq!(
+        args,
+        [0x0003_0007, 10, 9, -4, 11, 0x0001_0002, 12, 10, 7, 12]
+    );
+    let halves: Vec<u16> = buffer_bytes(buffers[2], 12)
+        .chunks(2)
+        .map(|half| u16::from_le_bytes(half.try_into().unwrap()))
+        .collect();
+    assert_eq!(halves, [0xFFFF, 7, 3, 0xFFFF, 2, 1]);
+}
+
+/// A `switch` enters at its matching label, or `default` wherever that is,
+/// falls through to the cases after it, and `break` leaves only the switch.
+#[test]
+fn a_switch_falls_through_from_its_label_until_a_break() {
+    isolate_metal_fixture!();
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    const SOURCE: &str = "#include <metal_stdlib>\n\
+        using namespace metal;\n\
+        typedef enum : uint8_t { Zero, One, Four = 4, Five } Step;\n\
+        kernel void steps(device uint* out [[buffer(0)]], uint idx [[thread_position_in_grid]]) {\n\
+            uint trail = 0;\n\
+            for (uint pass = 0; pass < 2; pass++) {\n\
+                switch ((Step)idx) {\n\
+                    case Zero: trail = trail * 10 + 1;\n\
+                    case One: trail = trail * 10 + 2; break;\n\
+                    case Four: trail = trail * 10 + 3;\n\
+                    default: trail = trail * 10 + 9;\n\
+                    case Five: trail = trail * 10 + 5; break;\n\
+                }\n\
+            }\n\
+            out[idx] = trail;\n\
+        }";
+    let out = buffer_with_bytes(device, &[0; 28]);
+    run_source_kernel(device, SOURCE, "steps", &[out], 7);
+    let trails: Vec<u32> = buffer_bytes(out, 28)
+        .chunks(4)
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect();
+    assert_eq!(trails, [1212, 22, 9595, 9595, 395395, 55, 9595]);
+}
