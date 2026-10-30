@@ -36,18 +36,16 @@ impl Table {
     /// table is built once and a test that set the variable could not observe
     /// it.
     pub fn rooted(root: &Path, user: &str, host_home: Option<&Path>) -> Table {
-        Table::rooted_with_console(root, user, host_home, None)
+        Table::rooted_with_files(root, user, host_home, &[])
     }
 
-    /// As [`Table::rooted`], with `/dev/console` a file of the prefix's.
-    ///
-    /// A Mac lets any job write its console; a Linux host's `/dev/console` is
-    /// root's, and a launchd job whose output goes there would fail to start.
-    pub fn rooted_with_console(
+    /// As [`Table::rooted`], with each guest path in `files` a single host
+    /// file the prefix provides rather than one in its root.
+    pub fn rooted_with_files(
         root: &Path,
         user: &str,
         host_home: Option<&Path>,
-        console: Option<&Path>,
+        files: &[(&str, &Path)],
     ) -> Table {
         let mut mounts = vec![
             Mount {
@@ -74,13 +72,11 @@ impl Table {
                 listed: false,
             },
         ];
-        if let Some(console) = console {
-            mounts.push(Mount {
-                guest: "/dev/console".to_string(),
-                host: console.to_path_buf(),
-                listed: true,
-            });
-        }
+        mounts.extend(files.iter().map(|(guest, host)| Mount {
+            guest: guest.to_string(),
+            host: host.to_path_buf(),
+            listed: true,
+        }));
         if let Some(host_home) = host_home {
             mounts.push(Mount {
                 guest: format!("/Users/{user}"),
@@ -548,6 +544,31 @@ mod tests {
             table.to_host("/Users/someone/Documents"),
             Some(PathBuf::from(
                 "/prefixes/default/root/Users/someone/Documents"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_provided_file_shadows_the_prefixs_own() {
+        let table = Table::rooted_with_files(
+            Path::new("/prefixes/default/root"),
+            "user",
+            None,
+            &[(
+                "/System/Library/CoreServices/SystemVersion.plist",
+                Path::new("/prefixes/default/.rosemary/system-version/x.plist"),
+            )],
+        );
+        assert_eq!(
+            table.to_host("/System/Library/CoreServices/SystemVersion.plist"),
+            Some(PathBuf::from(
+                "/prefixes/default/.rosemary/system-version/x.plist"
+            ))
+        );
+        assert_eq!(
+            table.to_host("/System/Library/CoreServices/Finder.app"),
+            Some(PathBuf::from(
+                "/prefixes/default/root/System/Library/CoreServices/Finder.app"
             ))
         );
     }

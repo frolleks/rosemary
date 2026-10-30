@@ -294,17 +294,17 @@ const KEYS: &[Key] = &[
     Key {
         name: "kern.osversion",
         mib: &[CTL_KERN, KERN_OSVERSION],
-        source: Source::Guest(|| Some(Value::Str(build()))),
+        source: Source::Guest(|| Some(Value::Str(prefix::release::build().to_string()))),
     },
     Key {
         name: "kern.osproductversion",
         mib: &[CTL_KERN, KERN_OSPRODUCTVERSION],
-        source: Source::Guest(|| Some(Value::Str(product_version()))),
+        source: Source::Guest(|| Some(Value::Str(prefix::release::product_version()))),
     },
     Key {
         name: "kern.osproductversioncompat",
         mib: &[CTL_KERN, KERN_OSPRODUCTVERSIONCOMPAT],
-        source: Source::Guest(|| Some(Value::Str(product_version()))),
+        source: Source::Guest(|| Some(Value::Str(prefix::release::product_version()))),
     },
     Key {
         name: "kern.hostname",
@@ -737,54 +737,14 @@ fn swap_usage() -> Option<Value> {
     Some(Value::Bytes(bytes))
 }
 
-/// The `kern.*` strings, the same on every host and overridable so a guest can be
-/// told it is on a given release.
-///
-/// The defaults describe macOS 15.0. A program that branches on the OS version needs
-/// a *specific* answer far more than it needs a true one, and the environment is where
-/// that belongs rather than a rebuild.
-///
-/// Read once: [`macos_version`] is derived from it and cached, and the two must
-/// keep agreeing if the variable changes later.
+/// The `kern.*` release strings, the same on every host; see [`prefix::release`].
 fn release() -> String {
-    static RELEASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    RELEASE
-        .get_or_init(|| env_or("ROSEMARY_DARWIN_RELEASE", "24.0.0"))
-        .clone()
+    prefix::release::darwin().to_string()
 }
 
-/// The macOS version the [`release`] above implies, as `(major, minor, patch)`.
-///
-/// One derivation rather than a second constant, because a guest that reads
-/// `kern.osrelease` and a guest that calls `Gestalt` are asking the same
-/// question and must not get two answers. Darwin 20 is macOS 11 and each is one
-/// apart after that; before it, every Darwin was some 10.x.
+/// The macOS version the guest is told it runs, as `(major, minor, patch)`.
 pub fn macos_version() -> (i32, i32, i32) {
-    static VERSION: std::sync::OnceLock<(i32, i32, i32)> = std::sync::OnceLock::new();
-    *VERSION.get_or_init(|| {
-        let release = release();
-        let mut parts = release.split('.').map(|p| p.parse::<i32>().unwrap_or(0));
-        let darwin = parts.next().unwrap_or(24);
-        let minor = parts.next().unwrap_or(0);
-        let patch = parts.next().unwrap_or(0);
-        match darwin >= 20 {
-            true => (darwin - 9, minor, patch),
-            false => (10, darwin - 4, minor),
-        }
-    })
-}
-
-/// `kern.osproductversion`, spelled as macOS does: no patch component when it is 0.
-fn product_version() -> String {
-    let (major, minor, patch) = macos_version();
-    match patch {
-        0 => format!("{major}.{minor}"),
-        _ => format!("{major}.{minor}.{patch}"),
-    }
-}
-
-fn build() -> String {
-    env_or("ROSEMARY_DARWIN_BUILD", "24A335")
+    prefix::release::macos_version()
 }
 
 fn version() -> String {
@@ -1213,17 +1173,6 @@ pub(crate) fn lock_guest_arch(arch: GuestArch) -> std::sync::MutexGuard<'static,
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_release_and_the_macos_version_keep_agreeing() {
-        let version = macos_version();
-        let first = release();
-        // SAFETY: no other test reads or writes this variable.
-        unsafe { std::env::set_var("ROSEMARY_DARWIN_RELEASE", "99.0.0") };
-        assert_eq!(release(), first);
-        assert_eq!(macos_version(), version);
-        unsafe { std::env::remove_var("ROSEMARY_DARWIN_RELEASE") };
-    }
 
     /// Ask a key the way a guest does, and get the bytes back.
     fn ask(mib: &[i32]) -> Option<Vec<u8>> {
