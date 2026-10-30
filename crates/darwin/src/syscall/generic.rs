@@ -66,6 +66,42 @@ fn handle_unix_syscall(number: u32, args: [u64; 6]) -> Result<u64, i32> {
         numbers::bsd::SYS_madvise => {
             unix_call!(unsafe crate::vmmap::madvise(args[1], args[2], args[3]))
         }
+        numbers::bsd::SYS_fcntl => {
+            unix_call!(unsafe crate::fcntl::entry::fcntl(args[0], args[1], args[2]))
+        }
+        numbers::bsd::SYS_socket => {
+            unix_call!(unsafe crate::net::socket::socket(args[0], args[1], args[2]))
+        }
+        numbers::bsd::SYS_connect => {
+            unix_call!(unsafe crate::net::socket::connect(args[0], args[1], args[2]))
+        }
+        numbers::bsd::SYS_disconnectx => {
+            unix_call!(unsafe crate::net::socket::disconnectx(args[0], args[1], args[2]))
+        }
+        numbers::bsd::SYS_socketpair => {
+            unix_call!(unsafe crate::net::socket::socketpair(args[0], args[1], args[2], args[3]))
+        }
+        numbers::bsd::SYS_exit => unsafe {
+            libc::_exit(args[0] as _);
+        },
+        numbers::bsd::SYS_open_dprotected_np => {
+            unix_call!(unsafe crate::stat::open_dprotected_np(args[0], args[1], args[2], args[3], args[4]))
+        }
+        numbers::bsd::SYS_access => {
+            unix_call!(unsafe crate::stat::access(args[0], args[1]))
+        }
+        numbers::bsd::SYS_stat | numbers::bsd::SYS_stat64 => {
+            unix_call!(unsafe crate::stat::stat(args[0], args[1]))
+        }
+        numbers::bsd::SYS_fstat | numbers::bsd::SYS_fstat64 => {
+            unix_call!(unsafe crate::stat::fstat(args[0], args[1]))
+        }
+        numbers::bsd::SYS_statfs | numbers::bsd::SYS_statfs64 => {
+            unix_call!(unsafe crate::stat::statfs(args[0], args[1]))
+        }
+        numbers::bsd::SYS_fstatfs | numbers::bsd::SYS_fstatfs64 => {
+            unix_call!(unsafe crate::stat::fstatfs(args[0], args[1]))
+        }
         _ => Err(DARWIN_ENOSYS),
     }
 }

@@ -81,7 +81,7 @@ fn kind_to_host(darwin: i32) -> i32 {
 }
 
 /// `int socket(int domain, int type, int protocol)`
-unsafe extern "C" fn socket(domain: i32, kind: i32, protocol: i32) -> i32 {
+pub unsafe extern "C" fn socket(domain: i32, kind: i32, protocol: i32) -> i32 {
     let Some(domain) = addr::family_to_host(domain) else {
         crate::errno::set(libc::EAFNOSUPPORT);
         return -1;
@@ -97,7 +97,7 @@ unsafe extern "C" fn socket(domain: i32, kind: i32, protocol: i32) -> i32 {
 /// # Safety
 ///
 /// `sv` is two writable `int`s.
-unsafe extern "C" fn socketpair(domain: i32, kind: i32, protocol: i32, sv: *mut i32) -> i32 {
+pub unsafe extern "C" fn socketpair(domain: i32, kind: i32, protocol: i32, sv: *mut i32) -> i32 {
     let Some(domain) = addr::family_to_host(domain) else {
         crate::errno::set(libc::EAFNOSUPPORT);
         return -1;
@@ -164,7 +164,7 @@ unsafe extern "C" fn bind(fd: i32, address: *const c_void, len: u32) -> i32 {
 /// # Safety
 ///
 /// As [`bind`].
-unsafe extern "C" fn connect(fd: i32, address: *const c_void, len: u32) -> i32 {
+pub unsafe extern "C" fn connect(fd: i32, address: *const c_void, len: u32) -> i32 {
     // SAFETY: the caller's guarantee, passed along.
     unsafe { with_address(fd, address, len, libc::connect) }
 }
@@ -1010,7 +1010,7 @@ unsafe extern "C" fn connectx(
 /// Darwin resets a connection with unread data or a zero linger, and leaves
 /// unread data to be received where Darwin discards it. A UDP disconnect keeps
 /// an address the socket was explicitly bound to where Darwin clears it.
-unsafe extern "C" fn disconnectx(fd: i32, aid: u32, _cid: u32) -> i32 {
+pub unsafe extern "C" fn disconnectx(fd: i32, aid: u32, _cid: u32) -> i32 {
     let Some((family, kind)) = family_and_type(fd) else {
         return -1;
     };
