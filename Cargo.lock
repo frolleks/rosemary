@@ -157,7 +157,7 @@ checksum = "e149dc73cd30538307e7ffa2acd3d2221148eaeed4871f246657b1c3eaa1cbd2"
 
 [[package]]
 name = "appkit"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "chrome",
  "corefoundation",
@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "applicationservices"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "appkit",
  "exports",
@@ -234,7 +234,7 @@ checksum = "21e4227379beff4205943696e6c3e0cd809bacdf3f0edd6e3dd153e2269571a4"
 
 [[package]]
 name = "audiotoolbox"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "coreaudio",
  "darwin",
@@ -250,7 +250,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "avfoundation"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "corefoundation",
  "darwin",
@@ -489,7 +489,7 @@ dependencies = [
 
 [[package]]
 name = "chrome"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "ab_glyph_rasterizer",
  "owned_ttf_parser",
@@ -570,7 +570,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "contacts"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "corefoundation",
  "exports",
@@ -612,7 +612,7 @@ checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 
 [[package]]
 name = "coreaudio"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "corefoundation",
  "darwin",
@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "corefoundation"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "darwin",
  "exports",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "coremedia"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "corefoundation",
  "exports",
@@ -650,7 +650,7 @@ dependencies = [
 
 [[package]]
 name = "coreservices"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "corefoundation",
  "darwin",
@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "coretext"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "chrome",
  "corefoundation",
@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "corevideo"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "corefoundation",
  "darwin",
@@ -963,7 +963,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "darwin"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "aes",
  "backtrace",
@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "exports"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "machish",
 ]
@@ -1215,7 +1215,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "forcefeedback"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "corefoundation",
  "exports",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "foundation"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "corefoundation",
  "darwin",
@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "gamecontroller"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "corefoundation",
  "exports",
@@ -1803,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "iokit"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "corefoundation",
  "exports",
@@ -1814,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "iosurface"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "corefoundation",
  "exports",
@@ -1859,7 +1859,7 @@ dependencies = [
 
 [[package]]
 name = "launcher"
-version = "0.4.1"
+version = "0.5.0"
 
 [[package]]
 name = "lazy_static"
@@ -1969,7 +1969,7 @@ checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
 name = "machish"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "libc",
 ]
@@ -1986,7 +1986,7 @@ dependencies = [
 
 [[package]]
 name = "mediabackend"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "gstreamer",
  "gstreamer-app",
@@ -2010,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "metal"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "appkit",
  "ash",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "metal_translate"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "ash",
  "half",
@@ -2104,7 +2104,7 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "network"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "corefoundation",
  "darwin",
@@ -2171,7 +2171,7 @@ dependencies = [
 
 [[package]]
 name = "objc"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "exports",
  "libc",
@@ -2224,7 +2224,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opencl"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "exports",
 ]
@@ -2381,7 +2381,7 @@ dependencies = [
 
 [[package]]
 name = "prefix"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "flate2",
  "libc",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "rosemary"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "appkit",
  "applicationservices",
@@ -2780,14 +2780,14 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "sdl3"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "security"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "corefoundation",
  "darwin",
@@ -2847,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "libc",
  "starnix",
@@ -2971,7 +2971,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "starnix"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "libc",
  "rustix 1.1.5",
@@ -3448,7 +3448,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "videotoolbox"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "corefoundation",
  "coremedia",
@@ -3588,7 +3588,7 @@ dependencies = [
 
 [[package]]
 name = "webkit"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "appkit",
  "corefoundation",
