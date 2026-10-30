@@ -837,6 +837,81 @@ pub unsafe extern "C" fn mkdtempat_np(dfd: c_int, path: *mut c_char) -> *mut c_c
     std::ptr::null_mut()
 }
 
+/// Darwin's temporary-name alphabet, in its order: a collision advances a
+/// character to the next one here.
+const TEMP_PADCHAR: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/// `char *_mktemp(char *path)`, which Darwin's `mktemp` is.
+///
+/// Darwin's `_gettemp` without a descriptor: the trailing `X`s are randomised,
+/// then the name is stepped through the alphabet until `lstat` finds nothing.
+/// Only the guest's buffer is rewritten; each candidate is looked up by its
+/// guest spelling, case-folded as every other lookup is.
+///
+/// # Safety
+///
+/// `path` is a writable NUL-terminated template.
+pub unsafe extern "C" fn _mktemp(path: *mut c_char) -> *mut c_char {
+    if path.is_null() {
+        crate::errno::set(libc::EFAULT);
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the caller's NUL-terminated string.
+    let len = unsafe { libc::strlen(path) };
+    if len >= DARWIN_PATH_MAX {
+        crate::errno::set(libc::ENAMETOOLONG);
+        return std::ptr::null_mut();
+    }
+    if len == 0 {
+        crate::errno::set(libc::EINVAL);
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the caller's template, writable for its own length.
+    let template = unsafe { std::slice::from_raw_parts_mut(path.cast::<u8>(), len) };
+    let start = len - template.iter().rev().take_while(|b| **b == b'X').count();
+    let mut random = vec![0u8; (len - start) * size_of::<u32>()];
+    if getrandom::fill(&mut random).is_err() {
+        crate::errno::set(libc::EIO);
+        return std::ptr::null_mut();
+    }
+    for (slot, word) in template[start..]
+        .iter_mut()
+        .zip(random.chunks_exact(size_of::<u32>()))
+    {
+        let word = u32::from_ne_bytes(word.try_into().unwrap());
+        *slot = TEMP_PADCHAR[word as usize % TEMP_PADCHAR.len()];
+    }
+    let first = template[start..].to_vec();
+    loop {
+        // SAFETY: the template, rewritten in place and still NUL-terminated;
+        // a null `struct stat` asks only whether the name exists.
+        if unsafe { crate::stat::lstat(template.as_ptr().cast(), std::ptr::null_mut()) } != 0 {
+            return match crate::errno::get() {
+                libc::ENOENT => path,
+                _ => std::ptr::null_mut(),
+            };
+        }
+        // Count through every name the `X`s can spell, as an odometer started
+        // at the first random draw, so each is tried once.
+        let mut at = start;
+        loop {
+            if at == len {
+                crate::errno::set(libc::EEXIST);
+                return std::ptr::null_mut();
+            }
+            let next = TEMP_PADCHAR
+                .iter()
+                .position(|c| *c == template[at])
+                .map_or(0, |i| (i + 1) % TEMP_PADCHAR.len());
+            template[at] = TEMP_PADCHAR[next];
+            if template[at] != first[at - start] {
+                break;
+            }
+            at += 1;
+        }
+    }
+}
+
 /// The host spelling of a `XXXXXX` template, and how many bytes the caller's
 /// buffer holds for the name.
 ///
@@ -1009,6 +1084,8 @@ exports::exports! {
         "mkstemp" => mkstemp,
         "mkdtemp" => mkdtemp,
         "mkdtempat_np" => mkdtempat_np,
+        "_mktemp" => _mktemp,
+        "mktemp" => _mktemp,
     }
 }
 
@@ -1252,6 +1329,44 @@ mod tests {
         assert!(!scratch.0.join("root/sub/dir").exists());
         assert!(scratch.0.join("outside").exists());
         assert!(!scratch.0.join("root/up").exists());
+        crate::errno::set(0);
+    }
+
+    #[test]
+    fn mktemp_names_a_free_file_without_creating_it() {
+        let scratch = Scratch::new("mktemp-free");
+        let template = scratch.c_path("name.XXXXXX");
+        let mut buffer = template.into_bytes_with_nul();
+        let path = buffer.as_mut_ptr().cast::<c_char>();
+        // SAFETY: a writable NUL-terminated template.
+        assert_eq!(unsafe { _mktemp(path) }, path);
+        // SAFETY: rewritten in place, still NUL-terminated.
+        let made = unsafe { CStr::from_ptr(path) }.to_str().unwrap();
+        let name = made.rsplit('/').next().unwrap();
+        assert_eq!(name.len(), "name.XXXXXX".len());
+        assert!(name[5..].bytes().all(|b| TEMP_PADCHAR.contains(&b)));
+        assert!(!Path::new(made).exists());
+    }
+
+    #[test]
+    fn mktemp_steps_past_taken_names_and_reports_exhaustion() {
+        let scratch = Scratch::new("mktemp-taken");
+        // One `X` spells 62 names; with all but one taken, the free one is found.
+        for &c in &TEMP_PADCHAR[1..] {
+            std::fs::write(scratch.0.join(format!("f{}", c as char)), b"").unwrap();
+        }
+        let mut buffer = scratch.c_path("fX").into_bytes_with_nul();
+        let path = buffer.as_mut_ptr().cast::<c_char>();
+        // SAFETY: a writable NUL-terminated template.
+        assert_eq!(unsafe { _mktemp(path) }, path);
+        // SAFETY: rewritten in place, still NUL-terminated.
+        assert!(unsafe { CStr::from_ptr(path) }.to_bytes().ends_with(b"/f0"));
+
+        std::fs::write(scratch.0.join("f0"), b"").unwrap();
+        let mut buffer = scratch.c_path("fX").into_bytes_with_nul();
+        // SAFETY: as above.
+        assert!(unsafe { _mktemp(buffer.as_mut_ptr().cast()) }.is_null());
+        assert_eq!(crate::errno::get(), libc::EEXIST);
         crate::errno::set(0);
     }
 }

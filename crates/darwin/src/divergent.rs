@@ -226,9 +226,9 @@ pub const NAMES: &[(&str, &str)] = &[
     ("newlocale", "the LC_*_MASK values differ"),
     ("duplocale", "a null locale has different semantics"),
     ("freelocale", "Darwin returns int and glibc returns void"),
-    // These are still unsupported: `nl_item` is another platform-specific
-    // integer namespace, and passing Darwin's value to glibc asks a different
-    // question (or indexes no item at all).
+    // `nl_item` is another platform-specific integer namespace, and passing
+    // Darwin's value to glibc asks a different question (or indexes no item at
+    // all). `crate::langinfo` translates it.
     ("nl_langinfo", "the nl_item values differ"),
     ("nl_langinfo_l", "the nl_item values differ"),
     ("dladdr", "Dl_info is laid out differently"),
