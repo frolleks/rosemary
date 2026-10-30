@@ -1492,7 +1492,7 @@ pub(crate) mod button_type {
 }
 
 /// `NSCellStyleMask`, what `-highlightsBy` and `-showsStateBy` hold.
-mod cell_mask {
+pub(crate) mod cell_mask {
     pub const CONTENTS: usize = 1;
     pub const PUSH_IN: usize = 2;
     pub const CHANGE_GRAY: usize = 4;

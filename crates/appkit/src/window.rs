@@ -2208,6 +2208,44 @@ unsafe extern "C" fn display_window(receiver: Id, _sel: Sel) {
     }
 }
 
+/// A window coming onto the screen with no first responder gets its initial
+/// first responder, or else the first view of its key view loop that takes
+/// it, before it becomes key. Qt ignores becoming key unless its view is
+/// already first responder by then.
+///
+/// FIXME (ACCURACY): the key view loop is only the one a program wired;
+/// AppKit's automatic loop over every subview is not computed.
+fn set_up_first_responder(receiver: Id) {
+    let window = window_of(receiver);
+    if !window.first_responder.is_null() {
+        return;
+    }
+    let initial = match window.initial_first_responder {
+        initial if !initial.is_null() => initial,
+        _ => default_first_responder(receiver),
+    };
+    if !initial.is_null() {
+        // SAFETY: this window, and a responder in it.
+        unsafe { make_first_responder(receiver, objc::sel::get("makeFirstResponder:"), initial) };
+    }
+}
+
+fn default_first_responder(receiver: Id) -> Id {
+    let content = content_view_of(receiver);
+    if content.is_null() || crate::event::accepts_first_responder(content) {
+        return content;
+    }
+    // SAFETY: `-nextValidKeyView` is `NSView *(id, SEL)`.
+    let next = unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc::msg::entry());
+        f(content, objc::sel::get("nextValidKeyView"))
+    };
+    match crate::event::accepts_first_responder(next) {
+        true => next,
+        false => std::ptr::null_mut(),
+    }
+}
+
 unsafe extern "C" fn make_key_and_order_front(receiver: Id, _sel: Sel, _sender: Id) {
     order_front(receiver, true);
 }
@@ -2266,15 +2304,10 @@ fn order_front(receiver: Id, make_key: bool) {
         sdl3::video::window_position(sdl),
         sdl3::video::window_size(sdl),
     );
+    set_up_first_responder(receiver);
     if make_key && want != Presentation::Tooltip {
         KEY.store(receiver as usize, std::sync::atomic::Ordering::Release);
         crate::event::announce_key(receiver);
-    }
-    let window = window_of(receiver);
-    if window.first_responder.is_null() && !window.initial_first_responder.is_null() {
-        let initial = window.initial_first_responder;
-        // SAFETY: this window, and a responder the guest named.
-        unsafe { make_first_responder(receiver, objc::sel::get("makeFirstResponder:"), initial) };
     }
     // Where the window actually ended up. On a Mac a window is placed exactly
     // where it was asked to be, so a toolkit has no reason to look again; here
@@ -4955,6 +4988,38 @@ mod tests {
         let answered = unsafe { make_first_responder(window, objc::sel::get("x"), engine) };
         assert_eq!(answered, 1);
         assert_eq!(window_of(window).first_responder, handler);
+    }
+
+    unsafe extern "C" fn accepts(_receiver: Id, _sel: Sel) -> u8 {
+        1
+    }
+
+    #[test]
+    fn a_window_ordered_in_makes_a_content_view_that_accepts_it_first_responder() {
+        crate::bootstrap();
+        let view = objc::class::lookup(c"NSView").expect("NSView");
+        let accepting = objc::class::allocate_pair(Some(view), c"AcceptingContentView", 0)
+            .expect("a class of this name is not declared elsewhere");
+        accepting.add_method(
+            objc::sel::get("acceptsFirstResponder"),
+            accepts as objc::class::Imp,
+            c"c16@0:8",
+        );
+        objc::class::register_pair(accepting);
+        let window_class = objc::class::lookup(c"NSWindow").expect("NSWindow");
+        for (class, takes_it) in [(view, false), (accepting, true)] {
+            let window = objc::object::create_instance(window_class, 0);
+            let content = objc::object::create_instance(class, 0);
+            // SAFETY: `-setContentView:` is `void (id, SEL, id)`.
+            unsafe { set_content_view(window, objc::sel::get("setContentView:"), content) };
+            set_up_first_responder(window);
+            let expected = if takes_it {
+                content
+            } else {
+                std::ptr::null_mut()
+            };
+            assert_eq!(window_of(window).first_responder, expected);
+        }
     }
 
     #[test]

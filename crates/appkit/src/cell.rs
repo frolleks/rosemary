@@ -805,7 +805,9 @@ pub(crate) fn draw_bezel(cell: Id, frame: foundation::geometry::NSRect) -> bool 
     let Some(port) = current_port() else {
         return false;
     };
-    if let Some(drawn @ (Drawn::Push | Drawn::Bevel | Drawn::Round)) = drawn_as(cell) {
+    if let Some(drawn @ (Drawn::Push | Drawn::Bevel | Drawn::Round | Drawn::Popup { .. })) =
+        drawn_as(cell)
+    {
         paint(cell, drawn, frame, port);
     }
     true
@@ -853,7 +855,18 @@ fn paint(
     };
     use crate::aqua;
     match drawn {
-        Drawn::Push => aqua::push_button(&p, frame, size, look),
+        Drawn::Push => {
+            // A push-on-push-off button that is on shows its state the way the
+            // default button looks: in the accent colour.
+            use crate::controls::cell_mask::{CHANGE_BACKGROUND, CHANGE_GRAY};
+            let shows_on = value == aqua::Value::On
+                && ask(cell, "showsStateBy", 0) & (CHANGE_BACKGROUND | CHANGE_GRAY) != 0;
+            let look = aqua::Look {
+                default: look.default || shows_on,
+                ..look
+            };
+            aqua::push_button(&p, frame, size, look)
+        }
         Drawn::Bevel => aqua::bevel_button(&p, frame, look),
         Drawn::Round => aqua::round_button(&p, frame, look),
         Drawn::Check => aqua::check_box(&p, frame, size, value, look),
@@ -1273,6 +1286,67 @@ mod tests {
         });
         assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
         objc::arc::release(cell);
+    }
+
+    fn draw_bezel_into(cell: Id, pixels: &mut [u8; SIDE * SIDE * 4]) {
+        with_current_bitmap(pixels, || {
+            // SAFETY: `-drawBezelWithFrame:inView:` takes a rect and a view.
+            unsafe {
+                let f: unsafe extern "C" fn(Id, Sel, foundation::geometry::NSRect, Id) =
+                    std::mem::transmute(objc::msg::entry());
+                f(
+                    cell,
+                    objc::sel::get("drawBezelWithFrame:inView:"),
+                    whole(),
+                    std::ptr::null_mut(),
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn a_pop_up_button_cell_bezel_is_drawn_into_the_current_context() {
+        crate::bootstrap();
+        let class = objc::class::lookup(c"NSPopUpButtonCell").expect("NSPopUpButtonCell");
+        // SAFETY: a fresh cell and `-init`.
+        let cell = unsafe { send(objc::object::create_instance(class, 0), "init") } as Id;
+        let mut pixels = [0u8; SIDE * SIDE * 4];
+        draw_bezel_into(cell, &mut pixels);
+        assert!(
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|[.., alpha]| *alpha != 0)
+        );
+        objc::arc::release(cell);
+    }
+
+    #[test]
+    fn a_push_on_push_off_bezel_shows_on_in_the_accent_colour() {
+        crate::bootstrap();
+        let centre = (SIDE / 2 * SIDE + SIDE / 2) * 4;
+        let face = |state: usize| {
+            let cell = new_button_cell("");
+            let mut pixels = [0u8; SIDE * SIDE * 4];
+            // SAFETY: each selector takes the word-sized argument given.
+            unsafe {
+                // NSButtonTypePushOnPushOff, NSBezelStyleRounded.
+                send_word(cell, "setButtonType:", 1);
+                send_word(cell, "setBezelStyle:", 1);
+                send_word(cell, "setState:", state);
+            }
+            draw_bezel_into(cell, &mut pixels);
+            objc::arc::release(cell);
+            let [red, _, blue, _] = pixels[centre..centre + 4] else {
+                unreachable!()
+            };
+            (red, blue)
+        };
+        let (red, blue) = face(1);
+        assert!(blue > red.saturating_add(0x40), "on: {red} {blue}");
+        let (red, blue) = face(0);
+        assert!(blue < red.saturating_add(0x20), "off: {red} {blue}");
     }
 
     /// The red of a pixel inside a check box drawn in the named appearance.

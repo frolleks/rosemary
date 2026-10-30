@@ -3360,8 +3360,13 @@ unsafe extern "C" fn no(_receiver: Id, _sel: Sel) -> u8 {
 
 /// Whether `imp` is NSView's own `-acceptsFirstResponder`. It answers yes for
 /// every view, so it says nothing about whether a click should focus one.
+///
+/// Compared with the IMP NSView holds, not with `yes`: a function's address
+/// is not unique, and codegen can give the registered copy another.
 pub(crate) fn is_default_accepts_first_responder(imp: objc::class::Imp) -> bool {
-    imp == yes as objc::class::Imp
+    objc::class::lookup(c"NSView")
+        .and_then(|class| class.method(objc::sel::get("acceptsFirstResponder")))
+        .is_some_and(|method| method.implementation() == imp)
 }
 
 /// `-display`: draw the view now.

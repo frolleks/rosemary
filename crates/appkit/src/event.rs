@@ -1213,22 +1213,27 @@ pub fn route(window: Id, event: Id) {
     }
 }
 
-fn focus_clicked(window: Id, view: Id) {
+/// Whether `view` takes first responder by its own answer: NSView's default
+/// here says yes for every view, so it does not count.
+pub(crate) fn accepts_first_responder(view: Id) -> bool {
     let sel = objc::sel::get("acceptsFirstResponder");
     // SAFETY: null or a live object this runtime allocated.
     let Some(method) = unsafe { objc::object::class_of(view) }.and_then(|c| c.method(sel)) else {
-        return;
+        return false;
     };
     if crate::view::is_default_accepts_first_responder(method.implementation()) {
-        return;
+        return false;
     }
     // SAFETY: `BOOL (id, SEL)`, the class's own implementation.
-    let accepts = unsafe {
+    unsafe {
         let f: unsafe extern "C" fn(Id, objc::sel::Sel) -> u8 =
             std::mem::transmute(method.implementation());
         f(view, sel) != 0
-    };
-    if !accepts || responder_of(window) == view {
+    }
+}
+
+fn focus_clicked(window: Id, view: Id) {
+    if !accepts_first_responder(view) || responder_of(window) == view {
         return;
     }
     // SAFETY: `-makeFirstResponder:` is `BOOL (id, SEL, NSResponder *)`.
