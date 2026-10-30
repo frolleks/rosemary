@@ -2296,3 +2296,103 @@ fn a_texture_buffer_reads_the_buffer_it_was_made_from() {
         assert_eq!(*contents, 30 + 4);
     }
 }
+
+/// MoltenVK fills in the vertex descriptor a pipeline descriptor vends instead
+/// of setting one, and a set descriptor is a copy the guest can go on editing.
+#[test]
+fn a_pipeline_descriptor_vends_and_copies_its_vertex_descriptor() {
+    isolate_metal_fixture!();
+    bootstrap();
+    const FLOAT3: u64 = 30;
+    let class_of = |name: &std::ffi::CStr| {
+        objc::class::ptr(objc::class::lookup(name).expect("registered")) as Id
+    };
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        let descriptor = send(
+            send(class_of(c"MTLRenderPipelineDescriptor"), "alloc"),
+            "init",
+        );
+        let vended = send(descriptor, "vertexDescriptor");
+        assert!(!vended.is_null());
+        assert_eq!(vended, send(descriptor, "vertexDescriptor"));
+        send_number(
+            element_at(send(vended, "attributes"), 2),
+            "setFormat:",
+            FLOAT3,
+        );
+        let held = object::body::<pipeline::RenderPipelineDescriptor>(descriptor).vertex_descriptor;
+        assert_eq!(
+            object::body::<resource::VertexDescriptor>(held).attributes[2].format,
+            FLOAT3
+        );
+
+        let own = send(send(class_of(c"MTLVertexDescriptor"), "alloc"), "init");
+        let attribute = element_at(send(own, "attributes"), 0);
+        send_number(attribute, "setFormat:", FLOAT3);
+        send_with_object(descriptor, "setVertexDescriptor:", own);
+        send_number(attribute, "setFormat:", 0);
+        let held = send(descriptor, "vertexDescriptor");
+        assert_ne!(held, own);
+        assert_eq!(
+            object::body::<resource::VertexDescriptor>(held).attributes[0].format,
+            FLOAT3
+        );
+    }
+}
+
+/// Each dispatch reads what the one before it wrote: in a serial encoder by
+/// Metal's ordering, in a concurrent one by the barrier between them.
+#[test]
+fn serial_dispatches_and_concurrent_barriers_order_writes() {
+    isolate_metal_fixture!();
+    let Some(device) = gpu_device() else {
+        return;
+    };
+    const STEPS: u32 = 256;
+    const DISPATCH_SERIAL: u64 = 0;
+    const DISPATCH_CONCURRENT: u64 = 1;
+    const SCOPE_BUFFERS: u64 = 1;
+    let library = source_library(
+        device,
+        "kernel void step(device uint* value [[buffer(0)]]) { value[0] = value[0] + 1; }",
+    );
+    // SAFETY: objects this test made, sent the selectors they implement.
+    unsafe {
+        let function = new_function_with_name(
+            library,
+            std::ptr::null(),
+            foundation::string::from_str("step"),
+        );
+        let mut error = std::ptr::null_mut();
+        let pipeline = new_compute_pipeline(device, std::ptr::null(), function, &mut error);
+        assert!(!pipeline.is_null());
+        let queue = new_command_queue(device, std::ptr::null());
+        for dispatch_type in [DISPATCH_SERIAL, DISPATCH_CONCURRENT] {
+            let buffer = new_buffer(device, std::ptr::null(), 16, 0);
+            let command = send(queue, "commandBuffer");
+            let (make, sel) = method::<unsafe extern "C" fn(Id, Sel, u64) -> Id>(
+                command,
+                "computeCommandEncoderWithDispatchType:",
+            );
+            let encoder = make(command, sel, dispatch_type);
+            send_with_object(encoder, "setComputePipelineState:", pipeline);
+            set_buffer_at(encoder, buffer, 0, 0);
+            for _ in 0..STEPS {
+                dispatch(encoder, 1);
+                if dispatch_type == DISPATCH_CONCURRENT {
+                    send_number(encoder, "memoryBarrierWithScope:", SCOPE_BUFFERS);
+                }
+            }
+            send_void(encoder, "endEncoding");
+            send_void(command, "commit");
+            send_void(command, "waitUntilCompleted");
+            let contents = object::body::<resource::Buffer>(buffer).inner.contents;
+            assert_eq!(
+                std::ptr::read(contents as *const u32),
+                STEPS,
+                "type {dispatch_type}"
+            );
+        }
+    }
+}

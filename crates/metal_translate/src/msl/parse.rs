@@ -790,6 +790,11 @@ impl Parser<'_> {
         if let Some((scalar, lanes)) = word.strip_prefix("packed_").and_then(vector_named) {
             return Ok(Ty::Packed(scalar, lanes));
         }
+        if let Some(fields) = standard_struct_fields(&word, line) {
+            let index = self.program.structs.len();
+            self.program.structs.push(StructDef { name: word, fields });
+            return Ok(Ty::Struct(index));
+        }
         Err(syntax_error(line, format!("unknown type {word}")))
     }
 
@@ -1623,4 +1628,56 @@ fn inline_sampler_value(
         _ => return None,
     }
     Some(())
+}
+
+/// The indirect argument layouts `<metal_stdlib>` declares, which a library
+/// uses without declaring them. Each is defined where it is first named, so a
+/// library which declares its own keeps it.
+fn standard_struct_fields(name: &str, line: usize) -> Option<Vec<Field>> {
+    let uint = || {
+        Ty::Scalar(Scalar::Int {
+            signed: false,
+            bits: 32,
+        })
+    };
+    let int = Ty::Scalar(Scalar::Int {
+        signed: true,
+        bits: 32,
+    });
+    let members: Vec<(&str, Ty)> = match name {
+        "MTLDrawPrimitivesIndirectArguments" => vec![
+            ("vertexCount", uint()),
+            ("instanceCount", uint()),
+            ("vertexStart", uint()),
+            ("baseInstance", uint()),
+        ],
+        "MTLDrawIndexedPrimitivesIndirectArguments" => vec![
+            ("indexCount", uint()),
+            ("instanceCount", uint()),
+            ("indexStart", uint()),
+            ("baseVertex", int),
+            ("baseInstance", uint()),
+        ],
+        "MTLDrawPatchIndirectArguments" => vec![
+            ("patchCount", uint()),
+            ("instanceCount", uint()),
+            ("patchStart", uint()),
+            ("baseInstance", uint()),
+        ],
+        "MTLDispatchThreadgroupsIndirectArguments" => {
+            vec![("threadgroupsPerGrid", Ty::Array(Box::new(uint()), 3))]
+        }
+        _ => return None,
+    };
+    Some(
+        members
+            .into_iter()
+            .map(|(name, ty)| Field {
+                name: name.to_string(),
+                ty,
+                attributes: Vec::new(),
+                line,
+            })
+            .collect(),
+    )
 }

@@ -186,6 +186,9 @@ pub(crate) struct CommandBuffer {
 pub(crate) struct Encoder {
     pub command_buffer: Id,
     pub kind: Kind,
+    /// `MTLDispatchTypeConcurrent`: dispatches may overlap, and the guest
+    /// orders them with memory barriers. Every other compute encoder is serial.
+    concurrent: bool,
     compute_pipeline: Id,
     render_pipeline: Id,
     depth_state: Id,
@@ -577,8 +580,11 @@ pub(crate) fn install() {
         // which is everything a fence could ask for.
         "updateFence:afterStages:" => crate::no_op, c"v32@0:8@16Q24";
         "waitForFence:beforeStages:" => crate::no_op, c"v32@0:8@16Q24";
-        "memoryBarrierWithScope:" => crate::no_op, c"v24@0:8Q16";
-        "memoryBarrierWithScope:afterStages:beforeStages:" => crate::no_op, c"v40@0:8Q16Q24Q32";
+        "memoryBarrierWithScope:" => memory_barrier, c"v24@0:8Q16";
+        "memoryBarrierWithScope:afterStages:beforeStages:" => memory_barrier, c"v40@0:8Q16Q24Q32";
+        "memoryBarrierWithResources:count:" => memory_barrier, c"v32@0:8^@16Q24";
+        "memoryBarrierWithResources:count:afterStages:beforeStages:" => memory_barrier,
+            c"v48@0:8^@16Q24Q32Q40";
         "useResource:usage:stages:" => crate::no_op, c"v40@0:8@16Q24Q32";
         "useHeap:" => crate::no_op, c"v24@0:8@16";
         "setStencilFrontReferenceValue:backReferenceValue:" => set_stencil_references,
@@ -646,6 +652,8 @@ pub(crate) fn install() {
 
     methods!(command, {
         "computeCommandEncoder" => new_compute_encoder, c"@16@0:8";
+        "computeCommandEncoderWithDispatchType:" => new_compute_encoder_with_dispatch_type,
+            c"@24@0:8Q16";
         "blitCommandEncoder" => new_blit_encoder, c"@16@0:8";
         "renderCommandEncoderWithDescriptor:" => new_render_encoder, c"@24@0:8@16";
         "parallelRenderCommandEncoderWithDescriptor:" => new_parallel_encoder,

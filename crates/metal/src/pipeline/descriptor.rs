@@ -141,13 +141,22 @@ pub(super) unsafe extern "C" fn set_descriptor_object(receiver: Id, sel: Sel, va
     // SAFETY: a render pipeline descriptor of this crate's.
     let descriptor = unsafe { object::body::<RenderPipelineDescriptor>(receiver) };
     // SAFETY: a selector the runtime owns.
-    let slot = match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
-        b"setVertexFunction:" => &mut descriptor.vertex_function,
-        b"setFragmentFunction:" => &mut descriptor.fragment_function,
-        b"setVertexDescriptor:" => &mut descriptor.vertex_descriptor,
+    let (slot, owned) = match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
+        b"setVertexFunction:" => (&mut descriptor.vertex_function, objc::arc::retain(value)),
+        b"setFragmentFunction:" => (&mut descriptor.fragment_function, objc::arc::retain(value)),
+        // A `copy` property: a guest which goes on editing its descriptor
+        // must not change this one.
+        b"setVertexDescriptor:" if value.is_null() => {
+            (&mut descriptor.vertex_descriptor, std::ptr::null_mut())
+        }
+        b"setVertexDescriptor:" => (
+            &mut descriptor.vertex_descriptor,
+            // SAFETY: `MTLVertexDescriptor` is this crate's class.
+            unsafe { crate::resource::copy_vertex_descriptor(value) },
+        ),
         _ => return,
     };
-    objc::arc::release(std::mem::replace(slot, objc::arc::retain(value)));
+    objc::arc::release(std::mem::replace(slot, owned));
 }
 
 pub(super) unsafe extern "C" fn descriptor_object(receiver: Id, sel: Sel) -> Id {
@@ -157,7 +166,14 @@ pub(super) unsafe extern "C" fn descriptor_object(receiver: Id, sel: Sel) -> Id 
     match unsafe { std::ffi::CStr::from_ptr(sel) }.to_bytes() {
         b"vertexFunction" => descriptor.vertex_function,
         b"fragmentFunction" => descriptor.fragment_function,
-        b"vertexDescriptor" => descriptor.vertex_descriptor,
+        // Never nil in Metal: MoltenVK fills in the one this vends rather
+        // than setting its own.
+        b"vertexDescriptor" => {
+            if descriptor.vertex_descriptor.is_null() {
+                descriptor.vertex_descriptor = crate::resource::new_empty_vertex_descriptor();
+            }
+            descriptor.vertex_descriptor
+        }
         _ => std::ptr::null_mut(),
     }
 }

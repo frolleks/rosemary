@@ -208,16 +208,48 @@ pub(super) unsafe extern "C" fn new_vertex_descriptor(_class: Id, _sel: Sel) -> 
 }
 
 fn autoreleased_vertex_descriptor(class: &std::ffi::CStr) -> Id {
-    let object = object::make(
+    objc::arc::autorelease(vertex_descriptor_with(
+        class,
+        [VertexLayout::default(); VERTEX_SLOTS],
+        [VertexAttribute::default(); VERTEX_SLOTS],
+    ))
+}
+
+fn vertex_descriptor_with(
+    class: &std::ffi::CStr,
+    layouts: [VertexLayout; VERTEX_SLOTS],
+    attributes: [VertexAttribute; VERTEX_SLOTS],
+) -> Id {
+    object::make(
         class,
         VertexDescriptor {
-            layouts: [VertexLayout::default(); VERTEX_SLOTS],
-            attributes: [VertexAttribute::default(); VERTEX_SLOTS],
+            layouts,
+            attributes,
             layout_objects: std::ptr::null_mut(),
             attribute_objects: std::ptr::null_mut(),
         },
-    );
-    objc::arc::autorelease(object)
+    )
+}
+
+/// A new, empty `MTLVertexDescriptor`, owned by the caller.
+pub(crate) fn new_empty_vertex_descriptor() -> Id {
+    vertex_descriptor_with(
+        c"MTLVertexDescriptor",
+        [VertexLayout::default(); VERTEX_SLOTS],
+        [VertexAttribute::default(); VERTEX_SLOTS],
+    )
+}
+
+/// A new `MTLVertexDescriptor` with the values of `source`, owned by the
+/// caller: what a `copy` property stores.
+///
+/// # Safety
+///
+/// `source` must be a vertex descriptor of this crate's.
+pub(crate) unsafe fn copy_vertex_descriptor(source: Id) -> Id {
+    // SAFETY: the caller's contract.
+    let source = unsafe { object::body::<VertexDescriptor>(source) };
+    vertex_descriptor_with(c"MTLVertexDescriptor", source.layouts, source.attributes)
 }
 
 pub(super) unsafe extern "C" fn vertex_descriptor_init(receiver: Id, _sel: Sel) -> Id {

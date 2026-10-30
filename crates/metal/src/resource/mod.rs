@@ -30,7 +30,7 @@ pub(crate) use sampler::{SamplerDescriptor, SamplerState, compare_op, new_sample
 pub(crate) use texture::{Texture, TextureDescriptor, drawable_texture, new_texture};
 pub(crate) use vertex::{
     Element, IndexedCollection, VERTEX_SLOTS, VertexAttribute, VertexDescriptor, VertexLayout,
-    orphan, orphan_element,
+    copy_vertex_descriptor, new_empty_vertex_descriptor, orphan, orphan_element,
 };
 
 pub(crate) struct Buffer {

@@ -1142,6 +1142,23 @@ pub(super) unsafe extern "C" fn new_compute_encoder(receiver: Id, _sel: Sel) -> 
     new_encoder(receiver, Kind::Compute)
 }
 
+/// `MTLDispatchTypeConcurrent`.
+const DISPATCH_CONCURRENT: u64 = 1;
+
+pub(super) unsafe extern "C" fn new_compute_encoder_with_dispatch_type(
+    receiver: Id,
+    _sel: Sel,
+    dispatch_type: u64,
+) -> Id {
+    let encoder = new_encoder(receiver, Kind::Compute);
+    if !encoder.is_null() {
+        // SAFETY: the encoder just made.
+        unsafe { object::body::<Encoder>(encoder) }.concurrent =
+            dispatch_type == DISPATCH_CONCURRENT;
+    }
+    encoder
+}
+
 pub(super) unsafe extern "C" fn new_blit_encoder(receiver: Id, _sel: Sel) -> Id {
     new_encoder(receiver, Kind::Blit)
 }

@@ -2555,3 +2555,30 @@ fn source_msl_reads_texture_buffers_as_texel_buffers() {
     assert!(texture.texel_buffer);
     assert!(texture.sampled);
 }
+
+#[test]
+fn source_msl_knows_the_standard_indirect_argument_structures() {
+    let source = "#include <metal_stdlib>\n\
+        using namespace metal;\n\
+        kernel void main0(const device MTLDrawIndexedPrimitivesIndirectArguments* src [[buffer(0)]],\n\
+                          device MTLDrawIndexedPrimitivesIndirectArguments* dst [[buffer(1)]]) {\n\
+            dst[0] = src[0];\n\
+            dst[0].instanceCount *= 2;\n\
+            dst[0].baseVertex = -src[0].baseVertex;\n\
+        }";
+    let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
+    assert!(library.rejected.is_empty());
+    assert_eq!(library.entries.len(), 1);
+}
+
+#[test]
+fn source_msl_prefers_its_own_declaration_of_a_standard_structure() {
+    let source = "#include <metal_stdlib>\n\
+        using namespace metal;\n\
+        struct MTLDrawPrimitivesIndirectArguments { uint only; };\n\
+        kernel void main0(device MTLDrawPrimitivesIndirectArguments* args [[buffer(0)]]) {\n\
+            args[0].only = 1;\n\
+        }";
+    let library = translate_msl(source, &TargetProfile::vulkan_1_3()).unwrap();
+    assert!(library.rejected.is_empty());
+}

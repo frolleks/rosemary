@@ -10,6 +10,7 @@ pub(crate) fn new_encoder(command_buffer: Id, kind: Kind) -> Id {
         Encoder {
             command_buffer: objc::arc::retain(command_buffer),
             kind,
+            concurrent: false,
             compute_pipeline: std::ptr::null_mut(),
             render_pipeline: std::ptr::null_mut(),
             depth_state: std::ptr::null_mut(),
